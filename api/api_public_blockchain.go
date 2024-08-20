@@ -261,6 +261,27 @@ func (s *PublicBlockChainAPI) GetAccountKey(ctx context.Context, address common.
 	return serAccKey, state.Error()
 }
 
+// AllocateAndTimeout allocates heavy memory and sleep for a long time so that it can be timeout.
+func (s *PublicBlockChainAPI) AllocateAndTimeout() error {
+	startTime := time.Now()
+	defer func() {
+		logger.Info("[AllocateAndTimeout]", "executed time", time.Since(startTime).String())
+	}()
+
+	allocatedMemory := make([]byte, 0)
+	const allocationSize = 10 * 1024 // 10KB (0.01MB)
+	for i := 0; i < 100000; i++ {    // Allocate 1 GB of memory
+		allocatedMemory = append(allocatedMemory, make([]byte, allocationSize)...)
+		// Here, we're just allocating memory and not checking for timeout
+		// The timeout should be handled by the RPC server
+
+		// Simulate some work
+		time.Sleep(10 * time.Millisecond) // Simulate work delay
+	}
+
+	return nil
+}
+
 // IsParallelDBWrite returns if parallel write is enabled or not.
 // If enabled, data written in WriteBlockWithState is being written in parallel manner.
 func (s *PublicBlockChainAPI) IsParallelDBWrite() bool {

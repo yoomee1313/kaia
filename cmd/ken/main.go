@@ -91,7 +91,8 @@ func init() {
 func main() {
 	// Set NodeTypeFlag to en
 	utils.NodeTypeFlag.Value = "en"
-
+	godebug := os.Getenv("GODEBUG")
+	fmt.Println("GODEBUG:", godebug)
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
