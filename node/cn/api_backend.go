@@ -25,6 +25,7 @@ package cn
 import (
 	"context"
 	"fmt"
+	"github.com/kaiachain/kaia/node/cn/tracers"
 	"math/big"
 	"time"
 
@@ -397,11 +398,11 @@ func (b *CNAPIBackend) Engine() consensus.Engine {
 	return b.cn.engine
 }
 
-func (b *CNAPIBackend) StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, checkLive bool, preferDisk bool) (*state.StateDB, error) {
-	return b.cn.stateAtBlock(block, reexec, base, checkLive, preferDisk)
+func (b *CNAPIBackend) StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, tracers.StateReleaseFunc, error) {
+	return b.cn.stateAtBlock(block, reexec, base, readOnly, preferDisk)
 }
 
-func (b *CNAPIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (blockchain.Message, vm.BlockContext, vm.TxContext, *state.StateDB, error) {
+func (b *CNAPIBackend) StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (blockchain.Message, vm.BlockContext, vm.TxContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	return b.cn.stateAtTransaction(block, txIndex, reexec)
 }
 
