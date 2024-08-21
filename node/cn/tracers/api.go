@@ -80,6 +80,10 @@ var (
 	heavyAPIRequestCount int32 = 0
 )
 
+// StateReleaseFunc is used to deallocate resources held by constructing a
+// historical state for tracing purposes.
+type StateReleaseFunc func()
+
 // Backend interface provides the common API services with access to necessary functions.
 type Backend interface {
 	HeaderByHash(ctx context.Context, hash common.Hash) (*types.Header, error)
@@ -94,8 +98,8 @@ type Backend interface {
 	// StateAtBlock returns the state corresponding to the stateroot of the block.
 	// N.B: For executing transactions on block N, the required stateRoot is block N-1,
 	// so this method should be called with the parent.
-	StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, checkLive bool, preferDisk bool) (*state.StateDB, error)
-	StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (blockchain.Message, vm.BlockContext, vm.TxContext, *state.StateDB, error)
+	StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, StateReleaseFunc, error)
+	StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (blockchain.Message, vm.BlockContext, vm.TxContext, *state.StateDB, StateReleaseFunc, error)
 }
 
 // CommonAPI contains
@@ -214,7 +218,7 @@ type txTraceResult struct {
 type blockTraceTask struct {
 	statedb *state.StateDB   // Intermediate state prepped for tracing
 	block   *types.Block     // Block to trace the transactions from
-	rootref common.Hash      // Trie root reference held for this task
+	release StateReleaseFunc // The function to release the held resource for this task
 	results []*txTraceResult // Trace results procudes by the task
 }
 
@@ -274,8 +278,36 @@ func (api *UnsafeAPI) TraceChain(ctx context.Context, start, end rpc.BlockNumber
 	return sub, err
 }
 
+// releaser is a helper tool responsible for caching the release
+// callbacks of tracing state.
+type releaser struct {
+	releases []StateReleaseFunc
+	lock     sync.Mutex
+}
+
+func (r *releaser) add(release StateReleaseFunc) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	r.releases = append(r.releases, release)
+}
+
+func (r *releaser) call() {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	for _, release := range r.releases {
+		release()
+	}
+	r.releases = r.releases[:0]
+}
+
 // traceChain configures a new tracer according to the provided configuration, and
-// executes all the transactions contained within.
+// executes all the transactions contained within. The tracing chain range includes
+// the end block but excludes the start one. The return value will be one item per
+// transaction, dependent on the requested tracer.
+// The tracing procedure should be aborted in case the closed signal is received.
+//
 // The traceChain operates in two modes: subscription mode and rpc mode
 //   - if notifier and sub is not nil, it works as a subscription mode and returns nothing
 //   - if those parameters are nil, it works as a rpc mode and returns the block trace results, so it can pass the result through rpc-call
@@ -297,15 +329,17 @@ func (api *CommonAPI) traceChain(start, end *types.Block, config *TraceConfig, n
 		tasks    = make(chan *blockTraceTask, threads)
 		results  = make(chan *blockTraceTask, threads)
 		localctx = context.Background()
+		reler    = new(releaser)
 	)
 	for th := 0; th < threads; th++ {
 		pend.Add(1)
 		go func() {
 			defer pend.Done()
 
-			// Fetch and execute the next block trace tasks
+			// Fetch and execute the block trace tasks
 			for task := range tasks {
 				signer := types.MakeSigner(api.backend.ChainConfig(), task.block.Number())
+				blockCtx := blockchain.NewEVMBlockContext(task.block.Header(), newChainContext(localctx, api.backend), nil)
 
 				// Trace all the transactions contained within
 				for i, tx := range task.block.Transactions() {
@@ -317,7 +351,6 @@ func (api *CommonAPI) traceChain(start, end *types.Block, config *TraceConfig, n
 					}
 
 					txCtx := blockchain.NewEVMTxContext(msg, task.block.Header(), api.backend.ChainConfig())
-					blockCtx := blockchain.NewEVMBlockContext(task.block.Header(), newChainContext(localctx, api.backend), nil)
 
 					res, err := api.traceTx(localctx, msg, blockCtx, txCtx, task.statedb, config)
 					if err != nil {
