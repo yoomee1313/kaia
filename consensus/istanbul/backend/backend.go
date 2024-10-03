@@ -253,7 +253,7 @@ func (sb *backend) getTargetReceivers(prevHash common.Hash, valSet istanbul.Vali
 			}
 		}
 		view.Round = view.Round.Add(view.Round, common.Big1)
-		proposer = valSet.Selector(valSet, common.Address{}, view.Round.Uint64())
+		proposer = valSet.GetNextProposerByRound(common.Address{}, view.Round.Uint64())
 	}
 	return targets
 }

@@ -105,7 +105,6 @@ type weightedCouncil struct {
 
 	proposer    atomic.Value // istanbul.Validator
 	validatorMu sync.RWMutex // this validator mutex protects concurrent usage of validators and demotedValidators
-	selector    istanbul.ProposalSelector
 
 	// TODO-Kaia-Governance proposers means that the proposers for next block, so refactor it.
 	// proposers are determined on a specific block, but it can be removed after votes.
@@ -217,7 +216,6 @@ func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, r
 		valSet.proposer.Store(valSet.GetByIndex(0))
 	}
 	valSet.SetSubGroupSize(committeeSize)
-	valSet.selector = weightedRandomProposer
 
 	valSet.blockNum = blockNum
 	valSet.proposers = make([]istanbul.Validator, len(addrs))
@@ -268,28 +266,22 @@ func GetWeightedCouncilData(valSet istanbul.ValidatorSet) (validators []common.A
 	return
 }
 
-func weightedRandomProposer(valSet istanbul.ValidatorSet, lastProposer common.Address, round uint64) istanbul.Validator {
-	weightedCouncil, ok := valSet.(*weightedCouncil)
-	if !ok {
-		logger.Error("weightedRandomProposer() Not weightedCouncil type.")
-		return nil
-	}
-
-	rules := fork.Rules(new(big.Int).SetUint64(weightedCouncil.blockNum + 1))
+func (valSet *weightedCouncil) GetNextProposerByRound(lastProposer common.Address, round uint64) istanbul.Validator {
+	rules := fork.Rules(new(big.Int).SetUint64(valSet.blockNum + 1))
 	// After Randao: Select one from ValidatorSet using MixHash as a seed.
 	if rules.IsRandao {
-		if weightedCouncil.mixHash == nil {
-			logger.Error("no mixHash", "number", weightedCouncil.blockNum)
+		if valSet.mixHash == nil {
+			logger.Error("no mixHash", "number", valSet.blockNum)
 			return nil
 		}
 		// def proposer_selector(validators, committee_size, round, seed):
 		// select_committee_KIP146(validators, committee_size, seed)[round % len(validators)]
-		committee := SelectRandaoCommittee(weightedCouncil.List(), weightedCouncil.subSize, weightedCouncil.mixHash)
+		committee := SelectRandaoCommittee(valSet.List(), valSet.subSize, valSet.mixHash)
 		return committee[round%uint64(len(committee))]
 	}
 
 	// Before Randao: Select one from the pre-shuffled `proposers[]` with a round-robin algorithm.
-	numProposers := len(weightedCouncil.proposers)
+	numProposers := len(valSet.proposers)
 	if numProposers == 0 {
 		logger.Error("weightedRandomProposer() No available proposers.")
 		return nil
@@ -297,9 +289,9 @@ func weightedRandomProposer(valSet istanbul.ValidatorSet, lastProposer common.Ad
 
 	// At RefreshProposers(), proposers is already randomly shuffled considering weights.
 	// So let's just round robin this array
-	blockNum := weightedCouncil.blockNum
+	blockNum := valSet.blockNum
 	picker := (blockNum + round - params.CalcProposerBlockNumber(blockNum+1)) % uint64(numProposers)
-	proposer := weightedCouncil.proposers[picker]
+	proposer := valSet.proposers[picker]
 
 	// Enable below more detailed log when debugging
 	// logger.Trace("Select a proposer using weighted random", "proposer", proposer.String(), "picker", picker, "blockNum of council", blockNum, "round", round, "blockNum of proposers updated", weightedCouncil.proposersBlockNum, "number of proposers", numProposers, "all proposers", weightedCouncil.proposers)
@@ -402,7 +394,7 @@ func (valSet *weightedCouncil) SubListWithProposer(prevHash common.Hash, propose
 				"proposer", proposer.Address().String(), "validatorAddrs", validators.AddressStringList())
 			return validators
 		}
-		nextProposer = valSet.selector(valSet, proposerAddr, view.Round.Uint64()+idx)
+		nextProposer = valSet.GetNextProposerByRound(proposerAddr, view.Round.Uint64()+idx)
 		if proposer.Address() != nextProposer.Address() {
 			break
 		}
@@ -504,26 +496,11 @@ func (valSet *weightedCouncil) IsProposer(address common.Address) bool {
 	return reflect.DeepEqual(valSet.GetProposer(), val)
 }
 
-func (valSet *weightedCouncil) chooseProposerByRoundRobin(lastProposer common.Address, round uint64) istanbul.Validator {
-	seed := uint64(0)
-	if emptyAddress(lastProposer) {
-		seed = round
-	} else {
-		offset := 0
-		if idx, val := valSet.getByAddress(lastProposer); val != nil {
-			offset = idx
-		}
-		seed = uint64(offset) + round
-	}
-	pick := seed % uint64(len(valSet.validators))
-	return valSet.validators[pick]
-}
-
 func (valSet *weightedCouncil) CalcProposer(lastProposer common.Address, round uint64) {
 	valSet.validatorMu.RLock()
 	defer valSet.validatorMu.RUnlock()
 
-	newProposer := valSet.selector(valSet, lastProposer, round)
+	newProposer := valSet.GetNextProposerByRound(lastProposer, round)
 	if newProposer == nil {
 		if len(valSet.validators) == 0 {
 			// TODO-Kaia We must make a policy about the mininum number of validators, which can prevent this case.
@@ -531,7 +508,9 @@ func (valSet *weightedCouncil) CalcProposer(lastProposer common.Address, round u
 			newProposer = newWeightedValidator(lastProposer, common.Address{}, 0, 0)
 		} else {
 			logger.Warn("Failed to select a new proposer, thus fall back to roundRobinProposer")
-			newProposer = valSet.chooseProposerByRoundRobin(lastProposer, round)
+			proposerIdx, _ := valSet.GetByAddress(lastProposer)
+			seed := defaultSetNextProposerSeed(params.Sticky, lastProposer, proposerIdx, round)
+			newProposer = valSet.GetByIndex(seed % valSet.Size())
 		}
 	}
 
@@ -612,7 +591,6 @@ func (valSet *weightedCouncil) Copy() istanbul.ValidatorSet {
 		subSize:           valSet.subSize,
 		policy:            valSet.policy,
 		proposer:          valSet.proposer,
-		selector:          valSet.selector,
 		stakingInfo:       valSet.stakingInfo,
 		proposersBlockNum: valSet.proposersBlockNum,
 		blockNum:          valSet.blockNum,
@@ -963,6 +941,6 @@ func (valSet *weightedCouncil) TotalVotingPower() uint64 {
 	return sum
 }
 
-func (valSet *weightedCouncil) Selector(valS istanbul.ValidatorSet, lastProposer common.Address, round uint64) istanbul.Validator {
-	return valSet.selector(valS, lastProposer, round)
-}
+//func (valSet *weightedCouncil) Selector(valS istanbul.ValidatorSet, lastProposer common.Address, round uint64) istanbul.Validator {
+//	return valSet.selector(valS, lastProposer, round)
+//}

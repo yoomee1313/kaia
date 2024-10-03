@@ -84,7 +84,7 @@ func TestNormalValSet(t *testing.T) {
 	val1 := New(addr1)
 	val2 := New(addr2)
 
-	valSet := newDefaultSet([]common.Address{addr1, addr2}, params.RoundRobin)
+	valSet := newDefaultSubSet([]common.Address{addr1, addr2}, params.RoundRobin, defaultSubSetLength)
 	if valSet == nil {
 		t.Errorf("the format of validator set is invalid")
 		t.FailNow()
@@ -188,7 +188,7 @@ func TestStickyProposer(t *testing.T) {
 	val1 := New(addr1)
 	val2 := New(addr2)
 
-	valSet := newDefaultSet([]common.Address{addr1, addr2}, params.Sticky)
+	valSet := newDefaultSubSet([]common.Address{addr1, addr2}, params.Sticky, defaultSubSetLength)
 
 	// test get proposer
 	if val := valSet.GetProposer(); !reflect.DeepEqual(val, val1) {

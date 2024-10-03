@@ -55,7 +55,7 @@ func NewValidatorSet(addrs, demotedAddrs []common.Address, proposerPolicy params
 }
 
 func NewSet(addrs []common.Address, policy params.ProposerPolicy) istanbul.ValidatorSet {
-	return newDefaultSet(addrs, policy)
+	return newDefaultSubSet(addrs, policy, defaultSubSetLength)
 }
 
 func NewSubSet(addrs []common.Address, policy params.ProposerPolicy, subSize uint64) istanbul.ValidatorSet {
@@ -176,4 +176,15 @@ func shuffleValidators(validators istanbul.Validators, seed int64) []istanbul.Va
 	r.Shuffle(len(ret), swap)
 
 	return ret
+}
+
+func defaultSetNextProposerSeed(policy params.ProposerPolicy, proposer common.Address, proposerIdx int, round uint64) uint64 {
+	seed := round
+	if proposerIdx > -1 {
+		seed += uint64(proposerIdx)
+	}
+	if policy == params.RoundRobin && !common.EmptyAddress(proposer) {
+		seed += 1
+	}
+	return seed
 }

@@ -71,31 +71,6 @@ type defaultSet struct {
 
 	proposer    atomic.Value
 	validatorMu sync.RWMutex
-	selector    istanbul.ProposalSelector
-}
-
-func newDefaultSet(addrs []common.Address, policy params.ProposerPolicy) *defaultSet {
-	valSet := &defaultSet{}
-
-	valSet.subSize = defaultSubSetLength
-	valSet.policy = policy
-	// init validators
-	valSet.validators = make([]istanbul.Validator, len(addrs))
-	for i, addr := range addrs {
-		valSet.validators[i] = New(addr)
-	}
-	// sort validator
-	sort.Sort(valSet.validators)
-	// init proposer
-	if valSet.Size() > 0 {
-		valSet.proposer.Store(valSet.GetByIndex(0))
-	}
-	valSet.selector = roundRobinProposer
-	if policy == params.Sticky {
-		valSet.selector = stickyProposer
-	}
-
-	return valSet
 }
 
 func newDefaultSubSet(addrs []common.Address, policy params.ProposerPolicy, subSize uint64) *defaultSet {
@@ -114,11 +89,6 @@ func newDefaultSubSet(addrs []common.Address, policy params.ProposerPolicy, subS
 	if valSet.Size() > 0 {
 		valSet.proposer.Store(valSet.GetByIndex(0))
 	}
-	valSet.selector = roundRobinProposer
-	if policy == params.Sticky {
-		valSet.selector = stickyProposer
-	}
-
 	return valSet
 }
 
@@ -194,7 +164,7 @@ func (valSet *defaultSet) SubListWithProposer(prevHash common.Hash, proposerAddr
 	}
 
 	// find the next proposer
-	nextProposer := valSet.selector(valSet, proposer.Address(), view.Round.Uint64())
+	nextProposer := valSet.GetNextProposerByRound(proposer.Address(), view.Round.Uint64())
 	nextProposerIdx, _ := valSet.GetByAddress(nextProposer.Address())
 	if nextProposerIdx < 0 {
 		logger.Error("invalid index of the next proposer",
@@ -285,41 +255,13 @@ func (valSet *defaultSet) CalcProposer(lastProposer common.Address, round uint64
 		return
 	}
 
-	valSet.proposer.Store(valSet.selector(valSet, lastProposer, round))
+	valSet.proposer.Store(valSet.GetNextProposerByRound(lastProposer, round))
 }
 
-func calcSeed(valSet istanbul.ValidatorSet, proposer common.Address, round uint64) uint64 {
-	offset := 0
-	if idx, val := valSet.GetByAddress(proposer); val != nil {
-		offset = idx
-	}
-	return uint64(offset) + round
-}
-
-func emptyAddress(addr common.Address) bool {
-	return addr == common.Address{}
-}
-
-func roundRobinProposer(valSet istanbul.ValidatorSet, proposer common.Address, round uint64) istanbul.Validator {
-	seed := uint64(0)
-	if emptyAddress(proposer) {
-		seed = round
-	} else {
-		seed = calcSeed(valSet, proposer, round) + 1
-	}
-	pick := seed % uint64(valSet.Size())
-	return valSet.GetByIndex(pick)
-}
-
-func stickyProposer(valSet istanbul.ValidatorSet, proposer common.Address, round uint64) istanbul.Validator {
-	seed := uint64(0)
-	if emptyAddress(proposer) {
-		seed = round
-	} else {
-		seed = calcSeed(valSet, proposer, round)
-	}
-	pick := seed % uint64(valSet.Size())
-	return valSet.GetByIndex(pick)
+func (valSet *defaultSet) GetNextProposerByRound(proposer common.Address, round uint64) istanbul.Validator {
+	proposerIdx, _ := valSet.GetByAddress(proposer)
+	seed := defaultSetNextProposerSeed(valSet.policy, proposer, proposerIdx, round)
+	return valSet.GetByIndex(seed % valSet.Size())
 }
 
 func (valSet *defaultSet) AddValidator(address common.Address) bool {
@@ -396,8 +338,4 @@ func (valSet *defaultSet) TotalVotingPower() uint64 {
 		sum += v.VotingPower()
 	}
 	return sum
-}
-
-func (valSet *defaultSet) Selector(valS istanbul.ValidatorSet, lastProposer common.Address, round uint64) istanbul.Validator {
-	return valSet.selector(valS, lastProposer, round)
 }
