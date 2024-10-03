@@ -644,7 +644,7 @@ func handleChainHeadEvent() {
 				logger.Error("unable to fetch parameters at", "blockNum", ev.Block.NumberU64()+1)
 				continue
 			}
-			if pset.Policy() == params.WeightedRandom {
+			if params.ProposerPolicy(pset.Policy()).IsWeightedCouncil() {
 				// check and update if staking info is not valid before for the next update interval blocks
 				targetBlock := ev.Block.NumberU64() + pset.StakeUpdateInterval()
 				// After kaia fork, do not need to check staking info for the next update interval blocks.

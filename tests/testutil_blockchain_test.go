@@ -30,7 +30,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/crypto/bls"
 	"github.com/kaiachain/kaia/networks/p2p"
@@ -94,7 +93,7 @@ var blockchainTestChainConfig = &params.ChainConfig{
 	},
 	Istanbul: &params.IstanbulConfig{
 		Epoch:          120,
-		ProposerPolicy: uint64(istanbul.RoundRobin),
+		ProposerPolicy: uint64(params.RoundRobin),
 		SubGroupSize:   100,
 	},
 }

@@ -67,14 +67,14 @@ type defaultSet struct {
 	subSize uint64
 
 	validators istanbul.Validators
-	policy     istanbul.ProposerPolicy
+	policy     params.ProposerPolicy
 
 	proposer    atomic.Value
 	validatorMu sync.RWMutex
 	selector    istanbul.ProposalSelector
 }
 
-func newDefaultSet(addrs []common.Address, policy istanbul.ProposerPolicy) *defaultSet {
+func newDefaultSet(addrs []common.Address, policy params.ProposerPolicy) *defaultSet {
 	valSet := &defaultSet{}
 
 	valSet.subSize = defaultSubSetLength
@@ -91,14 +91,14 @@ func newDefaultSet(addrs []common.Address, policy istanbul.ProposerPolicy) *defa
 		valSet.proposer.Store(valSet.GetByIndex(0))
 	}
 	valSet.selector = roundRobinProposer
-	if policy == istanbul.Sticky {
+	if policy == params.Sticky {
 		valSet.selector = stickyProposer
 	}
 
 	return valSet
 }
 
-func newDefaultSubSet(addrs []common.Address, policy istanbul.ProposerPolicy, subSize uint64) *defaultSet {
+func newDefaultSubSet(addrs []common.Address, policy params.ProposerPolicy, subSize uint64) *defaultSet {
 	valSet := &defaultSet{}
 
 	valSet.subSize = subSize
@@ -115,7 +115,7 @@ func newDefaultSubSet(addrs []common.Address, policy istanbul.ProposerPolicy, su
 		valSet.proposer.Store(valSet.GetByIndex(0))
 	}
 	valSet.selector = roundRobinProposer
-	if policy == istanbul.Sticky {
+	if policy == params.Sticky {
 		valSet.selector = stickyProposer
 	}
 
@@ -377,7 +377,7 @@ func (valSet *defaultSet) F() int {
 	}
 }
 
-func (valSet *defaultSet) Policy() istanbul.ProposerPolicy { return valSet.policy }
+func (valSet *defaultSet) Policy() params.ProposerPolicy { return valSet.policy }
 
 func (valSet *defaultSet) RefreshValSet(blockNum uint64, config *params.ChainConfig, isSingle bool, governingNode common.Address, minStaking uint64) error {
 	return nil

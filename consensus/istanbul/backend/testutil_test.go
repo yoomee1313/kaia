@@ -161,7 +161,7 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 	istanbulConfig := &istanbul.Config{
 		Timeout:        10000,
 		BlockPeriod:    *overrides.blockPeriod,
-		ProposerPolicy: istanbul.ProposerPolicy(config.Istanbul.ProposerPolicy),
+		ProposerPolicy: params.ProposerPolicy(config.Istanbul.ProposerPolicy),
 		Epoch:          config.Istanbul.Epoch,
 		SubGroupSize:   config.Istanbul.SubGroupSize,
 	}

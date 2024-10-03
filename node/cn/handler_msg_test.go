@@ -28,7 +28,6 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/governance"
 	"github.com/kaiachain/kaia/networks/p2p"
 	mocks2 "github.com/kaiachain/kaia/node/cn/mocks"
@@ -475,7 +474,7 @@ func TestHandleStakingInfoRequestMsg(t *testing.T) {
 		// test if chain config istanbul is not nil, but proposer policy is not weighted random
 		mockCtrl, _, mockPeer, pm := prepareBlockChain(t)
 		testChainConfig.Istanbul = params.GetDefaultIstanbulConfig()
-		testChainConfig.Istanbul.ProposerPolicy = uint64(istanbul.RoundRobin)
+		testChainConfig.Istanbul.ProposerPolicy = uint64(params.RoundRobin)
 		pm.chainconfig = testChainConfig
 
 		err := handleStakingInfoRequestMsg(pm, mockPeer, p2p.Msg{})
@@ -487,7 +486,7 @@ func TestHandleStakingInfoRequestMsg(t *testing.T) {
 		// test if message does not contain expected data
 		mockCtrl, _, mockPeer, pm := prepareBlockChain(t)
 		testChainConfig.Istanbul = params.GetDefaultIstanbulConfig()
-		testChainConfig.Istanbul.ProposerPolicy = uint64(istanbul.WeightedRandom)
+		testChainConfig.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 		pm.chainconfig = testChainConfig
 		msg := generateMsg(t, StakingInfoRequestMsg, uint64(123)) // Non-list value to invoke an error
 
@@ -510,7 +509,7 @@ func TestHandleStakingInfoRequestMsg(t *testing.T) {
 		requestedHashes := []common.Hash{hashes[0], hashes[1]}
 
 		mockCtrl, mockBlockChain, mockPeer, pm := prepareBlockChain(t)
-		testChainConfig.Istanbul = &params.IstanbulConfig{ProposerPolicy: uint64(istanbul.WeightedRandom)}
+		testChainConfig.Istanbul = &params.IstanbulConfig{ProposerPolicy: uint64(params.WeightedRandom)}
 		pm.chainconfig = testChainConfig
 
 		msg := generateMsg(t, StakingInfoRequestMsg, requestedHashes)
@@ -544,7 +543,7 @@ func TestHandleStakingInfoRequestMsgAfterKaia(t *testing.T) {
 		requestedHashes := []common.Hash{hashes[0], hashes[1]}
 
 		mockCtrl, mockBlockChain, mockPeer, pm := prepareBlockChain(t)
-		testChainConfig.Istanbul = &params.IstanbulConfig{ProposerPolicy: uint64(istanbul.WeightedRandom)}
+		testChainConfig.Istanbul = &params.IstanbulConfig{ProposerPolicy: uint64(params.WeightedRandom)}
 		testChainConfig.KaiaCompatibleBlock = big.NewInt(int64(kaiaHFBlock))
 		pm.chainconfig = testChainConfig
 
@@ -587,7 +586,7 @@ func TestHandleStakingInfoMsg(t *testing.T) {
 		// test if chain config istanbul is not nil, but proposer policy is not weighted random
 		mockCtrl, _, mockPeer, pm := prepareBlockChain(t)
 		testChainConfig.Istanbul = params.GetDefaultIstanbulConfig()
-		testChainConfig.Istanbul.ProposerPolicy = uint64(istanbul.RoundRobin)
+		testChainConfig.Istanbul.ProposerPolicy = uint64(params.RoundRobin)
 		pm.chainconfig = testChainConfig
 
 		err := handleStakingInfoMsg(pm, mockPeer, p2p.Msg{})
@@ -599,7 +598,7 @@ func TestHandleStakingInfoMsg(t *testing.T) {
 		// test if message does not contain expected data
 		mockCtrl, _, mockPeer, pm := prepareBlockChain(t)
 		testChainConfig.Istanbul = params.GetDefaultIstanbulConfig()
-		testChainConfig.Istanbul.ProposerPolicy = uint64(istanbul.WeightedRandom)
+		testChainConfig.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 		pm.chainconfig = testChainConfig
 		msg := generateMsg(t, StakingInfoRequestMsg, uint64(123)) // Non-list value to invoke an error
 
@@ -623,7 +622,7 @@ func TestHandleStakingInfoMsg(t *testing.T) {
 
 		mockCtrl, mockPeer, mockDownloader, pm := preparePeerAndDownloader(t)
 		testChainConfig.Istanbul = params.GetDefaultIstanbulConfig()
-		testChainConfig.Istanbul.ProposerPolicy = uint64(istanbul.WeightedRandom)
+		testChainConfig.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 		pm.chainconfig = testChainConfig
 
 		mockDownloader.EXPECT().DeliverStakingInfos(gomock.Eq(nodeids[0].String()), gomock.Eq(stakingInfos)).Times(1).Return(expectedErr)

@@ -32,6 +32,7 @@ import (
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/log"
+	"github.com/kaiachain/kaia/params"
 )
 
 var logger = log.NewModuleLogger(log.ConsensusIstanbulValidator)
@@ -42,9 +43,9 @@ func New(addr common.Address) istanbul.Validator {
 	}
 }
 
-func NewValidatorSet(addrs, demotedAddrs []common.Address, proposerPolicy istanbul.ProposerPolicy, subGroupSize uint64, chain consensus.ChainReader) istanbul.ValidatorSet {
+func NewValidatorSet(addrs, demotedAddrs []common.Address, proposerPolicy params.ProposerPolicy, subGroupSize uint64, chain consensus.ChainReader) istanbul.ValidatorSet {
 	var valSet istanbul.ValidatorSet
-	if proposerPolicy == istanbul.WeightedRandom {
+	if proposerPolicy.IsWeightedCouncil() {
 		valSet = NewWeightedCouncil(addrs, demotedAddrs, nil, nil, nil, proposerPolicy, subGroupSize, 0, 0, chain)
 	} else {
 		valSet = NewSubSet(addrs, proposerPolicy, subGroupSize)
@@ -53,11 +54,11 @@ func NewValidatorSet(addrs, demotedAddrs []common.Address, proposerPolicy istanb
 	return valSet
 }
 
-func NewSet(addrs []common.Address, policy istanbul.ProposerPolicy) istanbul.ValidatorSet {
+func NewSet(addrs []common.Address, policy params.ProposerPolicy) istanbul.ValidatorSet {
 	return newDefaultSet(addrs, policy)
 }
 
-func NewSubSet(addrs []common.Address, policy istanbul.ProposerPolicy, subSize uint64) istanbul.ValidatorSet {
+func NewSubSet(addrs []common.Address, policy params.ProposerPolicy, subSize uint64) istanbul.ValidatorSet {
 	return newDefaultSubSet(addrs, policy, subSize)
 }
 

@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/params"
 )
 
 // resultStore implements a structure for maintaining fetchResults, tracking their
@@ -82,7 +83,7 @@ func (r *resultStore) SetThrottleThreshold(threshold uint64) uint64 {
 //	throttled - if true, the store is at capacity, this particular header is not prior now
 //	item      - the result to store data into
 //	err       - any error that occurred
-func (r *resultStore) AddFetch(header *types.Header, mode SyncMode, proposerPolicy uint64, isKaiaFork bool) (stale, throttled bool, item *fetchResult, err error) {
+func (r *resultStore) AddFetch(header *types.Header, mode SyncMode, proposerPolicy params.ProposerPolicy, isKaiaFork bool) (stale, throttled bool, item *fetchResult, err error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 

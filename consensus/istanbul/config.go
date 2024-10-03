@@ -22,27 +22,23 @@
 
 package istanbul
 
-type ProposerPolicy uint64
-
-const (
-	RoundRobin ProposerPolicy = iota
-	Sticky
-	WeightedRandom
+import (
+	"github.com/kaiachain/kaia/params"
 )
 
 type Config struct {
-	Timeout        uint64         `toml:",omitempty"` // The timeout for each Istanbul round in milliseconds.
-	BlockPeriod    uint64         `toml:",omitempty"` // Default minimum difference between two consecutive block's timestamps in second
-	ProposerPolicy ProposerPolicy `toml:",omitempty"` // The policy for proposer selection
-	Epoch          uint64         `toml:",omitempty"` // The number of blocks after which to checkpoint and reset the pending votes
-	SubGroupSize   uint64         `toml:",omitempty"`
+	Timeout        uint64                `toml:",omitempty"` // The timeout for each Istanbul round in milliseconds.
+	BlockPeriod    uint64                `toml:",omitempty"` // Default minimum difference between two consecutive block's timestamps in second
+	ProposerPolicy params.ProposerPolicy `toml:",omitempty"` // The policy for proposer selection
+	Epoch          uint64                `toml:",omitempty"` // The number of blocks after which to checkpoint and reset the pending votes
+	SubGroupSize   uint64                `toml:",omitempty"`
 }
 
 // TODO-Kaia-Istanbul: Do not use DefaultConfig except for assigning new config
 var DefaultConfig = &Config{
 	Timeout:        10000,
 	BlockPeriod:    1,
-	ProposerPolicy: RoundRobin,
+	ProposerPolicy: params.RoundRobin,
 	Epoch:          30000,
 	SubGroupSize:   21,
 }

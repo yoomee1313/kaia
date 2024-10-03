@@ -131,7 +131,7 @@ func makeTestValidators(weights []uint64) (validators istanbul.Validators) {
 
 func makeTestWeightedCouncil(weights []uint64) (valSet *weightedCouncil) {
 	// prepare weighted council
-	valSet = NewWeightedCouncil(testAddrs, nil, testRewardAddrs, testVotingPowers, weights, istanbul.WeightedRandom, 21, 0, 0, nil)
+	valSet = NewWeightedCouncil(testAddrs, nil, testRewardAddrs, testVotingPowers, weights, params.WeightedRandom, 21, 0, 0, nil)
 	return
 }
 

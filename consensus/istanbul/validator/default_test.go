@@ -60,7 +60,7 @@ func TestNewValidatorSet(t *testing.T) {
 	}
 
 	// Create ValidatorSet
-	valSet := NewSet(ExtractValidators(b), istanbul.RoundRobin)
+	valSet := NewSet(ExtractValidators(b), params.RoundRobin)
 	if valSet == nil {
 		t.Errorf("the validator byte array cannot be parsed")
 		t.FailNow()
@@ -84,7 +84,7 @@ func TestNormalValSet(t *testing.T) {
 	val1 := New(addr1)
 	val2 := New(addr2)
 
-	valSet := newDefaultSet([]common.Address{addr1, addr2}, istanbul.RoundRobin)
+	valSet := newDefaultSet([]common.Address{addr1, addr2}, params.RoundRobin)
 	if valSet == nil {
 		t.Errorf("the format of validator set is invalid")
 		t.FailNow()
@@ -134,14 +134,14 @@ func TestNormalValSet(t *testing.T) {
 }
 
 func TestEmptyValSet(t *testing.T) {
-	valSet := NewSet(ExtractValidators([]byte{}), istanbul.RoundRobin)
+	valSet := NewSet(ExtractValidators([]byte{}), params.RoundRobin)
 	if valSet == nil {
 		t.Errorf("validator set should not be nil")
 	}
 }
 
 func TestAddAndRemoveValidator(t *testing.T) {
-	valSet := NewSet(ExtractValidators([]byte{}), istanbul.RoundRobin)
+	valSet := NewSet(ExtractValidators([]byte{}), params.RoundRobin)
 	if !valSet.AddValidator(common.StringToAddress(string(rune(2)))) {
 		t.Error("the validator should be added")
 	}
@@ -188,7 +188,7 @@ func TestStickyProposer(t *testing.T) {
 	val1 := New(addr1)
 	val2 := New(addr2)
 
-	valSet := newDefaultSet([]common.Address{addr1, addr2}, istanbul.Sticky)
+	valSet := newDefaultSet([]common.Address{addr1, addr2}, params.Sticky)
 
 	// test get proposer
 	if val := valSet.GetProposer(); !reflect.DeepEqual(val, val1) {
@@ -229,7 +229,7 @@ func TestDefaultSet_SubList(t *testing.T) {
 	addr5 := common.BytesToAddress(b5)
 	testAddresses := []common.Address{addr1, addr2, addr3, addr4, addr5}
 
-	valSet := NewSet(testAddresses, istanbul.RoundRobin)
+	valSet := NewSet(testAddresses, params.RoundRobin)
 	if valSet == nil {
 		t.Errorf("the format of validator set is invalid")
 		t.FailNow()
@@ -269,7 +269,7 @@ func TestDefaultSet_Copy(t *testing.T) {
 	addr5 := common.BytesToAddress(b5)
 	testAddresses := []common.Address{addr1, addr2, addr3, addr4, addr5}
 
-	valSet := NewSet(testAddresses, istanbul.RoundRobin)
+	valSet := NewSet(testAddresses, params.RoundRobin)
 	copiedValSet := valSet.Copy()
 
 	assert.NotEqual(t, fmt.Sprintf("%p", &valSet), fmt.Sprintf("%p", &copiedValSet))

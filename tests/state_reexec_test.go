@@ -10,7 +10,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/system"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	testcontract "github.com/kaiachain/kaia/contracts/contracts/testing/reward"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
@@ -83,7 +82,7 @@ func testStateReexec_config(forkNum *big.Int) *params.ChainConfig {
 	config.KaiaCompatibleBlock = forkNum
 
 	// Use WeightedRandom to test reward distribution based on StakingInfo
-	config.Istanbul.ProposerPolicy = uint64(istanbul.WeightedRandom)
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 	// Set the reward ratio so that reward distribution is different from the 'all to proposer' fallback.
 	// If the GetStakingInfo() fails during state regen, the regenerated state would just give all
 	// rewards to the proposer, deviating from the actual historical state.

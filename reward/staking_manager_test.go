@@ -46,7 +46,7 @@ func newTestGovernance(intMap map[int]interface{}) *testGovernance {
 func newDefaultTestGovernance() *testGovernance {
 	return newTestGovernance(map[int]interface{}{
 		params.Epoch:               604800,
-		params.Policy:              params.WeightedRandom,
+		params.Policy:              uint64(params.WeightedRandom),
 		params.UnitPrice:           25000000000,
 		params.MintingAmount:       "9600000000000000000",
 		params.Ratio:               "34/54/12",

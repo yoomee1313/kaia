@@ -34,7 +34,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/gxhash"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/reward"
@@ -123,7 +122,11 @@ func TestBasics(t *testing.T) {
 	numOfReceipts := len(chain.blocks) / 2
 	numOfStakingInfos := len(chain.stakingInfos)
 
-	q := newQueue(10, 10, uint64(istanbul.WeightedRandom), nil)
+	config := params.TestChainConfig
+	config.Istanbul = params.GetDefaultIstanbulConfig()
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
+
+	q := newQueue(10, 10, config)
 	if !q.Idle() {
 		t.Errorf("new queue should be idle")
 	}
@@ -261,10 +264,12 @@ func TestScheduleAfterKaia(t *testing.T) {
 
 	config := params.TestChainConfig
 	config.KaiaCompatibleBlock = big.NewInt(21)
+	config.Istanbul = params.GetDefaultIstanbulConfig()
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 
 	numOfStakingInfos := 5 // [4, 8, 12, 16, 20]; After kaia fork, it won't be scheduled.
 
-	q := newQueue(50, 50, uint64(istanbul.WeightedRandom), config)
+	q := newQueue(50, 50, config)
 	if !q.Idle() {
 		t.Errorf("new queue should be idle")
 	}
@@ -309,7 +314,11 @@ func TestEmptyBlocks(t *testing.T) {
 	numOfBlocks := len(emptyChain.blocks)
 	numOfStakingInfos := len(emptyChain.stakingInfos)
 
-	q := newQueue(10, 10, uint64(istanbul.WeightedRandom), nil)
+	config := params.TestChainConfig
+	config.Istanbul = params.GetDefaultIstanbulConfig()
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
+
+	q := newQueue(10, 10, config)
 
 	q.Prepare(1, FastSync)
 	// Schedule a batch of headers
@@ -417,7 +426,12 @@ func XTestDelivery(t *testing.T) {
 	if false {
 		log.Root().SetHandler(log.StdoutHandler)
 	}
-	q := newQueue(10, 10, uint64(istanbul.WeightedRandom), nil)
+
+	config := params.TestChainConfig
+	config.Istanbul = params.GetDefaultIstanbulConfig()
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
+
+	q := newQueue(10, 10, config)
 	var wg sync.WaitGroup
 	q.Prepare(1, FastSync)
 	wg.Add(1)

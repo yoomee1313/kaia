@@ -43,6 +43,7 @@ import (
 	"github.com/kaiachain/kaia/governance"
 	"github.com/kaiachain/kaia/kaiax"
 	"github.com/kaiachain/kaia/log"
+	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/reward"
 	"github.com/kaiachain/kaia/storage/database"
 )
@@ -413,7 +414,7 @@ func (sb *backend) ParentValidators(proposal istanbul.Proposal) istanbul.Validat
 
 	// TODO-Kaia-Governance The following return case should not be called. Refactor it to error handling.
 	return validator.NewValidatorSet(nil, nil,
-		istanbul.ProposerPolicy(sb.chain.Config().Istanbul.ProposerPolicy),
+		params.ProposerPolicy(sb.chain.Config().Istanbul.ProposerPolicy),
 		sb.chain.Config().Istanbul.SubGroupSize,
 		sb.chain)
 }
@@ -424,7 +425,7 @@ func (sb *backend) getValidators(number uint64, hash common.Hash) istanbul.Valid
 		logger.Error("Snapshot not found.", "err", err)
 		// TODO-Kaia-Governance The following return case should not be called. Refactor it to error handling.
 		return validator.NewValidatorSet(nil, nil,
-			istanbul.ProposerPolicy(sb.chain.Config().Istanbul.ProposerPolicy),
+			params.ProposerPolicy(sb.chain.Config().Istanbul.ProposerPolicy),
 			sb.chain.Config().Istanbul.SubGroupSize,
 			sb.chain)
 	}

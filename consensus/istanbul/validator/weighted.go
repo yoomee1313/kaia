@@ -101,7 +101,7 @@ type weightedCouncil struct {
 	subSize           uint64
 	demotedValidators istanbul.Validators // validators staking KAIA less than minimum, and not in committee/proposers
 	validators        istanbul.Validators // validators staking KAIA more than and equals to minimum, and in committee/proposers
-	policy            istanbul.ProposerPolicy
+	policy            params.ProposerPolicy
 
 	proposer    atomic.Value // istanbul.Validator
 	validatorMu sync.RWMutex // this validator mutex protects concurrent usage of validators and demotedValidators
@@ -140,8 +140,8 @@ func RecoverWeightedCouncilProposer(valSet istanbul.ValidatorSet, proposerAddrs 
 	weightedCouncil.proposers = proposers
 }
 
-func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, rewards []common.Address, votingPowers []uint64, weights []uint64, policy istanbul.ProposerPolicy, committeeSize uint64, blockNum uint64, proposersBlockNum uint64, chain consensus.ChainReader) *weightedCouncil {
-	if policy != istanbul.WeightedRandom {
+func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, rewards []common.Address, votingPowers []uint64, weights []uint64, policy params.ProposerPolicy, committeeSize uint64, blockNum uint64, proposersBlockNum uint64, chain consensus.ChainReader) *weightedCouncil {
+	if policy != params.WeightedRandom {
 		logger.Error("unsupported proposer policy for weighted council", "policy", policy)
 		return nil
 	}
@@ -236,7 +236,7 @@ func GetWeightedCouncilData(valSet istanbul.ValidatorSet) (validators []common.A
 		return
 	}
 
-	if weightedCouncil.Policy() == istanbul.WeightedRandom {
+	if weightedCouncil.Policy().IsWeightedCouncil() {
 		numVals := len(weightedCouncil.validators)
 		validators = make([]common.Address, numVals)
 		rewardAddrs = make([]common.Address, numVals)
@@ -640,7 +640,7 @@ func (valSet *weightedCouncil) F() int {
 	}
 }
 
-func (valSet *weightedCouncil) Policy() istanbul.ProposerPolicy { return valSet.policy }
+func (valSet *weightedCouncil) Policy() params.ProposerPolicy { return valSet.policy }
 
 // RefreshValSet recalculates up-to-date validators at the staking block number.
 // It returns an error if it can't make up-to-date validators

@@ -38,7 +38,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/datasync/fetcher"
@@ -306,11 +305,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 		if atomic.LoadUint32(&manager.fastSync) == 1 && atomic.LoadUint32(&manager.snapSync) == 0 {
 			stateBloom = statedb.NewSyncBloom(uint64(cacheLimit), chainDB.GetStateTrieDB())
 		}
-		var proposerPolicy uint64
-		if config.Istanbul != nil {
-			proposerPolicy = config.Istanbul.ProposerPolicy
-		}
-		manager.downloader = downloader.New(mode, chainDB, stateBloom, manager.eventMux, blockchain, nil, manager.removePeer, proposerPolicy)
+		manager.downloader = downloader.New(mode, chainDB, stateBloom, manager.eventMux, blockchain, nil, manager.removePeer)
 	}
 
 	// Create and set fetcher
@@ -1018,7 +1013,7 @@ func handleReceiptsMsg(pm *ProtocolManager, p Peer, msg p2p.Msg) error {
 
 // handleStakingInfoRequestMsg handles staking information request message.
 func handleStakingInfoRequestMsg(pm *ProtocolManager, p Peer, msg p2p.Msg) error {
-	if pm.chainconfig.Istanbul == nil || pm.chainconfig.Istanbul.ProposerPolicy != uint64(istanbul.WeightedRandom) {
+	if pm.chainconfig.Istanbul == nil || params.ProposerPolicy(pm.chainconfig.Istanbul.ProposerPolicy).IsDefaultSet() {
 		return errResp(ErrUnsupportedEnginePolicy, "the engine is not istanbul or the policy is not weighted random")
 	}
 
@@ -1072,7 +1067,7 @@ func handleStakingInfoRequestMsg(pm *ProtocolManager, p Peer, msg p2p.Msg) error
 
 // handleStakingInfoMsg handles staking information response message.
 func handleStakingInfoMsg(pm *ProtocolManager, p Peer, msg p2p.Msg) error {
-	if pm.chainconfig.Istanbul == nil || pm.chainconfig.Istanbul.ProposerPolicy != uint64(istanbul.WeightedRandom) {
+	if pm.chainconfig.Istanbul == nil || params.ProposerPolicy(pm.chainconfig.Istanbul.ProposerPolicy).IsDefaultSet() {
 		return errResp(ErrUnsupportedEnginePolicy, "the engine is not istanbul or the policy is not weighted random")
 	}
 

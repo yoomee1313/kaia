@@ -686,7 +686,7 @@ func Benchmark_getTargetReceivers(b *testing.B) {
 	// Create ValidatorSet
 	council := getTestCouncil()
 	rewards := getTestRewards()
-	valSet := validator.NewWeightedCouncil(council, nil, rewards, getTestVotingPowers(len(council)), nil, istanbul.WeightedRandom, 21, 0, 0, nil)
+	valSet := validator.NewWeightedCouncil(council, nil, rewards, getTestVotingPowers(len(council)), nil, params.WeightedRandom, 21, 0, 0, nil)
 	valSet.SetBlockNum(uint64(1))
 	valSet.CalcProposer(valSet.GetProposer().Address(), uint64(1))
 	hex := fmt.Sprintf("%015d000000000000000000000000000000000000000000000000000", 1)
@@ -708,7 +708,7 @@ func Test_GossipSubPeerTargets(t *testing.T) {
 	// Create ValidatorSet
 	council := getTestCouncil()
 	rewards := getTestRewards()
-	valSet := validator.NewWeightedCouncil(council, nil, rewards, getTestVotingPowers(len(council)), nil, istanbul.WeightedRandom, 21, 0, 0, nil)
+	valSet := validator.NewWeightedCouncil(council, nil, rewards, getTestVotingPowers(len(council)), nil, params.WeightedRandom, 21, 0, 0, nil)
 	valSet.SetBlockNum(uint64(5))
 
 	// Test for blocks from 0 to maxBlockNum
@@ -805,7 +805,7 @@ func checkInCommitteeBlocks(seq int64, round int64) bool {
 
 func newTestBackend() (b *backend) {
 	config := getTestConfig()
-	config.Istanbul.ProposerPolicy = params.WeightedRandom
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 	return newTestBackendWithConfig(config, istanbul.DefaultConfig.BlockPeriod, nil)
 }
 
@@ -822,7 +822,7 @@ func newTestBackendWithConfig(chainConfig *params.ChainConfig, blockPeriod uint6
 	gov := governance.NewMixedEngine(chainConfig, dbm)
 	istanbulConfig := istanbul.DefaultConfig
 	istanbulConfig.BlockPeriod = blockPeriod
-	istanbulConfig.ProposerPolicy = istanbul.ProposerPolicy(chainConfig.Istanbul.ProposerPolicy)
+	istanbulConfig.ProposerPolicy = params.ProposerPolicy(chainConfig.Istanbul.ProposerPolicy)
 	istanbulConfig.Epoch = chainConfig.Istanbul.Epoch
 	istanbulConfig.SubGroupSize = chainConfig.Istanbul.SubGroupSize
 
@@ -838,7 +838,7 @@ func newTestBackendWithConfig(chainConfig *params.ChainConfig, blockPeriod uint6
 	return backend
 }
 
-func newTestValidatorSet(n int, policy istanbul.ProposerPolicy) (istanbul.ValidatorSet, []*ecdsa.PrivateKey) {
+func newTestValidatorSet(n int, policy params.ProposerPolicy) (istanbul.ValidatorSet, []*ecdsa.PrivateKey) {
 	// generate validators
 	keys := make(keys, n)
 	addrs := make([]common.Address, n)
@@ -894,7 +894,7 @@ func TestCheckSignature(t *testing.T) {
 }
 
 func TestCheckValidatorSignature(t *testing.T) {
-	vset, keys := newTestValidatorSet(5, istanbul.WeightedRandom)
+	vset, keys := newTestValidatorSet(5, params.WeightedRandom)
 
 	// 1. Positive test: sign with validator's key should succeed
 	hashData := crypto.Keccak256([]byte(testSigningData))

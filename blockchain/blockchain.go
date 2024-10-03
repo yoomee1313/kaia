@@ -445,8 +445,8 @@ func (bc *BlockChain) UseGiniCoeff() bool {
 	return bc.chainConfig.Governance.Reward.UseGiniCoeff
 }
 
-func (bc *BlockChain) ProposerPolicy() uint64 {
-	return bc.chainConfig.Istanbul.ProposerPolicy
+func (bc *BlockChain) ProposerPolicy() params.ProposerPolicy {
+	return params.ProposerPolicy(bc.chainConfig.Istanbul.ProposerPolicy)
 }
 
 func (bc *BlockChain) getProcInterrupt() bool {
@@ -643,7 +643,8 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 		if params.IsCheckpointInterval(num) {
 			bc.db.DeleteIstanbulSnapshot(hash)
 		}
-		if bc.Config().Istanbul.ProposerPolicy == params.WeightedRandom && !bc.Config().IsKaiaForkEnabled(new(big.Int).SetUint64(num)) && params.IsStakingUpdateInterval(num) {
+		if params.ProposerPolicy(bc.Config().Istanbul.ProposerPolicy).IsWeightedCouncil() &&
+			!bc.Config().IsKaiaForkEnabled(new(big.Int).SetUint64(num)) && params.IsStakingUpdateInterval(num) {
 			bc.db.DeleteStakingInfo(num)
 		}
 		bc.db.DeleteSupplyCheckpoint(num)
@@ -1540,7 +1541,7 @@ func isCommitTrieRequired(bc *BlockChain, blockNum uint64) bool {
 	}
 
 	if bc.chainConfig.Istanbul != nil {
-		return bc.ProposerPolicy() == params.WeightedRandom &&
+		return bc.ProposerPolicy().IsWeightedCouncil() &&
 			params.IsStakingUpdateInterval(blockNum)
 	}
 	return false

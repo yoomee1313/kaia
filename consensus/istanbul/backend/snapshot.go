@@ -47,23 +47,23 @@ type Snapshot struct {
 	Number        uint64                // Block number where the snapshot was created
 	Hash          common.Hash           // Block hash where the snapshot was created
 	ValSet        istanbul.ValidatorSet // Set of authorized validators at this moment
-	Policy        uint64
+	Policy        params.ProposerPolicy
 	CommitteeSize uint64
 	Votes         []governance.GovernanceVote      // List of votes cast in chronological order
 	Tally         []governance.GovernanceTallyItem // Current vote tally to avoid recalculating
 }
 
-func effectiveParams(gov governance.Engine, number uint64) (epoch uint64, policy uint64, committeeSize uint64) {
+func effectiveParams(gov governance.Engine, number uint64) (epoch uint64, policy params.ProposerPolicy, committeeSize uint64) {
 	pset, err := gov.EffectiveParams(number)
 	if err != nil {
 		// TODO-Kaia-Kore: remove err condition
 		logger.Error("Couldn't get governance value. Resorting to defaults", "err", err)
 		epoch = params.DefaultEpoch
-		policy = params.DefaultProposerPolicy
+		policy = params.ProposerPolicy(params.DefaultProposerPolicy)
 		committeeSize = params.DefaultSubGroupSize
 	} else {
 		epoch = pset.Epoch()
-		policy = pset.Policy()
+		policy = params.ProposerPolicy(pset.Policy())
 		committeeSize = pset.CommitteeSize()
 	}
 
@@ -140,7 +140,7 @@ func (s *Snapshot) checkVote(address common.Address, authorize bool) bool {
 
 // apply creates a new authorization snapshot by applying the given headers to
 // the original one.
-func (s *Snapshot) apply(headers []*types.Header, gov governance.Engine, addr common.Address, policy uint64, chain consensus.ChainReader, writable bool) (*Snapshot, error) {
+func (s *Snapshot) apply(headers []*types.Header, gov governance.Engine, addr common.Address, policy params.ProposerPolicy, chain consensus.ChainReader, writable bool) (*Snapshot, error) {
 	// Allow passing in no headers for cleaner code
 	if len(headers) == 0 {
 		return s, nil
@@ -190,7 +190,7 @@ func (s *Snapshot) apply(headers []*types.Header, gov governance.Engine, addr co
 		snap.Epoch, snap.Policy, snap.CommitteeSize = effectiveParams(gov, number+1)
 
 		snap.ValSet, snap.Votes, snap.Tally = gov.HandleGovernanceVote(snap.ValSet, snap.Votes, snap.Tally, header, validator, addr, writable)
-		if policy == uint64(params.WeightedRandom) {
+		if policy.IsWeightedCouncil() {
 			// Snapshot of block N (Snapshot_N) should contain proposers for N+1 and following blocks.
 			// Validators for Block N+1 can be calculated based on the staking information from the previous stakingUpdateInterval block.
 			// If the governance mode is single, the governing node is added to validator all the time.
@@ -233,7 +233,7 @@ func (s *Snapshot) apply(headers []*types.Header, gov governance.Engine, addr co
 	snap.Number += uint64(len(headers))
 	snap.Hash = headers[len(headers)-1].Hash()
 
-	if snap.ValSet.Policy() == istanbul.WeightedRandom {
+	if snap.ValSet.Policy().IsWeightedCouncil() {
 		snap.ValSet.SetBlockNum(snap.Number)
 
 		bigNum := new(big.Int).SetUint64(snap.Number)
@@ -311,9 +311,9 @@ type snapshotJSON struct {
 	Tally  []governance.GovernanceTallyItem `json:"tally"`
 
 	// for validator set
-	Validators   []common.Address        `json:"validators"`
-	Policy       istanbul.ProposerPolicy `json:"policy"`
-	SubGroupSize uint64                  `json:"subgroupsize"`
+	Validators   []common.Address      `json:"validators"`
+	Policy       params.ProposerPolicy `json:"policy"`
+	SubGroupSize uint64                `json:"subgroupsize"`
 
 	// for weighted validator
 	RewardAddrs       []common.Address `json:"rewardAddrs"`
@@ -335,7 +335,7 @@ func (s *Snapshot) toJSONStruct() *snapshotJSON {
 	var demotedValidators []common.Address
 	var mixHash []byte
 
-	if s.ValSet.Policy() == istanbul.WeightedRandom {
+	if s.ValSet.Policy().IsWeightedCouncil() {
 		validators, demotedValidators, rewardAddrs, votingPowers, weights, proposers, proposersBlockNum, mixHash = validator.GetWeightedCouncilData(s.ValSet)
 	} else {
 		validators = s.validators()
@@ -348,7 +348,7 @@ func (s *Snapshot) toJSONStruct() *snapshotJSON {
 		Votes:             s.Votes,
 		Tally:             s.Tally,
 		Validators:        validators,
-		Policy:            istanbul.ProposerPolicy(s.Policy),
+		Policy:            s.Policy,
 		SubGroupSize:      s.CommitteeSize,
 		RewardAddrs:       rewardAddrs,
 		VotingPowers:      votingPowers,
@@ -373,7 +373,7 @@ func (s *Snapshot) UnmarshalJSON(b []byte) error {
 	s.Votes = j.Votes
 	s.Tally = j.Tally
 
-	if j.Policy == istanbul.WeightedRandom {
+	if j.Policy.IsWeightedCouncil() {
 		s.ValSet = validator.NewWeightedCouncil(j.Validators, j.DemotedValidators, j.RewardAddrs, j.VotingPowers, j.Weights, j.Policy, j.SubGroupSize, j.Number, j.ProposersBlockNum, nil)
 		validator.RecoverWeightedCouncilProposer(s.ValSet, j.Proposers)
 		s.ValSet.SetMixHash(j.MixHash)

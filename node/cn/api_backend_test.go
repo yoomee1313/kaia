@@ -787,7 +787,7 @@ func headerGovTest(t *testing.T, tt *rewindTest) {
 		gov                          = governance.NewMixedEngine(testCfg(epoch), db)
 		gpo                          = gasprice.NewOracle(api, gasprice.Config{}, nil, gov)
 	)
-	chain.Config().Istanbul = &params.IstanbulConfig{Epoch: epoch, ProposerPolicy: params.WeightedRandom}
+	chain.Config().Istanbul = &params.IstanbulConfig{Epoch: epoch, ProposerPolicy: uint64(params.WeightedRandom)}
 
 	canonblocks, _ := blockchain.GenerateChain(params.TestChainConfig, chain.CurrentBlock(), gxhash.NewFaker(), db, tt.canonicalBlocks, func(i int, b *blockchain.BlockGen) {
 		if i == govBlockNum-1 { // Subtract 1, because the callback starts to enumerate from zero

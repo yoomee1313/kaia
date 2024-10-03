@@ -40,7 +40,7 @@ func TestCore_sendPrepare(t *testing.T) {
 	mockBackend, mockCtrl := newMockBackend(t, validatorAddrs)
 
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 
 	istCore := New(mockBackend, istConfig).(*core)
 	if err := istCore.Start(); err != nil {

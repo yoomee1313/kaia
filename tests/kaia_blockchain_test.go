@@ -29,7 +29,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/networks/p2p"
@@ -174,7 +173,7 @@ func newKaiaNode(t *testing.T, dir string, validator *TestAccountType, config *p
 	if config == nil {
 		genesis.Config = params.MainnetChainConfig.Copy()
 		genesis.Config.Istanbul.SubGroupSize = 1
-		genesis.Config.Istanbul.ProposerPolicy = uint64(istanbul.RoundRobin)
+		genesis.Config.Istanbul.ProposerPolicy = uint64(params.RoundRobin)
 		genesis.Config.Governance.Reward.MintingAmount = new(big.Int).Mul(big.NewInt(9000000000000000000), big.NewInt(params.KAIA))
 	} else {
 		genesis.Config = config

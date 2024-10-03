@@ -35,7 +35,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/contracts/contracts/testing/system_contracts"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/log"
@@ -418,7 +417,7 @@ func (s *SupplyTestSuite) SetupSuite() {
 		},
 		Istanbul: &params.IstanbulConfig{
 			Epoch:          10,
-			ProposerPolicy: uint64(istanbul.WeightedRandom),
+			ProposerPolicy: uint64(params.WeightedRandom),
 			SubGroupSize:   30,
 		},
 

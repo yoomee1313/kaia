@@ -533,7 +533,7 @@ func (sb *backend) Finalize(chain consensus.ChainReader, header *types.Header, s
 	}
 
 	// If sb.chain is nil, it means backend is not initialized yet.
-	if sb.chain != nil && !reward.IsRewardSimple(pset) {
+	if sb.chain != nil && params.ProposerPolicy(pset.Policy()).IsWeightedCouncil() {
 		// Determine and update Rewardbase when mining. When mining, state root is not yet determined and will be determined at the end of this Finalize below.
 		if common.EmptyHash(header.Root) {
 			// TODO-Kaia Let's redesign below logic and remove dependency between block reward and istanbul consensus.
@@ -783,7 +783,7 @@ func (sb *backend) initSnapshot(chain consensus.ChainReader) (*Snapshot, error) 
 		return nil, err
 	}
 	valSet := validator.NewValidatorSet(istanbulExtra.Validators, nil,
-		istanbul.ProposerPolicy(pset.Policy()),
+		params.ProposerPolicy(pset.Policy()),
 		pset.CommitteeSize(), chain)
 	valSet.SetMixHash(genesis.MixHash)
 	snap := newSnapshot(sb.governance, 0, genesis.Hash(), valSet, chain.Config())
@@ -988,7 +988,7 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 	if err != nil {
 		return nil, err
 	}
-	snap, err = snap.apply(headers, sb.governance, sb.address, pset.Policy(), chain, writable)
+	snap, err = snap.apply(headers, sb.governance, sb.address, params.ProposerPolicy(pset.Policy()), chain, writable)
 	if err != nil {
 		return nil, err
 	}

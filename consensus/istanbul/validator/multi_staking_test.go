@@ -40,13 +40,13 @@ import (
 	"testing"
 
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
+	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/reward"
 	"github.com/stretchr/testify/assert"
 )
 
 func newTestWeightedCouncil(nodeAddrs []common.Address) *weightedCouncil {
-	return NewWeightedCouncil(nodeAddrs, nil, nil, make([]uint64, len(nodeAddrs)), nil, istanbul.WeightedRandom, 0, 0, 0, nil)
+	return NewWeightedCouncil(nodeAddrs, nil, nil, make([]uint64, len(nodeAddrs)), nil, params.WeightedRandom, 0, 0, 0, nil)
 }
 
 // TestWeightedCouncil_getStakingAmountsOfValidators checks if validators and stakingAmounts from a stakingInfo are matched well.

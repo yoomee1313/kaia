@@ -105,7 +105,7 @@ type ValidatorSet interface {
 	// Get the maximum number of faulty nodes
 	F() int
 	// Get proposer policy
-	Policy() ProposerPolicy
+	Policy() params.ProposerPolicy
 
 	IsSubSet() bool
 

@@ -70,7 +70,7 @@ func newMockBackend(t *testing.T, validatorAddrs []common.Address) (*mock_istanb
 
 	eventMux := new(event.TypeMux)
 	validatorSet := validator.NewWeightedCouncil(validatorAddrs, nil, validatorAddrs, nil, nil,
-		istanbul.WeightedRandom, committeeSize, 0, 0, &blockchain.BlockChain{})
+		params.WeightedRandom, committeeSize, 0, 0, &blockchain.BlockChain{})
 
 	mockCtrl := gomock.NewController(t)
 	mockBackend := mock_istanbul.NewMockBackend(mockCtrl)
@@ -261,7 +261,7 @@ func TestCore_handleEvents_scenario_invalidSender(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 
 	// When the istanbul core started, a message handling loop in `handleEvents()` waits istanbul messages
 	istCore := New(mockBackend, istConfig).(*core)
@@ -440,7 +440,7 @@ func TestCore_handlerMsg(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 
 	istCore := New(mockBackend, istConfig).(*core)
 	if err := istCore.Start(); err != nil {
@@ -570,7 +570,7 @@ func simulateMaliciousCN(t *testing.T, numValidators int, numMalicious int) Stat
 
 	// Start istanbul core
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 	istCore := New(mockBackend, istConfig).(*core)
 	err := istCore.Start()
 	require.Nil(t, err)
@@ -659,7 +659,7 @@ func simulateChainSplit(t *testing.T, numValidators int) (State, State) {
 
 	// Start istanbul core
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 	coreProposer := New(mockBackend, istConfig).(*core)
 	coreA := New(mockBackend, istConfig).(*core)
 	coreB := New(mockBackend, istConfig).(*core)
@@ -783,7 +783,7 @@ func TestCore_handleTimeoutMsg_race(t *testing.T) {
 	defer mockCtrl.Finish()
 
 	istConfig := istanbul.DefaultConfig
-	istConfig.ProposerPolicy = istanbul.WeightedRandom
+	istConfig.ProposerPolicy = params.WeightedRandom
 
 	istCore := New(mockBackend, istConfig).(*core)
 	if err := istCore.Start(); err != nil {

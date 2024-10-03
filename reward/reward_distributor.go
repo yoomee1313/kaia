@@ -204,11 +204,6 @@ func GetTotalTxFee(header *types.Header, txs []*types.Transaction, receipts []*t
 	return totalFee
 }
 
-// config.Istanbul must have been set
-func IsRewardSimple(pset *params.GovParamSet) bool {
-	return pset.Policy() != uint64(istanbul.WeightedRandom)
-}
-
 // CalcRewardParamBlock returns the block number with which governance parameters must be fetched
 // This mimics the legacy reward config cache before Kore
 func CalcRewardParamBlock(num, epoch uint64, rules params.Rules) uint64 {
@@ -227,7 +222,7 @@ func GetTotalReward(header *types.Header, txs []*types.Transaction, receipts []*
 		return nil, err
 	}
 
-	if IsRewardSimple(pset) {
+	if params.ProposerPolicy(pset.Policy()).IsDefaultSet() {
 		spec, err := CalcDeferredRewardSimple(header, txs, receipts, rules, pset)
 		if err != nil {
 			return nil, err
@@ -261,7 +256,7 @@ func GetBlockReward(header *types.Header, txs []*types.Transaction, receipts []*
 	var spec *RewardSpec
 	var err error
 
-	if IsRewardSimple(pset) {
+	if params.ProposerPolicy(pset.Policy()).IsDefaultSet() {
 		spec, err = CalcDeferredRewardSimple(header, txs, receipts, rules, pset)
 		if err != nil {
 			return nil, err

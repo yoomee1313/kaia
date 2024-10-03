@@ -111,13 +111,13 @@ var (
 		params.Kip82Ratio:                "reward.kip82ratio",
 	}
 
-	ProposerPolicyMap = map[string]int{
+	ProposerPolicyMap = map[string]params.ProposerPolicy{
 		"roundrobin":     params.RoundRobin,
 		"sticky":         params.Sticky,
 		"weightedrandom": params.WeightedRandom,
 	}
 
-	ProposerPolicyMapReverse = map[int]string{
+	ProposerPolicyMapReverse = map[params.ProposerPolicy]string{
 		params.RoundRobin:     "roundrobin",
 		params.Sticky:         "sticky",
 		params.WeightedRandom: "weightedrandom",

@@ -41,7 +41,6 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/consensus"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	istanbulBackend "github.com/kaiachain/kaia/consensus/istanbul/backend"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/datasync/downloader"
@@ -371,7 +370,7 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	}
 
 	// Setup reward related components
-	if pset.Policy() == uint64(istanbul.WeightedRandom) {
+	if params.ProposerPolicy(pset.Policy()).IsWeightedCouncil() {
 		// NewStakingManager is called with proper non-nil parameters
 		reward.NewStakingManager(cn.blockchain, governance, cn.chainDB)
 	}

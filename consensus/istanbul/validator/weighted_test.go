@@ -56,7 +56,7 @@ func TestNewWeightedCouncil(t *testing.T) {
 	}
 
 	// Create ValidatorSet
-	valSet := NewWeightedCouncil(ExtractValidators(b), nil, rewardAddrs, votingPowers, nil, istanbul.WeightedRandom, 21, 0, 0, nil)
+	valSet := NewWeightedCouncil(ExtractValidators(b), nil, rewardAddrs, votingPowers, nil, params.WeightedRandom, 21, 0, 0, nil)
 	if valSet == nil {
 		t.Errorf("the validator byte array cannot be parsed")
 		t.FailNow()
@@ -98,7 +98,7 @@ func TestNormalWeightedCouncil(t *testing.T) {
 	val1 := newWeightedValidator(addr1, rewardAddr1, votingPower1, weight1)
 	val2 := newWeightedValidator(addr2, rewardAddr2, votingPower2, weight2)
 
-	valSet := NewWeightedCouncil([]common.Address{addr1, addr2}, nil, []common.Address{rewardAddr1, rewardAddr2}, []uint64{votingPower1, votingPower2}, []uint64{weight1, weight2}, istanbul.WeightedRandom, 21, 0, 0, nil)
+	valSet := NewWeightedCouncil([]common.Address{addr1, addr2}, nil, []common.Address{rewardAddr1, rewardAddr2}, []uint64{votingPower1, votingPower2}, []uint64{weight1, weight2}, params.WeightedRandom, 21, 0, 0, nil)
 	if valSet == nil {
 		t.Errorf("the format of validator set is invalid")
 		t.FailNow()
@@ -171,7 +171,7 @@ func TestNormalWeightedCouncil(t *testing.T) {
 }
 
 func TestEmptyWeightedCouncil(t *testing.T) {
-	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, istanbul.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
+	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, params.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
 	if valSet == nil {
 		t.Errorf("validator set should not be nil")
 	}
@@ -179,10 +179,10 @@ func TestEmptyWeightedCouncil(t *testing.T) {
 
 func TestNewWeightedCouncil_InvalidPolicy(t *testing.T) {
 	// Invalid proposer policy
-	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, istanbul.Sticky, 0, 0, 0, &blockchain.BlockChain{})
+	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, params.Sticky, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 
-	valSet = NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, istanbul.RoundRobin, 0, 0, 0, &blockchain.BlockChain{})
+	valSet = NewWeightedCouncil(ExtractValidators([]byte{}), nil, nil, nil, nil, params.RoundRobin, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 }
 
@@ -211,21 +211,21 @@ func TestNewWeightedCouncil_IncompleteParams(t *testing.T) {
 	}
 
 	// No validator address
-	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, rewardAddrs, votingPowers, weights, istanbul.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
+	valSet := NewWeightedCouncil(ExtractValidators([]byte{}), nil, rewardAddrs, votingPowers, weights, params.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 
 	// Incomplete rewardAddrs
 	incompleteRewardAddrs := make([]common.Address, 1)
-	valSet = NewWeightedCouncil(ExtractValidators(b), nil, incompleteRewardAddrs, nil, nil, istanbul.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
+	valSet = NewWeightedCouncil(ExtractValidators(b), nil, incompleteRewardAddrs, nil, nil, params.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 
 	// Incomplete rewardAddrs
 	incompleteVotingPowers := make([]uint64, 1)
-	valSet = NewWeightedCouncil(ExtractValidators(b), nil, nil, incompleteVotingPowers, nil, istanbul.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
+	valSet = NewWeightedCouncil(ExtractValidators(b), nil, nil, incompleteVotingPowers, nil, params.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 
 	// Incomplete rewardAddrs
 	incompleteWeights := make([]uint64, 1)
-	valSet = NewWeightedCouncil(ExtractValidators(b), nil, nil, nil, incompleteWeights, istanbul.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
+	valSet = NewWeightedCouncil(ExtractValidators(b), nil, nil, nil, incompleteWeights, params.WeightedRandom, 0, 0, 0, &blockchain.BlockChain{})
 	assert.Equal(t, (*weightedCouncil)(nil), valSet)
 }

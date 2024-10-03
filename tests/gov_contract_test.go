@@ -30,7 +30,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	govcontract "github.com/kaiachain/kaia/contracts/contracts/system_contracts/gov"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/log"
@@ -54,7 +53,7 @@ func TestGovernance_Engines(t *testing.T) {
 
 	config.Istanbul.Epoch = 2
 	config.Istanbul.SubGroupSize = 1
-	config.Istanbul.ProposerPolicy = uint64(istanbul.RoundRobin)
+	config.Istanbul.ProposerPolicy = uint64(params.RoundRobin)
 	config.Governance.Reward.MintingAmount = new(big.Int).Mul(big.NewInt(9000000000000000000), big.NewInt(params.KAIA))
 	config.Governance.Reward.Kip82Ratio = params.DefaultKip82Ratio
 

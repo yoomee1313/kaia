@@ -28,7 +28,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	kip149contract "github.com/kaiachain/kaia/contracts/contracts/system_contracts/kip149"
 	proxycontract "github.com/kaiachain/kaia/contracts/contracts/system_contracts/proxy"
 	testcontract "github.com/kaiachain/kaia/contracts/contracts/testing/system_contracts"
@@ -148,7 +147,7 @@ func testRandao_config(forkNum *big.Int, owner, kip113Addr common.Address) *para
 	config.RandaoCompatibleBlock = forkNum
 
 	// Use WeightedRandom to test KIP-146 random proposer selection
-	config.Istanbul.ProposerPolicy = uint64(istanbul.WeightedRandom)
+	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 
 	if forkNum.Sign() != 0 {
 		// RandaoRegistry is only effective if forkNum > 0

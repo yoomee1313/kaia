@@ -78,14 +78,21 @@ const (
 	GovernanceMode_Ballot
 )
 
+type ProposerPolicy uint64
+
 const (
-	// Proposer policy
-	// At the moment this is duplicated in istanbul/config.go, not to make a cross reference
-	// TODO-Klatn-Governance: Find a way to manage below constants at single location
-	RoundRobin = iota
+	RoundRobin ProposerPolicy = iota
 	Sticky
 	WeightedRandom
 )
+
+func (policy ProposerPolicy) IsWeightedCouncil() bool {
+	return policy == WeightedRandom
+}
+
+func (policy ProposerPolicy) IsDefaultSet() bool {
+	return policy == RoundRobin || policy == Sticky
+}
 
 var (
 	// Default Values: Constants used for getting default values for configuration

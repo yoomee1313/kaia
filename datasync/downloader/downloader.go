@@ -227,7 +227,7 @@ type BlockChain interface {
 }
 
 // New creates a new downloader to fetch hashes and blocks from remote peers.
-func New(mode SyncMode, stateDB database.DBManager, stateBloom *statedb.SyncBloom, mux *event.TypeMux, chain BlockChain, lightchain LightChain, dropPeer peerDropFn, proposerPolicy uint64) *Downloader {
+func New(mode SyncMode, stateDB database.DBManager, stateBloom *statedb.SyncBloom, mux *event.TypeMux, chain BlockChain, lightchain LightChain, dropPeer peerDropFn) *Downloader {
 	if lightchain == nil {
 		lightchain = chain
 	}
@@ -239,7 +239,7 @@ func New(mode SyncMode, stateDB database.DBManager, stateBloom *statedb.SyncBloo
 		mux:                       mux,
 		isStakingInfoRecovery:     false,
 		stakingInfoRecoveryBlocks: []uint64{},
-		queue:                     newQueue(blockCacheMaxItems, blockCacheInitialItems, proposerPolicy, chain.Config()),
+		queue:                     newQueue(blockCacheMaxItems, blockCacheInitialItems, chain.Config()),
 		peers:                     newPeerSet(),
 		rttEstimate:               uint64(rttMaxEstimate),
 		rttConfidence:             uint64(1000000),

@@ -26,7 +26,6 @@ import (
 
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
 	"github.com/stretchr/testify/assert"
@@ -293,22 +292,22 @@ func TestRewardDistributor_GetTotalReward(t *testing.T) {
 	}
 	testcases := []struct {
 		desc          string
-		policy        istanbul.ProposerPolicy
+		policy        params.ProposerPolicy
 		deferredTxFee bool
 		expected      *TotalReward
 	}{
 		{
-			policy:        istanbul.RoundRobin,
+			policy:        params.RoundRobin,
 			deferredTxFee: true,
 			expected:      &TotalReward{Minted: minted, BurntFee: big.NewInt(500)},
 		},
 		{
-			policy:        istanbul.RoundRobin,
+			policy:        params.RoundRobin,
 			deferredTxFee: false,
 			expected:      &TotalReward{Minted: minted, BurntFee: big.NewInt(500)},
 		},
 		{
-			policy:        istanbul.WeightedRandom,
+			policy:        params.WeightedRandom,
 			deferredTxFee: true,
 			expected:      &TotalReward{Minted: minted, BurntFee: big.NewInt(1000)},
 		},
@@ -371,12 +370,12 @@ func TestRewardDistributor_GetBlockReward(t *testing.T) {
 	}
 
 	testcases := []struct {
-		policy        istanbul.ProposerPolicy
+		policy        params.ProposerPolicy
 		deferredTxFee bool
 		expected      *RewardSpec
 	}{
 		{
-			policy:        istanbul.RoundRobin,
+			policy:        params.RoundRobin,
 			deferredTxFee: true,
 			expected: &RewardSpec{
 				Minted:   minted,
@@ -392,7 +391,7 @@ func TestRewardDistributor_GetBlockReward(t *testing.T) {
 			},
 		},
 		{
-			policy:        istanbul.RoundRobin,
+			policy:        params.RoundRobin,
 			deferredTxFee: false,
 			expected: &RewardSpec{
 				Minted:   minted,
@@ -408,7 +407,7 @@ func TestRewardDistributor_GetBlockReward(t *testing.T) {
 			},
 		},
 		{
-			policy:        istanbul.WeightedRandom,
+			policy:        params.WeightedRandom,
 			deferredTxFee: true,
 			expected: &RewardSpec{
 				Minted:   minted,
@@ -428,7 +427,7 @@ func TestRewardDistributor_GetBlockReward(t *testing.T) {
 			},
 		},
 		{
-			policy:        istanbul.WeightedRandom,
+			policy:        params.WeightedRandom,
 			deferredTxFee: false,
 			expected: &RewardSpec{
 				Minted:   minted,

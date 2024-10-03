@@ -23,7 +23,6 @@ import (
 	"github.com/kaiachain/kaia/accounts/abi/bind"
 	"github.com/kaiachain/kaia/accounts/abi/bind/backends"
 	"github.com/kaiachain/kaia/blockchain"
-	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/contracts/contracts/system_contracts/rebalance"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
@@ -41,7 +40,7 @@ func TestRebalanceTreasury_EOA(t *testing.T) {
 	config.MagmaCompatibleBlock = big.NewInt(0)
 	config.KoreCompatibleBlock = big.NewInt(0)
 	config.Istanbul.SubGroupSize = 1
-	config.Istanbul.ProposerPolicy = uint64(istanbul.RoundRobin)
+	config.Istanbul.ProposerPolicy = uint64(params.RoundRobin)
 	config.Governance.Reward.MintingAmount = new(big.Int).Mul(big.NewInt(9000000000000000000), big.NewInt(params.KAIA))
 
 	// make a blockchain node
