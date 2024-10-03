@@ -122,11 +122,7 @@ func TestBasics(t *testing.T) {
 	numOfReceipts := len(chain.blocks) / 2
 	numOfStakingInfos := len(chain.stakingInfos)
 
-	config := params.TestChainConfig
-	config.Istanbul = params.GetDefaultIstanbulConfig()
-	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
-
-	q := newQueue(10, 10, config)
+	q := newQueue(10, 10, params.MainnetChainConfig.Copy())
 	if !q.Idle() {
 		t.Errorf("new queue should be idle")
 	}
@@ -262,10 +258,8 @@ func TestScheduleAfterKaia(t *testing.T) {
 	params.SetStakingUpdateInterval(testInterval)
 	defer params.SetStakingUpdateInterval(orig)
 
-	config := params.TestChainConfig
+	config := params.MainnetChainConfig.Copy()
 	config.KaiaCompatibleBlock = big.NewInt(21)
-	config.Istanbul = params.GetDefaultIstanbulConfig()
-	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
 
 	numOfStakingInfos := 5 // [4, 8, 12, 16, 20]; After kaia fork, it won't be scheduled.
 
@@ -314,11 +308,7 @@ func TestEmptyBlocks(t *testing.T) {
 	numOfBlocks := len(emptyChain.blocks)
 	numOfStakingInfos := len(emptyChain.stakingInfos)
 
-	config := params.TestChainConfig
-	config.Istanbul = params.GetDefaultIstanbulConfig()
-	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
-
-	q := newQueue(10, 10, config)
+	q := newQueue(10, 10, params.MainnetChainConfig.Copy())
 
 	q.Prepare(1, FastSync)
 	// Schedule a batch of headers
@@ -427,11 +417,7 @@ func XTestDelivery(t *testing.T) {
 		log.Root().SetHandler(log.StdoutHandler)
 	}
 
-	config := params.TestChainConfig
-	config.Istanbul = params.GetDefaultIstanbulConfig()
-	config.Istanbul.ProposerPolicy = uint64(params.WeightedRandom)
-
-	q := newQueue(10, 10, config)
+	q := newQueue(10, 10, params.MainnetChainConfig.Copy())
 	var wg sync.WaitGroup
 	q.Prepare(1, FastSync)
 	wg.Add(1)
