@@ -28,15 +28,12 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/fork"
 	"github.com/kaiachain/kaia/params"
@@ -87,6 +84,15 @@ func (val *weightedValidator) Weight() uint64 {
 	return atomic.LoadUint64(&val.weight)
 }
 
+func (val *weightedValidator) Copy() istanbul.Validator {
+	return &weightedValidator{
+		address:       val.address,
+		rewardAddress: val.rewardAddress,
+		votingPower:   val.votingPower,
+		weight:        val.weight,
+	}
+}
+
 func newWeightedValidator(addr common.Address, reward common.Address, votingpower uint64, weight uint64) istanbul.Validator {
 	weightedValidator := &weightedValidator{
 		address:     addr,
@@ -98,13 +104,9 @@ func newWeightedValidator(addr common.Address, reward common.Address, votingpowe
 }
 
 type weightedCouncil struct {
-	subSize           uint64
-	demotedValidators istanbul.Validators // validators staking KAIA less than minimum, and not in committee/proposers
-	validators        istanbul.Validators // validators staking KAIA more than and equals to minimum, and in committee/proposers
-	policy            params.ProposerPolicy
+	defaultSet
 
-	proposer    atomic.Value // istanbul.Validator
-	validatorMu sync.RWMutex // this validator mutex protects concurrent usage of validators and demotedValidators
+	demotedValidators istanbul.Validators // validators staking KAIA less than minimum, and not in committee/proposers
 
 	// TODO-Kaia-Governance proposers means that the proposers for next block, so refactor it.
 	// proposers are determined on a specific block, but it can be removed after votes.
@@ -117,36 +119,14 @@ type weightedCouncil struct {
 	mixHash  []byte // mixHash at blockNum
 }
 
-func RecoverWeightedCouncilProposer(valSet istanbul.ValidatorSet, proposerAddrs []common.Address) {
-	weightedCouncil, ok := valSet.(*weightedCouncil)
-	if !ok {
-		logger.Error("Not weightedCouncil type. Return without recovering.")
-		return
-	}
-
-	proposers := []istanbul.Validator{}
-
-	for i, proposerAddr := range proposerAddrs {
-		_, val := weightedCouncil.GetByAddress(proposerAddr)
-		if val == nil {
-			logger.Error("Proposer is not available now.", "proposer address", proposerAddr)
-		}
-		proposers = append(proposers, val)
-
-		// TODO-Klaytn-Issue1166 Disable Trace log later
-		logger.Trace("RecoverWeightedCouncilProposer() proposers", "i", i, "address", val.Address().String())
-	}
-	weightedCouncil.proposers = proposers
-}
-
-func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, rewards []common.Address, votingPowers []uint64, weights []uint64, policy params.ProposerPolicy, committeeSize uint64, blockNum uint64, proposersBlockNum uint64, chain consensus.ChainReader) *weightedCouncil {
-	if policy != params.WeightedRandom {
+func NewWeightedCouncil(addrs []common.Address, policy params.ProposerPolicy, committeeSize uint64,
+	demotedAddrs []common.Address, rewards []common.Address, votingPowers []uint64, weights []uint64,
+	proposersBlockNum uint64, proposers []common.Address, blockNum uint64, mixHash []byte,
+) *weightedCouncil {
+	if !policy.IsWeightedCouncil() {
 		logger.Error("unsupported proposer policy for weighted council", "policy", policy)
 		return nil
 	}
-
-	valSet := &weightedCouncil{}
-	valSet.policy = policy
 
 	// prepare rewards if necessary
 	if rewards == nil {
@@ -165,24 +145,8 @@ func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, r
 	// prepare votingPowers if necessary
 	if votingPowers == nil {
 		votingPowers = make([]uint64, len(addrs))
-		if chain == nil {
-			logger.Crit("Requires chain to initialize voting powers.")
-		}
-
-		//stateDB, err := chain.State()
-		//if err != nil {
-		//	logger.Crit("Failed to get statedb from chain.")
-		//}
-
 		for i := range addrs {
-			// TODO-Kaia-TokenEconomy: Use default value until the formula to calculate votingpower released
 			votingPowers[i] = 1000
-			//staking := stateDB.GetBalance(addr)
-			//if staking.Cmp(common.Big0) == 0 {
-			//	votingPowers[i] = 1
-			//} else {
-			//	votingPowers[i] = 2
-			//}
 		}
 	}
 
@@ -193,77 +157,48 @@ func NewWeightedCouncil(addrs []common.Address, demotedAddrs []common.Address, r
 		return nil
 	}
 
-	// init validators
+	valSet := &weightedCouncil{}
+	// init defaultSet
 	valSet.validators = make([]istanbul.Validator, len(addrs))
 	for i, addr := range addrs {
 		valSet.validators[i] = newWeightedValidator(addr, rewards[i], votingPowers[i], weights[i])
 	}
-
-	// sort validators
 	sort.Sort(valSet.validators)
+	valSet.policy = policy
+	valSet.subSize = committeeSize
 
 	// init demoted validators
 	valSet.demotedValidators = make([]istanbul.Validator, len(demotedAddrs))
 	for i, addr := range demotedAddrs {
 		valSet.demotedValidators[i] = newWeightedValidator(addr, common.Address{}, 1000, 0)
 	}
-
-	// sort demoted validators
 	sort.Sort(valSet.demotedValidators)
 
-	// init proposer
+	// init proposer(s)
 	if valSet.Size() > 0 {
 		valSet.proposer.Store(valSet.GetByIndex(0))
 	}
-	valSet.SetSubGroupSize(committeeSize)
-
-	valSet.blockNum = blockNum
-	valSet.proposers = make([]istanbul.Validator, len(addrs))
-	copy(valSet.proposers, valSet.validators)
+	// recover proposers
+	for _, addr := range proposers {
+		_, val := valSet.GetByAddress(addr)
+		if val == nil {
+			valSet.proposers = nil
+			break
+		}
+		valSet.proposers = append(valSet.proposers, val)
+	}
+	if valSet.proposers == nil {
+		valSet.proposers = valSet.validators.Copy()
+	}
 	valSet.proposersBlockNum = proposersBlockNum
+
+	// init additional weightedrandom fields
+	valSet.blockNum = blockNum
+	valSet.mixHash = mixHash
 
 	logger.Trace("Allocate new weightedCouncil", "weightedCouncil", valSet)
 
 	return valSet
-}
-
-func GetWeightedCouncilData(valSet istanbul.ValidatorSet) (validators []common.Address, demotedValidators []common.Address, rewardAddrs []common.Address, votingPowers []uint64, weights []uint64, proposers []common.Address, proposersBlockNum uint64, mixHash []byte) {
-	weightedCouncil, ok := valSet.(*weightedCouncil)
-	if !ok {
-		logger.Error("not weightedCouncil type.")
-		return
-	}
-
-	if weightedCouncil.Policy().IsWeightedCouncil() {
-		numVals := len(weightedCouncil.validators)
-		validators = make([]common.Address, numVals)
-		rewardAddrs = make([]common.Address, numVals)
-		votingPowers = make([]uint64, numVals)
-		weights = make([]uint64, numVals)
-		for i, val := range weightedCouncil.List() {
-			weightedVal := val.(*weightedValidator)
-			validators[i] = weightedVal.address
-			rewardAddrs[i] = weightedVal.RewardAddress()
-			votingPowers[i] = weightedVal.votingPower
-			weights[i] = atomic.LoadUint64(&weightedVal.weight)
-		}
-
-		numDemoted := len(weightedCouncil.demotedValidators)
-		demotedValidators = make([]common.Address, numDemoted)
-		for i, val := range weightedCouncil.demotedValidators {
-			demotedValidators[i] = val.Address()
-		}
-
-		proposers = make([]common.Address, len(weightedCouncil.proposers))
-		for i, proposer := range weightedCouncil.proposers {
-			proposers[i] = proposer.Address()
-		}
-		proposersBlockNum = weightedCouncil.proposersBlockNum
-		mixHash = weightedCouncil.mixHash
-	} else {
-		logger.Error("invalid proposer policy for weightedCouncil")
-	}
-	return
 }
 
 func (valSet *weightedCouncil) GetNextProposerByRound(lastProposer common.Address, round uint64) istanbul.Validator {
@@ -299,32 +234,7 @@ func (valSet *weightedCouncil) GetNextProposerByRound(lastProposer common.Addres
 	return proposer
 }
 
-func (valSet *weightedCouncil) Size() uint64 {
-	valSet.validatorMu.RLock()
-	defer valSet.validatorMu.RUnlock()
-	return uint64(len(valSet.validators))
-}
-
-func (valSet *weightedCouncil) SubGroupSize() uint64 {
-	return valSet.subSize
-}
-
-// SetSubGroupSize sets committee size of the valSet.
-func (valSet *weightedCouncil) SetSubGroupSize(size uint64) {
-	if size == 0 {
-		logger.Error("cannot assign committee size to 0")
-		return
-	}
-	valSet.subSize = size
-}
-
-func (valSet *weightedCouncil) List() []istanbul.Validator {
-	valSet.validatorMu.RLock()
-	defer valSet.validatorMu.RUnlock()
-	return valSet.validators
-}
-
-func (valSet *weightedCouncil) DemotedList() []istanbul.Validator {
+func (valSet *weightedCouncil) DemotedList() istanbul.Validators {
 	valSet.validatorMu.RLock()
 	defer valSet.validatorMu.RUnlock()
 	return valSet.demotedValidators
@@ -438,20 +348,6 @@ func (valSet *weightedCouncil) CheckInSubList(prevHash common.Hash, view *istanb
 	return false
 }
 
-func (valSet *weightedCouncil) IsSubSet() bool {
-	// TODO-Kaia-RemoveLater We don't use this interface anymore. Eventually let's remove this function from ValidatorSet interface.
-	return valSet.Size() > valSet.subSize
-}
-
-func (valSet *weightedCouncil) GetByIndex(i uint64) istanbul.Validator {
-	valSet.validatorMu.RLock()
-	defer valSet.validatorMu.RUnlock()
-	if i < uint64(len(valSet.validators)) {
-		return valSet.validators[i]
-	}
-	return nil
-}
-
 func (valSet *weightedCouncil) getByAddress(addr common.Address) (int, istanbul.Validator) {
 	for i, val := range valSet.validators {
 		if addr == val.Address() {
@@ -464,6 +360,12 @@ func (valSet *weightedCouncil) getByAddress(addr common.Address) (int, istanbul.
 	return -1, nil
 }
 
+func (valSet *weightedCouncil) GetByAddress(addr common.Address) (int, istanbul.Validator) {
+	valSet.validatorMu.RLock()
+	defer valSet.validatorMu.RUnlock()
+	return valSet.getByAddress(addr)
+}
+
 func (valSet *weightedCouncil) getDemotedByAddress(addr common.Address) (int, istanbul.Validator) {
 	for i, val := range valSet.demotedValidators {
 		if addr == val.Address() {
@@ -473,27 +375,10 @@ func (valSet *weightedCouncil) getDemotedByAddress(addr common.Address) (int, is
 	return -1, nil
 }
 
-func (valSet *weightedCouncil) GetByAddress(addr common.Address) (int, istanbul.Validator) {
-	valSet.validatorMu.RLock()
-	defer valSet.validatorMu.RUnlock()
-	return valSet.getByAddress(addr)
-}
-
 func (valSet *weightedCouncil) GetDemotedByAddress(addr common.Address) (int, istanbul.Validator) {
 	valSet.validatorMu.RLock()
 	defer valSet.validatorMu.RUnlock()
 	return valSet.getDemotedByAddress(addr)
-}
-
-func (valSet *weightedCouncil) GetProposer() istanbul.Validator {
-	// TODO-Kaia-Istanbul: nil check for valSet.proposer is needed
-	// logger.Trace("GetProposer()", "proposer", valSet.proposer)
-	return valSet.proposer.Load().(istanbul.Validator)
-}
-
-func (valSet *weightedCouncil) IsProposer(address common.Address) bool {
-	_, val := valSet.GetByAddress(address)
-	return reflect.DeepEqual(valSet.GetProposer(), val)
 }
 
 func (valSet *weightedCouncil) CalcProposer(lastProposer common.Address, round uint64) {
@@ -574,12 +459,12 @@ func (valSet *weightedCouncil) RemoveValidator(address common.Address) bool {
 	return false
 }
 
-func (valSet *weightedCouncil) ReplaceValidators(vals []istanbul.Validator) bool {
+func (valSet *weightedCouncil) ReplaceValidators(vals istanbul.Validators) bool {
 	valSet.validatorMu.Lock()
 	defer valSet.validatorMu.Unlock()
 
-	valSet.validators = istanbul.Validators(make([]istanbul.Validator, len(vals)))
-	copy(valSet.validators, istanbul.Validators(vals))
+	valSet.validators = make(istanbul.Validators, len(vals))
+	copy(valSet.validators, vals)
 	return true
 }
 
@@ -588,9 +473,11 @@ func (valSet *weightedCouncil) Copy() istanbul.ValidatorSet {
 	defer valSet.validatorMu.RUnlock()
 
 	newWeightedCouncil := weightedCouncil{
-		subSize:           valSet.subSize,
-		policy:            valSet.policy,
-		proposer:          valSet.proposer,
+		defaultSet: defaultSet{
+			subSize:  valSet.subSize,
+			policy:   valSet.policy,
+			proposer: valSet.proposer,
+		},
 		stakingInfo:       valSet.stakingInfo,
 		proposersBlockNum: valSet.proposersBlockNum,
 		blockNum:          valSet.blockNum,
@@ -609,16 +496,6 @@ func (valSet *weightedCouncil) Copy() istanbul.ValidatorSet {
 
 	return &newWeightedCouncil
 }
-
-func (valSet *weightedCouncil) F() int {
-	if valSet.Size() > valSet.subSize {
-		return int(math.Ceil(float64(valSet.subSize)/3)) - 1
-	} else {
-		return int(math.Ceil(float64(valSet.Size())/3)) - 1
-	}
-}
-
-func (valSet *weightedCouncil) Policy() params.ProposerPolicy { return valSet.policy }
 
 // RefreshValSet recalculates up-to-date validators at the staking block number.
 // It returns an error if it can't make up-to-date validators
@@ -921,16 +798,8 @@ func (valSet *weightedCouncil) refreshProposers(seed int64, blockNum uint64) {
 	valSet.proposersBlockNum = blockNum
 }
 
-func (valSet *weightedCouncil) SetBlockNum(blockNum uint64) {
-	valSet.blockNum = blockNum
-}
-
 func (valSet *weightedCouncil) SetMixHash(mixHash []byte) {
 	valSet.mixHash = mixHash
-}
-
-func (valSet *weightedCouncil) Proposers() []istanbul.Validator {
-	return valSet.proposers
 }
 
 func (valSet *weightedCouncil) TotalVotingPower() uint64 {
@@ -941,6 +810,47 @@ func (valSet *weightedCouncil) TotalVotingPower() uint64 {
 	return sum
 }
 
-//func (valSet *weightedCouncil) Selector(valS istanbul.ValidatorSet, lastProposer common.Address, round uint64) istanbul.Validator {
-//	return valSet.selector(valS, lastProposer, round)
-//}
+func (valSet *weightedCouncil) ApplyValSetFromVoteSnapshot(config *params.ChainConfig, number uint64, committeeSize uint64, mixHash []byte) {
+	valSet.blockNum = number
+
+	bigNum := new(big.Int).SetUint64(number)
+	if config.IsRandaoForkBlockParent(bigNum) {
+		// The ForkBlock must select proposers using MixHash but (ForkBlock - 1) has no MixHash. Using ZeroMixHash instead.
+		valSet.mixHash = params.ZeroMixHash
+	} else if config.IsRandaoForkEnabled(bigNum) {
+		// Feed parent MixHash
+		valSet.mixHash = mixHash
+	}
+	valSet.defaultSet.ApplyValSetFromVoteSnapshot(config, number, committeeSize, mixHash)
+}
+
+func (valSet *weightedCouncil) GetSnapshotJSONValSetData() (validators []common.Address, demotedValidators []common.Address,
+	rewardAddrs []common.Address, votingPowers []uint64, weights []uint64, proposers []common.Address, proposersBlockNum uint64, mixHash []byte,
+) {
+	numVals := len(valSet.validators)
+	validators = make([]common.Address, numVals)
+	rewardAddrs = make([]common.Address, numVals)
+	votingPowers = make([]uint64, numVals)
+	weights = make([]uint64, numVals)
+	for i, val := range valSet.validators {
+		weightedVal := val.(*weightedValidator)
+		validators[i] = weightedVal.address
+		rewardAddrs[i] = weightedVal.RewardAddress()
+		votingPowers[i] = weightedVal.votingPower
+		weights[i] = atomic.LoadUint64(&weightedVal.weight)
+	}
+
+	numDemoted := len(valSet.demotedValidators)
+	demotedValidators = make([]common.Address, numDemoted)
+	for i, val := range valSet.demotedValidators {
+		demotedValidators[i] = val.Address()
+	}
+
+	proposers = make([]common.Address, len(valSet.proposers))
+	for i, proposer := range valSet.proposers {
+		proposers[i] = proposer.Address()
+	}
+	proposersBlockNum = valSet.proposersBlockNum
+	mixHash = valSet.mixHash
+	return
+}

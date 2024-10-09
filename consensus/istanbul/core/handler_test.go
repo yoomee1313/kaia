@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/istanbul"
@@ -69,8 +68,9 @@ func newMockBackend(t *testing.T, validatorAddrs []common.Address) (*mock_istanb
 	})
 
 	eventMux := new(event.TypeMux)
-	validatorSet := validator.NewWeightedCouncil(validatorAddrs, nil, validatorAddrs, nil, nil,
-		params.WeightedRandom, committeeSize, 0, 0, &blockchain.BlockChain{})
+	validatorSet := validator.NewWeightedCouncil(validatorAddrs, params.WeightedRandom, committeeSize,
+		nil, validatorAddrs, nil, nil,
+		0, nil, 0, nil)
 
 	mockCtrl := gomock.NewController(t)
 	mockBackend := mock_istanbul.NewMockBackend(mockCtrl)

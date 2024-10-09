@@ -131,7 +131,9 @@ func makeTestValidators(weights []uint64) (validators istanbul.Validators) {
 
 func makeTestWeightedCouncil(weights []uint64) (valSet *weightedCouncil) {
 	// prepare weighted council
-	valSet = NewWeightedCouncil(testAddrs, nil, testRewardAddrs, testVotingPowers, weights, params.WeightedRandom, 21, 0, 0, nil)
+	valSet = NewWeightedCouncil(testAddrs, params.WeightedRandom, 21,
+		nil, testRewardAddrs, testVotingPowers, weights,
+		0, nil, 0, nil)
 	return
 }
 
@@ -382,7 +384,7 @@ func TestWeightedCouncil_RemoveValidator(t *testing.T) {
 	}
 
 	assert.Equal(t, uint64(0), valSet.Size())
-	assert.Equal(t, 0, len(valSet.Proposers()))
+	assert.Equal(t, 0, len(valSet.proposers))
 }
 
 func TestWeightedCouncil_RefreshAfterRemoveValidator(t *testing.T) {
@@ -419,7 +421,7 @@ func TestWeightedCouncil_RefreshAfterRemoveValidator(t *testing.T) {
 	}
 
 	assert.Equal(t, uint64(0), valSet.Size())
-	assert.Equal(t, 0, len(valSet.Proposers()))
+	assert.Equal(t, 0, len(valSet.proposers))
 }
 
 func runRefreshForTest(valSet *weightedCouncil) {
@@ -508,7 +510,9 @@ func TestWeightedCouncil_SubListWithProposer(t *testing.T) {
 	defer fork.ClearHardForkBlockNumberConfig()
 
 	// SubsetLen test: various subset length test
-	valSet.SetBlockNum(1)
+	valSet = NewWeightedCouncil(testAddrs, params.WeightedRandom, 21,
+		nil, testRewardAddrs, testVotingPowers, testNonZeroWeights,
+		0, nil, 1, nil)
 	for testSubsetLen := 2; testSubsetLen < len(validators); testSubsetLen++ {
 		// set committee size and calculate proposer
 		valSet.SetSubGroupSize(uint64(testSubsetLen))
@@ -528,7 +532,6 @@ func TestWeightedCouncil_SubListWithProposer(t *testing.T) {
 	assert.Equal(t, len(expectIndexOfRoundTestBeforeIstanbulCompatible), len(expectIndexOfRoundTestAfterIstanbulCompatible))
 
 	// Round test: various round test
-	valSet.SetBlockNum(1)
 	valSet.SetSubGroupSize(uint64(len(validators) - 1))
 	for round := 0; round < len(expectIndexOfRoundTestBeforeIstanbulCompatible); round++ {
 		// calculate proposer and set view with test round value
@@ -617,9 +620,9 @@ func TestWeightedCouncil_Randao(t *testing.T) {
 	}
 
 	for i, tc := range testcases {
-		valSet.SetBlockNum(tc.blockNum)
-		valSet.SetSubGroupSize(tc.committeeSize)
-		valSet.SetMixHash(tc.mixHash)
+		valSet = NewWeightedCouncil(testAddrs, params.WeightedRandom, tc.committeeSize,
+			nil, testRewardAddrs, testVotingPowers, nil,
+			0, nil, tc.blockNum, tc.mixHash)
 
 		view := &istanbul.View{
 			Sequence: big.NewInt(int64(tc.blockNum)),
@@ -639,10 +642,9 @@ func TestWeightedCouncil_Randao(t *testing.T) {
 }
 
 func TestWeightedCouncil_Copy(t *testing.T) {
-	a := makeTestWeightedCouncil(testNonZeroWeights)
-	a.SetSubGroupSize(21)
-	a.SetBlockNum(1234)
-	a.SetMixHash(testMixHash)
+	a := NewWeightedCouncil(testAddrs, params.WeightedRandom, 21,
+		nil, testRewardAddrs, testVotingPowers, testNonZeroWeights,
+		0, nil, 1234, testMixHash)
 
 	b := a.Copy().(*weightedCouncil)
 

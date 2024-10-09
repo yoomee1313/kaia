@@ -62,6 +62,11 @@ func (val *defaultValidator) Hash() int64 {
 func (val *defaultValidator) RewardAddress() common.Address { return common.Address{} }
 func (val *defaultValidator) VotingPower() uint64           { return 1000 }
 func (val *defaultValidator) Weight() uint64                { return 0 }
+func (val *defaultValidator) Copy() istanbul.Validator {
+	return &defaultValidator{
+		address: val.address,
+	}
+}
 
 type defaultSet struct {
 	subSize uint64
@@ -111,13 +116,13 @@ func (valSet *defaultSet) SetSubGroupSize(size uint64) {
 	valSet.subSize = size
 }
 
-func (valSet *defaultSet) List() []istanbul.Validator {
+func (valSet *defaultSet) List() istanbul.Validators {
 	valSet.validatorMu.RLock()
 	defer valSet.validatorMu.RUnlock()
 	return valSet.validators
 }
 
-func (valSet *defaultSet) DemotedList() []istanbul.Validator {
+func (valSet *defaultSet) DemotedList() istanbul.Validators {
 	return nil
 }
 
@@ -329,13 +334,22 @@ func (valSet *defaultSet) RefreshProposers(hash common.Hash, blockNum uint64, co
 	return nil
 }
 
-func (valSet *defaultSet) SetBlockNum(blockNum uint64)     { /* Do nothing */ }
-func (valSet *defaultSet) SetMixHash(mixHash []byte)       { /* Do nothing */ }
-func (valSet *defaultSet) Proposers() []istanbul.Validator { return nil }
+func (valSet *defaultSet) SetMixHash(mixHash []byte) { /* Do nothing */ }
 func (valSet *defaultSet) TotalVotingPower() uint64 {
 	sum := uint64(0)
 	for _, v := range valSet.List() {
 		sum += v.VotingPower()
 	}
 	return sum
+}
+
+func (valSet *defaultSet) ApplyValSetFromVoteSnapshot(config *params.ChainConfig, number uint64, committeeSize uint64, mixHash []byte) {
+	valSet.subSize = committeeSize
+}
+
+func (valSet *defaultSet) GetSnapshotJSONValSetData() (validators []common.Address, demotedValidators []common.Address,
+	rewardAddrs []common.Address, votingPowers []uint64, weights []uint64, proposers []common.Address, proposersBlockNum uint64, mixHash []byte,
+) {
+	validators = valSet.List().SortedAddressList(true)
+	return
 }

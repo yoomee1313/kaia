@@ -23,7 +23,6 @@
 package backend
 
 import (
-	"bytes"
 	"encoding/json"
 	"math/big"
 
@@ -233,24 +232,7 @@ func (s *Snapshot) apply(headers []*types.Header, gov governance.Engine, addr co
 	snap.Number += uint64(len(headers))
 	snap.Hash = headers[len(headers)-1].Hash()
 
-	if snap.ValSet.Policy().IsWeightedCouncil() {
-		snap.ValSet.SetBlockNum(snap.Number)
-
-		bigNum := new(big.Int).SetUint64(snap.Number)
-		if chain.Config().IsRandaoForkBlockParent(bigNum) {
-			// The ForkBlock must select proposers using MixHash but (ForkBlock - 1) has no MixHash. Using ZeroMixHash instead.
-			snap.ValSet.SetMixHash(params.ZeroMixHash)
-		} else if chain.Config().IsRandaoForkEnabled(bigNum) {
-			// Feed parent MixHash
-			snap.ValSet.SetMixHash(headers[len(headers)-1].MixHash)
-		}
-	}
-	snap.ValSet.SetSubGroupSize(snap.CommitteeSize)
-
-	if writable {
-		gov.SetTotalVotingPower(snap.ValSet.TotalVotingPower())
-		gov.SetMyVotingPower(snap.getMyVotingPower(addr))
-	}
+	snap.ValSet.ApplyValSetFromVoteSnapshot(chain.Config(), snap.Number, snap.CommitteeSize, headers[len(headers)-1].MixHash)
 
 	return snap, nil
 }
@@ -264,24 +246,6 @@ func (s *Snapshot) getMyVotingPower(addr common.Address) uint64 {
 	return 0
 }
 
-// validators retrieves the list of authorized validators in ascending order.
-func (s *Snapshot) validators() []common.Address {
-	validators := make([]common.Address, 0, s.ValSet.Size())
-	for _, validator := range s.ValSet.List() {
-		validators = append(validators, validator.Address())
-	}
-	return sortValidatorArray(validators)
-}
-
-// demotedValidators retrieves the list of authorized, but demoted validators in ascending order.
-func (s *Snapshot) demotedValidators() []common.Address {
-	demotedValidators := make([]common.Address, 0, len(s.ValSet.DemotedList()))
-	for _, demotedValidator := range s.ValSet.DemotedList() {
-		demotedValidators = append(demotedValidators, demotedValidator.Address())
-	}
-	return sortValidatorArray(demotedValidators)
-}
-
 func (s *Snapshot) committee(prevHash common.Hash, view *istanbul.View) []common.Address {
 	committeeList := s.ValSet.SubList(prevHash, view)
 
@@ -290,17 +254,6 @@ func (s *Snapshot) committee(prevHash common.Hash, view *istanbul.View) []common
 		committee = append(committee, v.Address())
 	}
 	return committee
-}
-
-func sortValidatorArray(validators []common.Address) []common.Address {
-	for i := 0; i < len(validators); i++ {
-		for j := i + 1; j < len(validators); j++ {
-			if bytes.Compare(validators[i][:], validators[j][:]) > 0 {
-				validators[i], validators[j] = validators[j], validators[i]
-			}
-		}
-	}
-	return validators
 }
 
 type snapshotJSON struct {
@@ -325,23 +278,34 @@ type snapshotJSON struct {
 	MixHash           []byte           `json:"mixHash,omitempty"`
 }
 
-func (s *Snapshot) toJSONStruct() *snapshotJSON {
-	var rewardAddrs []common.Address
-	var votingPowers []uint64
-	var weights []uint64
-	var proposers []common.Address
-	var proposersBlockNum uint64
-	var validators []common.Address
-	var demotedValidators []common.Address
-	var mixHash []byte
-
-	if s.ValSet.Policy().IsWeightedCouncil() {
-		validators, demotedValidators, rewardAddrs, votingPowers, weights, proposers, proposersBlockNum, mixHash = validator.GetWeightedCouncilData(s.ValSet)
-	} else {
-		validators = s.validators()
+// Unmarshal from a json byte array
+func (s *Snapshot) UnmarshalJSON(b []byte) error {
+	var j snapshotJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
 	}
 
-	return &snapshotJSON{
+	s.Epoch = j.Epoch
+	s.Number = j.Number
+	s.Hash = j.Hash
+	s.Votes = j.Votes
+	s.Tally = j.Tally
+
+	if j.Policy.IsWeightedCouncil() {
+		s.ValSet = validator.NewWeightedCouncil(j.Validators, j.Policy, j.SubGroupSize,
+			j.DemotedValidators, j.RewardAddrs, j.VotingPowers, j.Weights,
+			j.ProposersBlockNum, j.Proposers, j.Number, j.MixHash)
+	} else {
+		s.ValSet = validator.NewSubSet(j.Validators, j.Policy, j.SubGroupSize)
+	}
+	return nil
+}
+
+// Marshal to a json byte array
+func (s *Snapshot) MarshalJSON() ([]byte, error) {
+	validators, demotedValidators, rewardAddrs, votingPowers, weights, proposers, proposersBlockNum, mixHash := s.ValSet.GetSnapshotJSONValSetData()
+
+	j := &snapshotJSON{
 		Epoch:             s.Epoch,
 		Number:            s.Number,
 		Hash:              s.Hash,
@@ -358,33 +322,5 @@ func (s *Snapshot) toJSONStruct() *snapshotJSON {
 		DemotedValidators: demotedValidators,
 		MixHash:           mixHash,
 	}
-}
-
-// Unmarshal from a json byte array
-func (s *Snapshot) UnmarshalJSON(b []byte) error {
-	var j snapshotJSON
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-
-	s.Epoch = j.Epoch
-	s.Number = j.Number
-	s.Hash = j.Hash
-	s.Votes = j.Votes
-	s.Tally = j.Tally
-
-	if j.Policy.IsWeightedCouncil() {
-		s.ValSet = validator.NewWeightedCouncil(j.Validators, j.DemotedValidators, j.RewardAddrs, j.VotingPowers, j.Weights, j.Policy, j.SubGroupSize, j.Number, j.ProposersBlockNum, nil)
-		validator.RecoverWeightedCouncilProposer(s.ValSet, j.Proposers)
-		s.ValSet.SetMixHash(j.MixHash)
-	} else {
-		s.ValSet = validator.NewSubSet(j.Validators, j.Policy, j.SubGroupSize)
-	}
-	return nil
-}
-
-// Marshal to a json byte array
-func (s *Snapshot) MarshalJSON() ([]byte, error) {
-	j := s.toJSONStruct()
 	return json.Marshal(j)
 }

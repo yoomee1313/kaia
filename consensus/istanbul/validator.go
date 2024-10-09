@@ -23,6 +23,8 @@
 package istanbul
 
 import (
+	"bytes"
+	"sort"
 	"strings"
 
 	"github.com/kaiachain/kaia/common"
@@ -35,6 +37,7 @@ type Validator interface {
 
 	// String representation of Validator
 	String() string
+	Copy() Validator
 
 	RewardAddress() common.Address
 	VotingPower() uint64
@@ -65,6 +68,45 @@ func (slice Validators) AddressStringList() []string {
 	return stringAddrs
 }
 
+func (slice Validators) Copy() Validators {
+	copiedSlice := make(Validators, 0, len(slice))
+	for _, val := range slice {
+		copiedSlice = append(copiedSlice, val.Copy())
+	}
+	return copiedSlice
+}
+
+// SortedAddressList retrieves the sorted address list of validators in "ascending order".
+// if public is false, sort it using bytes.Compare. It's for public purpose.
+// - public-false usage: (getValidators/getDemotedValidators, defaultSet snap store, prepareExtra.validators)
+// if public is true, sort it using strings.Compare. It's used for internal consensus purpose, especially for the source of committee.
+// - public-true usage: (snap read/store/apply except defaultSet snap store, vrank log)
+// TODO-kaia-valset: unify sorting.
+func (slice Validators) SortedAddressList(public bool) []common.Address {
+	var (
+		copiedSlice = slice.Copy()
+		stringAddrs = make([]common.Address, 0, len(slice))
+	)
+
+	// Sorting based on the public flag
+	if public {
+		// want reverse-sort: ascending order - bytes.Compare(validators[i][:], validators[j][:]) > 0
+		sort.Slice(copiedSlice, func(i, j int) bool {
+			return bytes.Compare(copiedSlice[i].Address().Bytes(), copiedSlice[j].Address().Bytes()) < 0
+		})
+		sort.Sort(sort.Reverse(copiedSlice))
+	} else {
+		// want sort: descending order - strings.Compare(validators[i].String(), validators[j].String()) < 0
+		sort.Sort(copiedSlice)
+	}
+
+	// extract the address list from the validator list
+	for _, val := range copiedSlice {
+		stringAddrs = append(stringAddrs, val.Address())
+	}
+	return stringAddrs
+}
+
 // ----------------------------------------------------------------------------
 
 type ValidatorSet interface {
@@ -77,9 +119,9 @@ type ValidatorSet interface {
 	// Set the sub validator group size
 	SetSubGroupSize(size uint64)
 	// Return the validator array
-	List() []Validator
+	List() Validators
 	// Return the demoted validator array
-	DemotedList() []Validator
+	DemotedList() Validators
 	// SubList composes a committee after setting a proposer with a default value.
 	SubList(prevHash common.Hash, view *View) []Validator
 	// Return whether the given address is one of sub-list
@@ -115,14 +157,15 @@ type ValidatorSet interface {
 	// Refreshes a list of candidate proposers with given hash and blockNum
 	RefreshProposers(hash common.Hash, blockNum uint64, config *params.ChainConfig) error
 
-	SetBlockNum(blockNum uint64)
 	SetMixHash(mixHash []byte)
-
-	Proposers() []Validator // TODO-Klaytn-Issue1166 For debugging
 
 	TotalVotingPower() uint64
 
 	GetNextProposerByRound(lastProposer common.Address, round uint64) Validator
+
+	ApplyValSetFromVoteSnapshot(config *params.ChainConfig, number uint64, committeeSize uint64, mixHash []byte)
+	GetSnapshotJSONValSetData() (validators []common.Address, demotedValidators []common.Address,
+		rewardAddrs []common.Address, votingPowers []uint64, weights []uint64, proposers []common.Address, proposersBlockNum uint64, mixHash []byte)
 }
 
 // ----------------------------------------------------------------------------

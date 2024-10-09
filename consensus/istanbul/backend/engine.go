@@ -481,7 +481,7 @@ func (sb *backend) Prepare(chain consensus.ChainReader, header *types.Header) er
 	}
 
 	// add validators (council list) in snapshot to extraData's validators section
-	extra, err := prepareExtra(header, snap.validators())
+	extra, err := prepareExtra(header, snap.ValSet.List().SortedAddressList(true))
 	if err != nil {
 		return err
 	}
@@ -993,15 +993,20 @@ func (sb *backend) snapshot(chain consensus.ChainReader, number uint64, hash com
 		return nil, err
 	}
 
-	// If we've generated a new checkpoint snapshot, save to disk
-	if writable && params.IsCheckpointInterval(snap.Number) && len(headers) > 0 {
-		if sb.governance.CanWriteGovernanceState(snap.Number) {
-			sb.governance.WriteGovernanceState(snap.Number, true)
+	if writable {
+		sb.governance.SetTotalVotingPower(snap.ValSet.TotalVotingPower())
+		sb.governance.SetMyVotingPower(snap.getMyVotingPower(sb.address))
+
+		// If we've generated a new checkpoint snapshot, save to disk
+		if params.IsCheckpointInterval(snap.Number) && len(headers) > 0 {
+			if sb.governance.CanWriteGovernanceState(snap.Number) {
+				sb.governance.WriteGovernanceState(snap.Number, true)
+			}
+			if err = snap.store(sb.db); err != nil {
+				return nil, err
+			}
+			logger.Trace("Stored voting snapshot to disk", "number", snap.Number, "hash", snap.Hash)
 		}
-		if err = snap.store(sb.db); err != nil {
-			return nil, err
-		}
-		logger.Trace("Stored voting snapshot to disk", "number", snap.Number, "hash", snap.Hash)
 	}
 
 	sb.regen(chain, headers)

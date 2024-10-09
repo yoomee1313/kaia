@@ -88,7 +88,7 @@ func (api *API) GetValidators(number *rpc.BlockNumber) ([]common.Address, error)
 		logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 		return nil, err
 	}
-	return snap.validators(), nil
+	return snap.ValSet.List().SortedAddressList(true), nil
 }
 
 // GetValidatorsAtHash retrieves the list of authorized validators with the given block hash.
@@ -113,7 +113,7 @@ func (api *API) GetValidatorsAtHash(hash common.Hash) ([]common.Address, error) 
 		logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 		return nil, errInternalError
 	}
-	return snap.validators(), nil
+	return snap.ValSet.List().SortedAddressList(true), nil
 }
 
 // GetDemotedValidators retrieves the list of authorized, but demoted validators with the given block number.
@@ -130,14 +130,14 @@ func (api *API) GetDemotedValidators(number *rpc.BlockNumber) ([]common.Address,
 			logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 			return nil, err
 		}
-		return snap.demotedValidators(), nil
+		return snap.ValSet.DemotedList().SortedAddressList(true), nil
 	} else {
 		snap, err := checkStatesAndGetSnapshot(api.chain, api.istanbul, header.Number.Uint64()-1, header.ParentHash)
 		if err != nil {
 			logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 			return nil, err
 		}
-		return snap.demotedValidators(), nil
+		return snap.ValSet.DemotedList().SortedAddressList(true), nil
 	}
 }
 
@@ -155,14 +155,14 @@ func (api *API) GetDemotedValidatorsAtHash(hash common.Hash) ([]common.Address, 
 			logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 			return nil, err
 		}
-		return snap.demotedValidators(), nil
+		return snap.ValSet.DemotedList().SortedAddressList(true), nil
 	} else {
 		snap, err := checkStatesAndGetSnapshot(api.chain, api.istanbul, header.Number.Uint64()-1, header.ParentHash)
 		if err != nil {
 			logger.Error("Failed to get snapshot.", "blockNum", blockNumber, "err", err)
 			return nil, err
 		}
-		return snap.demotedValidators(), nil
+		return snap.ValSet.DemotedList().SortedAddressList(true), nil
 	}
 }
 
@@ -238,7 +238,8 @@ func (api *APIExtension) GetCouncil(number *rpc.BlockNumber) ([]common.Address, 
 		return nil, err
 	}
 
-	return append(snap.validators(), snap.demotedValidators()...), nil
+	// TODO-kaia-kaiax-valset: check the nil list
+	return append(snap.ValSet.List().SortedAddressList(true), snap.ValSet.DemotedList().SortedAddressList(true)...), nil
 }
 
 func (api *APIExtension) GetCouncilSize(number *rpc.BlockNumber) (int, error) {

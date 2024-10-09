@@ -46,7 +46,9 @@ import (
 )
 
 func newTestWeightedCouncil(nodeAddrs []common.Address) *weightedCouncil {
-	return NewWeightedCouncil(nodeAddrs, nil, nil, make([]uint64, len(nodeAddrs)), nil, params.WeightedRandom, 0, 0, 0, nil)
+	return NewWeightedCouncil(nodeAddrs, params.WeightedRandom, 0,
+		nil, nil, make([]uint64, len(nodeAddrs)), nil,
+		0, nil, 0, nil)
 }
 
 // TestWeightedCouncil_getStakingAmountsOfValidators checks if validators and stakingAmounts from a stakingInfo are matched well.
