@@ -80,6 +80,7 @@ require (
 	github.com/tyler-smith/go-bip32 v1.0.0
 	github.com/wealdtech/go-eth2-wallet-encryptor-keystorev4 v1.4.1
 	golang.org/x/exp v0.0.0-20240318143956-a85f2c67cd81
+	gorm.io/gorm v1.20.6
 )
 
 require (
