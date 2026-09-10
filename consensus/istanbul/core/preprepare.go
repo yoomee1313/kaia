@@ -108,7 +108,7 @@ func (c *core) handlePreprepare(msg *bft.Message, src common.Address) error {
 		// if it's a future block, we will handle it again after the duration
 		if err == consensus.ErrFutureBlock {
 			c.stopFuturePreprepareTimer()
-			c.futurePreprepareTimer = time.AfterFunc(duration, func() {
+			c.futurePreprepareTimer = c.scheduler.AfterFunc(duration, func() {
 				c.sendEvent(backlogEvent{
 					src:  src,
 					msg:  msg,

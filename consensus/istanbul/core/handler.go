@@ -92,37 +92,7 @@ func (c *core) handleEvents() {
 			if !ok {
 				return
 			}
-			// A real event arrived, process interesting content
-			switch ev := event.Data.(type) {
-			case istanbul.RequestEvent:
-				r := &bft.Request{
-					Proposal: ev.Proposal,
-				}
-				err := c.handleRequest(r)
-				if err == errFutureMessage {
-					c.storeRequestMsg(r)
-				}
-			case istanbul.MessageEvent:
-				if err := c.handleMsg(ev.Payload); err == nil {
-					c.backend.GossipSubPeer(ev.Hash, ev.Payload)
-					// c.backend.Gossip(c.valSet, ev.Payload)
-				}
-			case backlogEvent:
-				if !c.current.qualified.Contains(ev.src) {
-					c.logger.Error("Invalid address in valSet", "addr", ev.src)
-					continue
-				}
-				// No need to check signature for internal messages
-				if err := c.handleCheckedMsg(ev.msg, ev.src); err == nil {
-					p, err := ev.msg.Payload()
-					if err != nil {
-						c.logger.Warn("Get message payload failed", "err", err)
-						continue
-					}
-					c.backend.GossipSubPeer(ev.Hash, p)
-					// c.backend.Gossip(c.valSet, p)
-				}
-			}
+			c.handleEvent(event.Data)
 		case ev, ok := <-c.timeoutSub.Chan():
 			if !ok || ev.Data == nil {
 				logger.Error("Drop an empty message from timeout channel")
@@ -133,22 +103,59 @@ func (c *core) handleEvents() {
 				logger.Error("Invalid message from timeout channel", "msg", ev.Data)
 				return
 			}
-			c.handleTimeoutMsg(data.nextView)
+			c.handleEvent(data)
 		case event, ok := <-c.chainHeadSub.Chan():
 			if !ok {
 				return
 			}
-			switch event.Data.(type) {
-			case istanbul.ChainHeadEvent:
-				c.handleChainHead()
-			}
+			c.handleEvent(event.Data)
 		}
 	}
 }
 
+// handleEvent is shared by the event loop and the scenario scheduler. Errors
+// remain non-fatal to the event loop, but let scenarios assert rejected inputs.
+func (c *core) handleEvent(event interface{}) error {
+	switch ev := event.(type) {
+	case istanbul.RequestEvent:
+		r := &bft.Request{Proposal: ev.Proposal}
+		err := c.handleRequest(r)
+		if err == errFutureMessage {
+			c.storeRequestMsg(r)
+		}
+		return err
+	case istanbul.MessageEvent:
+		err := c.handleMsg(ev.Payload)
+		if err == nil {
+			c.backend.GossipSubPeer(ev.Hash, ev.Payload)
+		}
+		return err
+	case backlogEvent:
+		if !c.current.qualified.Contains(ev.src) {
+			c.logger.Error("Invalid address in valSet", "addr", ev.src)
+			return istanbul.ErrUnauthorizedAddress
+		}
+		// Backlogged messages have already passed signature verification.
+		if err := c.handleCheckedMsg(ev.msg, ev.src); err != nil {
+			return err
+		}
+		p, err := ev.msg.Payload()
+		if err != nil {
+			c.logger.Warn("Get message payload failed", "err", err)
+			return err
+		}
+		c.backend.GossipSubPeer(ev.Hash, p)
+	case timeoutEvent:
+		c.handleTimeoutMsg(ev.nextView)
+	case istanbul.ChainHeadEvent:
+		c.handleChainHead()
+	}
+	return nil
+}
+
 // sendEvent sends events to mux
 func (c *core) sendEvent(ev interface{}) {
-	c.backend.EventMux().Post(ev)
+	c.scheduler.Post(ev)
 }
 
 func (c *core) handleMsg(payload []byte) error {
