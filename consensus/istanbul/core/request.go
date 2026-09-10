@@ -102,7 +102,7 @@ func (c *core) processPendingRequests() {
 		}
 		c.logger.Trace("Post pending request", "number", r.Proposal.Number(), "hash", r.Proposal.Hash())
 
-		go c.sendEvent(istanbul.RequestEvent{
+		c.scheduler.PostAsync(istanbul.RequestEvent{
 			Proposal: r.Proposal,
 		})
 	}
