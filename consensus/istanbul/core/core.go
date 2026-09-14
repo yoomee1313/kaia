@@ -102,6 +102,7 @@ func New(backend istanbul.Backend, config *istanbul.Config) Engine {
 		handlerWg:          new(sync.WaitGroup),
 		logger:             logger.NewWith("address", backend.Address()),
 		backend:            backend,
+		scheduler:          &realCoreScheduler{backend: backend},
 		backlogs:           make(map[common.Address]*prque.Prque),
 		backlogsMu:         new(sync.Mutex),
 		pendingRequests:    prque.New(),
@@ -132,10 +133,11 @@ type core struct {
 	govModule    gov.GovModule
 
 	backend               istanbul.Backend
+	scheduler             coreScheduler
 	events                *event.TypeMuxSubscription
 	timeoutSub            *event.TypeMuxSubscription
 	chainHeadSub          *event.TypeMuxSubscription
-	futurePreprepareTimer *time.Timer
+	futurePreprepareTimer coreTimer
 
 	waitingForRoundChange bool
 	validateFn            func([]byte, []byte) (common.Address, error)
@@ -147,7 +149,7 @@ type core struct {
 	handlerWg *sync.WaitGroup
 
 	roundChangeSet    *roundChangeSet
-	roundChangeTimer  atomic.Value //*time.Timer
+	roundChangeTimer  atomic.Value // coreTimer; concrete type stays fixed for the lifetime of a core
 	pendingRequests   *prque.Prque
 	pendingRequestsMu *sync.Mutex
 
@@ -375,7 +377,7 @@ func (c *core) startNewRound(round *big.Int) {
 
 	// For new sequences, notify worker to start new block
 	if !roundChange {
-		c.backend.EventMux().Post(istanbul.NewSequenceEvent{})
+		c.sendEvent(istanbul.NewSequenceEvent{})
 	}
 	c.newRoundChangeTimer()
 
@@ -461,7 +463,7 @@ func (c *core) stopTimer() {
 	c.stopFuturePreprepareTimer()
 
 	if c.roundChangeTimer.Load() != nil {
-		c.roundChangeTimer.Load().(*time.Timer).Stop()
+		c.roundChangeTimer.Load().(coreTimer).Stop()
 	}
 }
 
@@ -479,7 +481,7 @@ func (c *core) newRoundChangeTimer() {
 	current := c.current
 	proposer := current.proposer
 
-	c.roundChangeTimer.Store(time.AfterFunc(timeout, func() {
+	c.roundChangeTimer.Store(c.scheduler.AfterFunc(timeout, func() {
 		var loc, proposerStr string
 
 		if round == 0 {
