@@ -46,8 +46,8 @@ import (
 const maxScenarioSteps = 10000
 
 // scenarioConfig is the complete preparation contract for one test case.
-// Faults and message ordering are intentionally absent: those belong in the
-// scenario's named steps rather than its initial conditions.
+// Faults and message ordering are intentionally absent: those belong in
+// runConsensus callbacks rather than the initial conditions.
 type scenarioConfig struct {
 	validatorCount int
 	committeeSize  int
@@ -199,15 +199,35 @@ func (net *scenarioNet) miss(code uint64, from *validator, recipients []*validat
 	newMessageRule(net, code, from, recipients).drop = true
 }
 
-// delay holds matching deliveries until the returned release function is called.
-// Released payloads are delivered unchanged, even if the sender has moved on.
-func (net *scenarioNet) delay(code uint64, from *validator, recipients []*validator) func() {
+// delay holds each recipient's deliveries until an explicit release action.
+func (net *scenarioNet) delay(code uint64, from *validator, recipients []*validator) {
 	net.t.Helper()
-	rule := newMessageRule(net, code, from, recipients)
-	rule.hold = true
-	return func() {
-		net.t.Helper()
-		require.True(net.t, rule.applied, "delay did not match any message")
+	require.NotEmpty(net.t, recipients)
+	for _, recipient := range recipients {
+		newMessageRule(net, code, from, []*validator{recipient}).hold = true
+	}
+}
+
+// release queues the original held payloads and disables the selected delays.
+// Recipients can be released separately; their per-recipient message order is
+// preserved even if the sender has moved on. runConsensus delivers the payloads.
+func (net *scenarioNet) release(code uint64, from *validator, recipients []*validator) {
+	net.t.Helper()
+	net.requireNode(from)
+	require.NotEmpty(net.t, recipients)
+	var delayed []*messageRule
+	for _, recipient := range recipients {
+		net.requireNode(recipient)
+		index := slices.IndexFunc(net.rules, func(rule *messageRule) bool {
+			return rule.hold && rule.code == code && rule.from == from && slices.Contains(rule.recipients, recipient)
+		})
+		require.NotEqual(net.t, -1, index, "no active delay for code %d from node %d to node %d", code, from.id, recipient.id)
+		rule := net.rules[index]
+		require.NotContains(net.t, delayed, rule, "duplicate release recipient: node %d", recipient.id)
+		require.NotEmpty(net.t, rule.held, "no held messages for code %d from node %d to node %d", code, from.id, recipient.id)
+		delayed = append(delayed, rule)
+	}
+	for _, rule := range delayed {
 		net.pendingDeliveries = append(net.pendingDeliveries, rule.held...)
 		rule.held = nil
 		rule.hold = false
@@ -228,7 +248,7 @@ func (net *scenarioNet) modify(code uint64, from *validator, recipients []*valid
 	})
 }
 
-// inject registers one extra signed message per recipient for the next run.
+// inject registers one extra signed message per recipient for runConsensus.
 // A nil proposal uses the ordinary proposal submitted for that sequence.
 func (net *scenarioNet) inject(code uint64, from *validator, recipients []*validator, proposal *types.Block) {
 	net.t.Helper()
@@ -253,21 +273,50 @@ func (net *scenarioNet) inject(code uint64, from *validator, recipients []*valid
 	})
 }
 
-// run drains real core events, including broadcasts, backlog replay and chain
-// heads. It neither fires timers nor runs phases. At most one block height is
-// driven per call; a lagging honest node keeps subsequent calls at that height.
-func (net *scenarioNet) run() {
+// runConsensus applies actions once, drives real cores until no events remain
+// deliverable, then checks the expected outcomes. The default is that every
+// validator commits in round 0 and becomes ready for the next sequence.
+// Explicit expectations replace that default: expectUncommitted alone checks
+// only the selected validators, without requiring the others to commit.
+//
+// The target is the lowest uncommitted height among the validators expected to
+// commit, or among all selected validators when only no-commit is expected.
+// This resumes an incomplete height without letting an intentionally excluded
+// validator prevent the participating validators from starting their next block.
+// Expectations select what to check, never which nodes receive messages.
+//
+// At most one height is driven per call. Timers fire only through explicit
+// timeout actions; message rules persist across calls until scenario teardown
+// (a delay can be released earlier).
+func (net *scenarioNet) runConsensus(actions func(), expectations ...consensusExpectation) {
 	net.t.Helper()
-	var height uint64
-	for _, node := range net.validators {
-		if !node.byzantine {
+	if len(expectations) == 0 {
+		expectations = []consensusExpectation{expectCommit(net.validators, 0)}
+	}
+	var height, commitHeight uint64
+	selected := make(map[*validator]bool)
+	for _, expectation := range expectations {
+		require.NotEmpty(net.t, expectation.validators)
+		require.LessOrEqual(net.t, expectation.round, uint64(255), "commit round must fit the block header")
+		for _, node := range expectation.validators {
+			net.requireNode(node)
+			require.NotContains(net.t, selected, node, "node %d: duplicate consensus expectation", node.id)
+			selected[node] = true
 			next := node.backend.head.NumberU64() + 1
 			if height == 0 || next < height {
 				height = next
 			}
+			if expectation.commit && (commitHeight == 0 || next < commitHeight) {
+				commitHeight = next
+			}
 		}
 	}
-	require.Positive(net.t, height, "a consensus scenario needs an honest validator")
+	if commitHeight != 0 {
+		height = commitHeight
+	}
+	if actions != nil {
+		actions()
+	}
 	if len(net.pendingDeliveries) == 0 {
 		net.requestProposal(height)
 	}
@@ -279,7 +328,7 @@ func (net *scenarioNet) run() {
 	for steps := 0; ; steps++ {
 		require.Less(net.t, steps, maxScenarioSteps, "event budget exhausted (possible message loop)")
 		if len(net.pendingDeliveries) == 0 && !net.requestProposal(height) {
-			return
+			break
 		}
 		queued := net.pendingDeliveries[0]
 		net.pendingDeliveries = net.pendingDeliveries[1:]
@@ -304,6 +353,33 @@ func (net *scenarioNet) run() {
 			require.False(net.t, node.core.waitingForRoundChange, "node %d", node.id)
 		}
 	}
+
+	for _, expectation := range expectations {
+		for _, node := range expectation.validators {
+			id := node.id
+			if !expectation.commit {
+				require.Less(net.t, node.backend.head.NumberU64(), height,
+					"node %d: unexpected commit at height %d", id, height)
+				continue
+			}
+
+			proposal := net.currentProposal()
+			require.Equal(net.t, height, proposal.NumberU64(), "expected proposal must match the target height")
+			require.Len(net.t, node.backend.committed, int(height), "node %d: exactly one commit per height", id)
+			block := node.backend.committed[height-1]
+			require.Equal(net.t, proposal.Hash(), block.Hash(), "node %d", id)
+			require.Equal(net.t, proposal.ParentHash(), block.ParentHash(), "node %d", id)
+			actualRound, err := node.backend.sealer.Round(block.Header())
+			require.NoError(net.t, err)
+			require.Equal(net.t, byte(expectation.round), actualRound, "node %d", id)
+			author, err := node.backend.sealer.Author(block.Header())
+			require.NoError(net.t, err)
+			proposer := net.validators[(height-1+expectation.round)%uint64(net.config.committeeSize)]
+			require.Equal(net.t, proposer.backend.Address(), author, "node %d: unexpected block author", id)
+			require.Equal(net.t, height+1, node.core.current.Sequence().Uint64(), "node %d", id)
+			require.Equal(net.t, StateAcceptRequest, node.core.state, "node %d", id)
+		}
+	}
 }
 
 // requestProposal supplies the worker's empty-block request when the elected
@@ -323,41 +399,6 @@ func (net *scenarioNet) requestProposal(height uint64) bool {
 		return true
 	}
 	return false
-}
-
-func (net *scenarioNet) assertNoCommit(recipients []*validator) {
-	net.t.Helper()
-	require.NotEmpty(net.t, recipients)
-	for _, node := range recipients {
-		net.requireNode(node)
-		require.Empty(net.t, node.backend.committed, "node %d: unexpected commit", node.id)
-	}
-}
-
-// assertNewSequence checks the committed block and readiness for the next height.
-func (net *scenarioNet) assertNewSequence(recipients []*validator, round uint64) {
-	net.t.Helper()
-	proposal := net.currentProposal()
-	height := proposal.NumberU64()
-	// The fixture rotates proposers within its fixed committee by height and round.
-	proposer := net.validators[(height-1+round)%uint64(net.config.committeeSize)]
-	require.NotEmpty(net.t, recipients)
-	for _, node := range recipients {
-		net.requireNode(node)
-		id := node.id
-		require.Len(net.t, node.backend.committed, int(height), "node %d: exactly one commit per height", id)
-		block := node.backend.committed[height-1]
-		require.Equal(net.t, proposal.Hash(), block.Hash(), "node %d", id)
-		require.Equal(net.t, proposal.ParentHash(), block.ParentHash(), "node %d", id)
-		actualRound, err := node.backend.sealer.Round(block.Header())
-		require.NoError(net.t, err)
-		require.Equal(net.t, byte(round), actualRound, "node %d", id)
-		author, err := node.backend.sealer.Author(block.Header())
-		require.NoError(net.t, err)
-		require.Equal(net.t, proposer.backend.Address(), author, "node %d: unexpected block author", id)
-		require.Equal(net.t, height+1, node.core.current.Sequence().Uint64(), "node %d", id)
-		require.Equal(net.t, StateAcceptRequest, node.core.state, "node %d", id)
-	}
 }
 
 // assertCommitSafety observes every backend commit, including those produced
@@ -415,6 +456,27 @@ func (net *scenarioNet) assertCommittedSeals(id int, block *types.Block) {
 	// QBFT quorum, ceil(2N/3), restated here on purpose: reusing calcQuorumSize
 	// would let a bug in it hide behind this assertion.
 	require.GreaterOrEqual(net.t, len(unique), (2*net.config.committeeSize+2)/3, "node %d: seals below quorum", id)
+}
+
+// consensusExpectation describes the outcome at runConsensus's target height.
+// Explicit expectations replace the default; unlisted validators still execute
+// normally and every commit remains subject to the common safety checks.
+type consensusExpectation struct {
+	validators []*validator
+	commit     bool
+	round      uint64
+}
+
+// expectCommit requires the selected validators to commit the expected proposal
+// in the given round and become ready for the next sequence.
+func expectCommit(validators []*validator, round uint64) consensusExpectation {
+	return consensusExpectation{validators: slices.Clone(validators), commit: true, round: round}
+}
+
+// expectUncommitted permits earlier blocks, but no commit at the target height.
+// It describes this explicit event schedule, not all possible future rounds.
+func expectUncommitted(validators []*validator) consensusExpectation {
+	return consensusExpectation{validators: slices.Clone(validators)}
 }
 
 type validator struct {
