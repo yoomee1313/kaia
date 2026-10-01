@@ -195,6 +195,15 @@ func (c *core) handleRoundChange(msg *bft.Message, src common.Address) error {
 // verifyPreparedCertificate authenticates a quorum of votes for one proposal
 // in a round strictly before the target ROUND-CHANGE view.
 func (c *core) verifyPreparedCertificate(cert *bft.PreparedCertificate, target *bft.View) error {
+	if err := validatePreparedCertificateView(cert, target); err != nil {
+		return err
+	}
+	return c.verifyPreparedCertificateVotes(cert)
+}
+
+// validatePreparedCertificateView checks the inexpensive certificate metadata
+// that binds a prepared certificate to its enclosing ROUND-CHANGE view.
+func validatePreparedCertificateView(cert *bft.PreparedCertificate, target *bft.View) error {
 	if cert == nil || cert.View == nil || cert.Proposal == nil || target == nil ||
 		cert.View.Sequence == nil || cert.View.Round == nil || target.Sequence == nil || target.Round == nil {
 		return errors.New("incomplete prepared certificate")
@@ -203,7 +212,12 @@ func (c *core) verifyPreparedCertificate(cert *bft.PreparedCertificate, target *
 		cert.Proposal.Number().Cmp(cert.View.Sequence) != 0 {
 		return errors.New("prepared certificate has invalid view")
 	}
+	return nil
+}
 
+// verifyPreparedCertificateVotes performs the expensive committee, signature,
+// subject, seal, and quorum checks after the certificate view has been checked.
+func (c *core) verifyPreparedCertificateVotes(cert *bft.PreparedCertificate) error {
 	_, committee, _, _, quorum, _, err := getRoundCommitteeState(c, cert.View.Sequence.Uint64(), cert.View.Round.Uint64())
 	if err != nil {
 		return err
@@ -269,6 +283,11 @@ func (c *core) verifyRoundChangeCertificate(messages []*bft.Message, target *bft
 		return nil, fmt.Errorf("round-change certificate has %d messages, maximum is %d", len(messages), committee.Len())
 	}
 	seen := make(map[common.Address]struct{}, len(messages))
+	// The protocol requires every non-nil prepared certificate carried by the
+	// RCC to be valid. Reusing a result is therefore safe only for byte-identical
+	// canonical encodings: a distinct certificate, even with the same
+	// (height, round, proposal hash), must still pass full verification.
+	verifiedPreparedCertificates := make(map[string]struct{}, len(messages))
 	var highest *bft.PreparedCertificate
 	lastProposal, _ := c.backend.LastProposal()
 	if lastProposal == nil {
@@ -298,10 +317,23 @@ func (c *core) verifyRoundChangeCertificate(messages []*bft.Message, target *bft
 			return nil, errors.New("round-change certificate has inconsistent view")
 		}
 		if roundChange.PreparedCertificate != nil {
-			if err := c.verifyPreparedCertificate(roundChange.PreparedCertificate, target); err != nil {
+			candidate := roundChange.PreparedCertificate
+			// Check the basic view relationship on every occurrence, including exact
+			// duplicates, before consulting the expensive-verification cache.
+			if err := validatePreparedCertificateView(candidate, target); err != nil {
 				return nil, err
 			}
-			candidate := roundChange.PreparedCertificate
+			encoded, err := bft.Encode(candidate)
+			if err != nil {
+				return nil, err
+			}
+			cacheKey := string(encoded)
+			if _, verified := verifiedPreparedCertificates[cacheKey]; !verified {
+				if err := c.verifyPreparedCertificateVotes(candidate); err != nil {
+					return nil, err
+				}
+				verifiedPreparedCertificates[cacheKey] = struct{}{}
+			}
 			if highest == nil || highest.View.Round.Cmp(candidate.View.Round) < 0 {
 				highest = candidate
 			} else if highest.View.Round.Cmp(candidate.View.Round) == 0 && highest.Proposal.Hash() != candidate.Proposal.Hash() {
