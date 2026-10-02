@@ -186,34 +186,31 @@ func (c *core) handleMsg(payload []byte) error {
 	return c.handleCheckedMsg(msg, msg.Address)
 }
 
-// maxSubjectMessageBytes bounds legacy ROUND CHANGE, PREPARE and COMMIT. These
-// carry a fixed-shape subject, but the envelope is not otherwise bounded:
-// CommittedSeal is only validated for COMMIT, and rlp does not cap the length
-// of a big.Int view field. The limit is far above a well-formed message, whose
-// subject, signature and committed seal take a few hundred bytes.
+// maxSubjectMessageBytes bounds the signed part of ROUND CHANGE, PREPARE and
+// COMMIT. These carry a fixed-shape subject (plus an optional prepared claim),
+// but the envelope is not otherwise bounded: CommittedSeal is only validated
+// for COMMIT, and rlp does not cap the length of a big.Int view field. The
+// limit is far above a well-formed message, whose subject, signature and
+// committed seal take a few hundred bytes.
 const maxSubjectMessageBytes = 1024
 
 // maxCertificateRoundChangeBytes matches the P2P protocol-message cap. A
-// post-Permissionless ROUND CHANGE can carry a prepared certificate, including
-// the prepared block, so it cannot use the legacy subject-only limit. It is
-// still bounded before it can enter any retained message set.
+// post-Permissionless ROUND CHANGE can attach a prepared certificate, including
+// the prepared block, as its unsigned Justification, so that attachment cannot
+// use the subject-only limit. It is still bounded before it can enter any
+// retained message set.
 const maxCertificateRoundChangeBytes = 12 * 1024 * 1024
 
 // checkMessageSize rejects an oversized consensus message before the retention
 // paths diverge (backlog, roundChangeSet, messageSet), so every retained copy
-// is bounded. Only an extended ROUND CHANGE may use the larger certificate cap.
+// is bounded. Only a ROUND CHANGE Justification may use the larger cap; the
+// envelope decoder rejects a Justification on any other message.
 func checkMessageSize(msg *bft.Message) error {
 	if msg.Code == bft.MsgPreprepare {
 		return nil
 	}
-	limit := uint64(maxSubjectMessageBytes)
-	if msg.Code == bft.MsgRoundChange {
-		var roundChange bft.RoundChange
-		if msg.Decode(&roundChange) == nil && roundChange.PreparedCertificate != nil {
-			limit = maxCertificateRoundChangeBytes
-		}
-	}
-	if retainedMessageBytes(msg) > limit {
+	justification := uint64(len(msg.Justification))
+	if retainedMessageBytes(msg)-justification > maxSubjectMessageBytes || justification > maxCertificateRoundChangeBytes {
 		return errMessageTooLarge
 	}
 	return nil

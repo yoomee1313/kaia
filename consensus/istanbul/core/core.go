@@ -150,7 +150,9 @@ type core struct {
 	current   *roundState
 	handlerWg *sync.WaitGroup
 
-	roundChangeSet         *roundChangeSet
+	roundChangeSet *roundChangeSet
+	// roundChangeCertificate is the signed ROUND CHANGE quorum, with each
+	// message's Justification, that started the current round.
 	roundChangeCertificate []*bft.Message
 	roundChangeTimer       atomic.Value //*time.Timer
 	pendingRequests        *prque.Prque
@@ -368,7 +370,7 @@ func (c *core) startNewRound(round *big.Int) {
 	if roundChange && c.isProposer() && c.current != nil {
 		proposedPrepared := false
 		if c.backend.IsPermissionlessAt(newView.Sequence.Uint64()) && len(c.roundChangeCertificate) > 0 {
-			prepared, verifyErr := c.verifyRoundChangeCertificate(c.roundChangeCertificate, newView)
+			_, prepared, verifyErr := c.roundChangeJustification(c.roundChangeCertificate, newView)
 			if verifyErr != nil {
 				logger.Error("Invalid round-change certificate selected for new round", "err", verifyErr)
 				c.sendNextRoundChange("startNewRound. Invalid round-change certificate")
