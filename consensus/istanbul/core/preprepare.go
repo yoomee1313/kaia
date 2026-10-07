@@ -65,9 +65,9 @@ func (c *core) sendPreprepare(request *bft.Request) {
 		}
 
 		c.broadcast(&bft.Message{
-			Hash: request.Proposal.ParentHash(),
-			Code: bft.MsgPreprepare,
-			Msg:  preprepare,
+			PrevHash: request.Proposal.ParentHash(),
+			Code:     bft.MsgPreprepare,
+			Msg:      preprepare,
 		})
 	}
 }
@@ -148,7 +148,7 @@ func (c *core) handlePreprepare(msg *bft.Message, src common.Address) error {
 				c.sendEvent(backlogEvent{
 					src:  src,
 					msg:  msg,
-					Hash: msg.Hash,
+					Hash: msg.PrevHash,
 				})
 			})
 		} else {
@@ -160,10 +160,7 @@ func (c *core) handlePreprepare(msg *bft.Message, src common.Address) error {
 	// Here is about to accept the PRE-PREPARE
 	if c.state == StateAcceptRequest {
 		if highestPrepared != nil {
-			lockedRound := c.current.LockedRound()
-			if lockedRound == nil || highestPrepared.View.Round.Cmp(lockedRound) > 0 {
-				c.current.AdoptPreparedCertificate(highestPrepared)
-			}
+			c.current.AdoptPreparedCertificate(highestPrepared)
 		}
 		// Send ROUND CHANGE if the locked proposal and the received proposal are different
 		if c.current.IsHashLocked() {

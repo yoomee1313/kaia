@@ -52,6 +52,28 @@ func TestRoundChangeSetBoundsMessagesPerRound(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
+func TestRoundChangeSetCheckIgnoresChangedUnsignedAttachment(t *testing.T) {
+	addr := common.HexToAddress("0x1")
+	rcs := newRoundChangeSet(valset.NewAddressSet([]common.Address{addr}), 1)
+	round := big.NewInt(1)
+	msg := &bft.Message{
+		PrevHash:  common.HexToHash("0x11"),
+		Code:      bft.MsgRoundChange,
+		Address:   addr,
+		Msg:       []byte{0x01, 0x02},
+		Signature: []byte{0x03},
+		Evidence:  []byte{0x04},
+	}
+	_, err := rcs.Add(big.NewInt(0), round, msg.WithoutEvidence())
+	require.NoError(t, err)
+
+	duplicate := *msg
+	duplicate.Evidence = []byte{0x06, 0x07}
+
+	require.ErrorIs(t, rcs.Check(big.NewInt(0), round, &duplicate), errIgnored)
+	assert.Empty(t, rcs.Values(round)[0].Evidence)
+}
+
 // A zero quorum means no ROUND CHANGE can contribute to progress, so not even a
 // freshly created bucket may retain one.
 func TestRoundChangeSetRejectsEveryMessageWhenLimitIsZero(t *testing.T) {
@@ -128,7 +150,7 @@ func TestHandleRoundChangeEnforcesFutureRoundWindow(t *testing.T) {
 
 func roundChangeMessage(t *testing.T, src common.Address, round uint64) *bft.Message {
 	t.Helper()
-	payload, err := bft.Encode(&bft.Subject{View: &bft.View{
+	payload, err := bft.Encode(&bft.RoundChange{View: &bft.View{
 		Sequence: big.NewInt(1),
 		Round:    new(big.Int).SetUint64(round),
 	}})

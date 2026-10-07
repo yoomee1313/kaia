@@ -23,6 +23,7 @@
 package core
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -42,6 +43,12 @@ import (
 // near-round buckets the node needs to catch up. It deliberately trades catch-up
 // beyond this window for bounded local memory.
 const maxRoundChangeRoundsAhead = 128
+
+type preparedEvidenceKey struct {
+	sequence uint64
+	round    uint64
+	digest   common.Hash
+}
 
 // sendNextRoundChange sends the ROUND CHANGE message with current round + 1
 func (c *core) sendNextRoundChange(loc string) {
@@ -80,17 +87,16 @@ func (c *core) sendRoundChange(round *big.Int) {
 	// Now we have the new round number and sequence number
 	cv = c.currentView()
 	rc := &bft.RoundChange{
-		View:     cv,
-		Digest:   common.Hash{},
-		PrevHash: lastProposal.Hash(),
+		View: cv,
 	}
 	// Sign only the prepared round and digest. The certificate itself rides as
-	// the unsigned Justification so a later PRE-PREPARE can carry this signed
+	// the unsigned Evidence so a later PRE-PREPARE can carry this signed
 	// message without repeating the prepared block.
-	var justification []byte
+	var evidence []byte
 	if c.backend.IsPermissionlessAt(cv.Sequence.Uint64()) && preparedCertificate != nil {
+		preparedCertificate = c.rememberPreparedCertificate(preparedCertificate)
 		var err error
-		if justification, err = bft.Encode(preparedCertificate); err != nil {
+		if evidence, err = bft.Encode(preparedCertificate); err != nil {
 			logger.Error("Failed to encode prepared certificate", "err", err)
 			return
 		}
@@ -107,10 +113,10 @@ func (c *core) sendRoundChange(round *big.Int) {
 	}
 
 	c.broadcast(&bft.Message{
-		Hash:          rc.PrevHash,
-		Code:          bft.MsgRoundChange,
-		Msg:           payload,
-		Justification: justification,
+		PrevHash: lastProposal.Hash(),
+		Code:     bft.MsgRoundChange,
+		Msg:      payload,
+		Evidence: evidence,
 	})
 }
 
@@ -128,48 +134,45 @@ func (c *core) handleRoundChange(msg *bft.Message, src common.Address) error {
 	}
 	permissionless := c.backend != nil && c.backend.IsPermissionlessAt(rc.View.Sequence.Uint64())
 	// Before Permissionless, a ROUND CHANGE has the legacy shape only. The
-	// Justification is unsigned, so any relay could otherwise attach one to a
-	// valid message; reject it before the message can be backlogged or retained.
-	if c.backend != nil && !permissionless && (len(msg.Justification) != 0 || rc.Prepared != nil) {
+	// legacy codec cannot carry a claim or Evidence, so this is defense in depth
+	// for messages that did not arrive through FromPayloadForFork.
+	if c.backend != nil && !permissionless && (len(msg.Evidence) != 0 || rc.Prepared != nil) {
 		return bft.ErrInvalidMessage
 	}
 	// The full prepared certificate is expensive to verify, but its presence
 	// must match the signed claim before checkMessage can return errFutureMessage
 	// and retain the envelope. This rejects a large, unsigned attachment with no
 	// claim without doing certificate decoding or signature recovery.
-	if permissionless && !roundChangeJustificationShapeValid(msg, rc) {
+	if permissionless && !roundChangeEvidenceShapeValid(msg, rc) {
 		return bft.ErrInvalidMessage
 	}
 
 	if err := c.checkMessage(bft.MsgRoundChange, rc.View); err != nil {
 		return err
 	}
-	// Some focused unit tests exercise round-change-set admission with a bare
-	// core and no backend. Production cores always have one; the extension
-	// validation itself requires it and therefore applies only when present.
-	if permissionless {
-		if !common.EmptyHash(rc.Digest) {
-			return bft.ErrInvalidMessage
-		}
-		lastProposal, _ := c.backend.LastProposal()
-		if lastProposal == nil || rc.PrevHash != lastProposal.Hash() {
-			return bft.ErrInvalidMessage
-		}
-		if err := c.verifyRoundChangeJustification(msg, rc); err != nil {
-			logger.Warn("Invalid prepared certificate in ROUND CHANGE", "err", err)
-			return bft.ErrInvalidMessage
-		}
-	}
-
-	// Restrict round-change admission to committee members, mirroring handleCommit.
-	// The thresholds (requiredMessageCount, f) are committee-sized, but messageSet
-	// admits any qualified validator; gating on the committee keeps admission
-	// consistent with the thresholds. The committee equals the qualified set (now and
-	// post-permissionless), so this is round-agnostic.
+	// Reject ineligible or unretainable messages before decoding and verifying
+	// the potentially large unsigned certificate attachment.
 	if !c.current.committee.Contains(src) {
 		logger.Warn("received an istanbul round change message from non-committee",
 			"currentSequence", c.current.sequence.Uint64(), "sender", src.Hex(), "msgView", rc.View.String())
 		return errNotFromCommittee
+	}
+	if err := c.roundChangeSet.Check(c.currentView().Round, rc.View.Round, msg); err != nil {
+		logger.Trace("Discarding ROUND CHANGE before certificate verification", "round", rc.View.Round, "err", err)
+		return err
+	}
+	// Some focused unit tests exercise round-change-set admission with a bare
+	// core and no backend. Production cores always have one; the extension
+	// validation itself requires it and therefore applies only when present.
+	if permissionless {
+		lastProposal, _ := c.backend.LastProposal()
+		if lastProposal == nil || msg.PrevHash != lastProposal.Hash() {
+			return bft.ErrInvalidMessage
+		}
+		if _, err := c.verifyRoundChangeEvidence(msg, rc); err != nil {
+			logger.Warn("Invalid prepared certificate in ROUND CHANGE", "err", err)
+			return bft.ErrInvalidMessage
+		}
 	}
 
 	cv := c.currentView()
@@ -177,7 +180,10 @@ func (c *core) handleRoundChange(msg *bft.Message, src common.Address) error {
 
 	// Add the ROUND CHANGE message to its message set and return how many
 	// messages we've got with the same round number and sequence number.
-	num, err := c.roundChangeSet.Add(cv.Round, roundView.Round, msg)
+	// The attachment has been verified and cached independently. Retain only the
+	// compact signed envelope so the block and votes are not multiplied by sender
+	// and target round inside roundChangeSet.
+	num, err := c.roundChangeSet.Add(cv.Round, roundView.Round, msg.WithoutEvidence())
 	if err != nil {
 		logger.Trace("Discarding ROUND CHANGE", "from", src, "round", roundView.Round, "err", err)
 		return err
@@ -223,29 +229,99 @@ func (c *core) handleRoundChange(msg *bft.Message, src common.Address) error {
 	return nil
 }
 
-// verifyRoundChangeJustification checks that a ROUND CHANGE's unsigned
-// Justification proves exactly the PreparedClaim its sender signed.
-func (c *core) verifyRoundChangeJustification(msg *bft.Message, rc *bft.RoundChange) error {
-	if !roundChangeJustificationShapeValid(msg, rc) {
-		return errors.New("prepared claim and justification must appear together")
+// verifyRoundChangeEvidence checks that a ROUND CHANGE's unsigned Evidence
+// proves exactly the PreparedClaim its sender signed.
+func (c *core) verifyRoundChangeEvidence(msg *bft.Message, rc *bft.RoundChange) (*bft.PreparedCertificate, error) {
+	if !roundChangeEvidenceShapeValid(msg, rc) {
+		return nil, errors.New("prepared claim and evidence must appear together")
 	}
 	if rc.Prepared == nil {
-		return nil
+		return nil, nil
+	}
+	key, err := preparedKey(rc.View.Sequence, rc.Prepared)
+	if err != nil {
+		return nil, err
+	}
+	if cert := c.preparedCertificates[key]; cert != nil {
+		return cert, nil
 	}
 	var cert *bft.PreparedCertificate
-	if err := rlp.DecodeBytes(msg.Justification, &cert); err != nil {
-		return err
+	if err := rlp.DecodeBytes(msg.Evidence, &cert); err != nil {
+		return nil, err
 	}
 	// Bind the attachment to the signed claim before the expensive checks.
 	if cert == nil || cert.View == nil || cert.View.Round == nil || cert.Proposal == nil || rc.Prepared.Round == nil ||
 		cert.View.Round.Cmp(rc.Prepared.Round) != 0 || cert.Proposal.Hash() != rc.Prepared.Digest {
-		return errors.New("justification does not match the prepared claim")
+		return nil, errors.New("evidence does not match the prepared claim")
 	}
-	return c.verifyPreparedCertificate(cert, rc.View)
+	if err := c.verifyPreparedCertificate(cert, rc.View); err != nil {
+		return nil, err
+	}
+	return c.rememberPreparedCertificate(cert), nil
 }
 
-func roundChangeJustificationShapeValid(msg *bft.Message, rc *bft.RoundChange) bool {
-	return (rc.Prepared == nil) == (len(msg.Justification) == 0)
+func roundChangeEvidenceShapeValid(msg *bft.Message, rc *bft.RoundChange) bool {
+	return (rc.Prepared == nil) == (len(msg.Evidence) == 0)
+}
+
+func preparedKey(sequence *big.Int, claim *bft.PreparedClaim) (preparedEvidenceKey, error) {
+	if sequence == nil || !sequence.IsUint64() || claim == nil || claim.Round == nil || !claim.Round.IsUint64() {
+		return preparedEvidenceKey{}, errors.New("prepared claim has invalid view")
+	}
+	return preparedEvidenceKey{sequence: sequence.Uint64(), round: claim.Round.Uint64(), digest: claim.Digest}, nil
+}
+
+// rememberPreparedCertificate canonicalizes verified evidence so each block is
+// retained once per digest and each vote set once per exact prepared claim.
+func (c *core) rememberPreparedCertificate(cert *bft.PreparedCertificate) *bft.PreparedCertificate {
+	if cert == nil || cert.View == nil || cert.View.Sequence == nil || cert.View.Round == nil || cert.Proposal == nil {
+		return cert
+	}
+	key := preparedEvidenceKey{sequence: cert.View.Sequence.Uint64(), round: cert.View.Round.Uint64(), digest: cert.Proposal.Hash()}
+	if c.preparedBlocks == nil {
+		c.preparedBlocks = make(map[common.Hash]*types.Block)
+	}
+	if c.preparedCertificates == nil {
+		c.preparedCertificates = make(map[preparedEvidenceKey]*bft.PreparedCertificate)
+	}
+	if existing := c.preparedCertificates[key]; existing != nil {
+		return existing
+	}
+	block := c.preparedBlocks[key.digest]
+	if local := c.localPreparedBlock(key.digest); local != nil {
+		block = local
+	}
+	if block == nil {
+		block = cert.Proposal
+	}
+	c.preparedBlocks[key.digest] = block
+	canonical := &bft.PreparedCertificate{
+		View: &bft.View{
+			Sequence: new(big.Int).Set(cert.View.Sequence),
+			Round:    new(big.Int).Set(cert.View.Round),
+		},
+		Proposal: block,
+		Messages: slices.Clone(cert.Messages),
+	}
+	c.preparedCertificates[key] = canonical
+	return canonical
+}
+
+// localPreparedBlock prefers a body already verified through the normal
+// PRE-PREPARE path over an equivalent peer-supplied certificate body.
+func (c *core) localPreparedBlock(digest common.Hash) *types.Block {
+	if c.current == nil {
+		return nil
+	}
+	if cert := c.current.PreparedCertificate(); cert != nil && cert.Proposal != nil && cert.Proposal.Hash() == digest {
+		return cert.Proposal
+	}
+	if c.current.Preprepare != nil {
+		if block, ok := c.current.Preprepare.Proposal.(*types.Block); ok && block.Hash() == digest {
+			return block
+		}
+	}
+	return nil
 }
 
 // verifyPreparedCertificate authenticates a quorum of votes for one proposal
@@ -259,12 +335,18 @@ func (c *core) verifyPreparedCertificate(cert *bft.PreparedCertificate, target *
 		cert.Proposal.Number().Cmp(cert.View.Sequence) != 0 {
 		return errors.New("prepared certificate has invalid view")
 	}
-	// Votes bind only the header hash. Bind the body as well, or a peer could
-	// pair copied votes with different transactions and make the next proposer
-	// re-propose a block that every validator rejects.
-	header := cert.Proposal.Header()
-	if types.DeriveTransactionsRoot(cert.Proposal.Transactions(), header.Number) != header.TxHash {
-		return errors.New("prepared certificate proposal body does not match its header")
+	// Votes bind the header hash, but not every body component. Apply the same
+	// size, transaction and blob-sidecar checks used by ordinary PRE-PREPARE
+	// admission before retaining or re-proposing the peer-supplied body.
+	if c.backend != nil {
+		if err := c.backend.VerifyProposalBody(cert.Proposal); err != nil {
+			return err
+		}
+	} else {
+		header := cert.Proposal.Header()
+		if types.DeriveTransactionsRoot(cert.Proposal.Transactions(), header.Number) != header.TxHash {
+			return errors.New("prepared certificate proposal body does not match its header")
+		}
 	}
 	return c.verifyPreparedCertificateVotes(cert)
 }
@@ -285,7 +367,7 @@ func (c *core) verifyPreparedCertificateVotes(cert *bft.PreparedCertificate) err
 	seen := make(map[common.Address]struct{}, len(cert.Messages))
 	for _, vote := range cert.Messages {
 		if vote == nil || (vote.Code != bft.MsgPrepare && vote.Code != bft.MsgCommit) ||
-			len(vote.Justification) != 0 || !committee.Contains(vote.Address) {
+			len(vote.Evidence) != 0 || !committee.Contains(vote.Address) {
 			return errors.New("prepared certificate contains an ineligible vote")
 		}
 		if _, duplicate := seen[vote.Address]; duplicate {
@@ -299,20 +381,32 @@ func (c *core) verifyPreparedCertificateVotes(cert *bft.PreparedCertificate) err
 		if err != nil || signer != vote.Address {
 			return errors.New("prepared certificate contains invalid signature")
 		}
-		var subject *bft.Subject
-		if err := vote.Decode(&subject); err != nil {
-			return err
+		var view *bft.View
+		var digest common.Hash
+		var committedSeal []byte
+		switch vote.Code {
+		case bft.MsgPrepare:
+			var prepare *bft.Prepare
+			if err := vote.Decode(&prepare); err != nil || prepare == nil {
+				return errors.New("prepared certificate contains invalid prepare")
+			}
+			view, digest = prepare.View, prepare.Digest
+		case bft.MsgCommit:
+			var commit *bft.Commit
+			if err := vote.Decode(&commit); err != nil || commit == nil {
+				return errors.New("prepared certificate contains invalid commit")
+			}
+			view, digest, committedSeal = commit.View, commit.Digest, commit.CommittedSeal
 		}
-		expected := &bft.Subject{View: cert.View, Digest: cert.Proposal.Hash(), PrevHash: cert.Proposal.ParentHash()}
-		if !subject.Equal(expected) {
-			return errors.New("prepared certificate vote has inconsistent subject")
+		if view == nil || view.Cmp(cert.View) != 0 || digest != cert.Proposal.Hash() || vote.PrevHash != cert.Proposal.ParentHash() {
+			return errors.New("prepared certificate vote has inconsistent payload")
 		}
 		if vote.Code == bft.MsgCommit {
-			preimage := istanbul.PrepareCommittedSeal(subject.Digest)
-			if c.backend.IsPermissionlessAt(subject.View.Sequence.Uint64()) {
-				preimage = istanbul.PrepareCommittedSealWithRound(subject.Digest, byte(subject.View.Round.Uint64()))
+			preimage := istanbul.PrepareCommittedSeal(digest)
+			if c.backend.IsPermissionlessAt(view.Sequence.Uint64()) {
+				preimage = istanbul.PrepareCommittedSealWithRound(digest, byte(view.Round.Uint64()))
 			}
-			committer, err := istanbul.GetSignatureAddress(preimage, vote.CommittedSeal)
+			committer, err := istanbul.GetSignatureAddress(preimage, committedSeal)
 			if err != nil || committer != vote.Address {
 				return errors.New("prepared certificate contains invalid committed seal")
 			}
@@ -349,7 +443,7 @@ func (c *core) verifyRoundChangeCertificate(messages []*bft.Message, target *bft
 	for _, message := range messages {
 		// Embedded messages must be stripped; their evidence is not needed and
 		// would let the PRE-PREPARE grow with every claim again.
-		if message == nil || message.Code != bft.MsgRoundChange || len(message.Justification) != 0 ||
+		if message == nil || message.Code != bft.MsgRoundChange || len(message.Evidence) != 0 ||
 			!committee.Contains(message.Address) {
 			return nil, nil, errors.New("round-change certificate contains an ineligible message")
 		}
@@ -368,8 +462,7 @@ func (c *core) verifyRoundChangeCertificate(messages []*bft.Message, target *bft
 		if err := message.Decode(&roundChange); err != nil {
 			return nil, nil, err
 		}
-		if roundChange.View == nil || roundChange.View.Cmp(target) != 0 || !common.EmptyHash(roundChange.Digest) ||
-			roundChange.PrevHash != lastProposal.Hash() {
+		if roundChange.View == nil || roundChange.View.Cmp(target) != 0 || message.PrevHash != lastProposal.Hash() {
 			return nil, nil, errors.New("round-change certificate has inconsistent view")
 		}
 		if claim := roundChange.Prepared; claim != nil {
@@ -431,12 +524,13 @@ func (c *core) verifyPreprepareJustification(preprepare *bft.Preprepare) (*bft.P
 // roundChangeJustification selects what a proposer attaches to a PRE-PREPARE
 // for the given view: the stripped signed ROUND CHANGE quorum, plus the
 // certificate behind its highest prepared claim. Every message was verified
-// together with its Justification when it entered the round-change set.
+// with its Evidence when it entered the round-change set, which cached the
+// certificate by claim.
 func (c *core) roundChangeJustification(messages []*bft.Message, target *bft.View) ([]*bft.Message, *bft.PreparedCertificate, error) {
 	certificate := make([]*bft.Message, 0, len(messages))
 	var highest *bft.PreparedCertificate
 	for _, message := range messages {
-		certificate = append(certificate, message.WithoutJustification())
+		certificate = append(certificate, message.WithoutEvidence())
 		var roundChange *bft.RoundChange
 		if err := message.Decode(&roundChange); err != nil {
 			return nil, nil, err
@@ -444,9 +538,13 @@ func (c *core) roundChangeJustification(messages []*bft.Message, target *bft.Vie
 		if roundChange.Prepared == nil || (highest != nil && roundChange.Prepared.Round.Cmp(highest.View.Round) <= 0) {
 			continue
 		}
-		var cert *bft.PreparedCertificate
-		if err := rlp.DecodeBytes(message.Justification, &cert); err != nil {
+		key, err := preparedKey(target.Sequence, roundChange.Prepared)
+		if err != nil {
 			return nil, nil, err
+		}
+		cert := c.preparedCertificates[key]
+		if cert == nil {
+			return nil, nil, errors.New("prepared evidence is unavailable")
 		}
 		highest = cert
 	}
@@ -472,6 +570,38 @@ type roundChangeSet struct {
 	maxMessagesPerRound int
 	roundChanges        map[uint64]*messageSet
 	mu                  *sync.Mutex
+}
+
+// Check performs cheap, non-mutating admission checks before an unsigned
+// certificate is decoded and verified. Identical signed ROUND CHANGEs are
+// ignored even when a relay changes only the attachment.
+func (rcs *roundChangeSet) Check(currentRound, messageRound *big.Int, msg *bft.Message) error {
+	if !messageRound.IsUint64() {
+		return bft.ErrInvalidMessage
+	}
+	rcs.mu.Lock()
+	defer rcs.mu.Unlock()
+	if messageRound.Cmp(new(big.Int).Add(currentRound, big.NewInt(maxRoundChangeRoundsAhead))) > 0 {
+		return errRoundChangeTooFar
+	}
+	messages := rcs.roundChanges[messageRound.Uint64()]
+	if messages == nil {
+		if rcs.maxMessagesPerRound == 0 {
+			return errRoundChangeMessageLimit
+		}
+		return nil
+	}
+	if existing := messages.Get(msg.Address); existing != nil {
+		if existing.PrevHash == msg.PrevHash && existing.Code == msg.Code && existing.Address == msg.Address &&
+			bytes.Equal(existing.Msg, msg.Msg) {
+			return errIgnored
+		}
+		return nil
+	}
+	if messages.Size() >= rcs.maxMessagesPerRound {
+		return errRoundChangeMessageLimit
+	}
+	return nil
 }
 
 // Add retains a ROUND CHANGE only when its round is within the current window.
