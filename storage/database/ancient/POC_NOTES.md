@@ -33,10 +33,26 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   as `ReadBlock` and `ReadReceipt`).
 - Hash-keyed reads use geth's `isCanon` check: a frozen item is returned only
   if the frozen canonical hash at that number equals the requested hash.
+- Numbers at or above the freezer head never touch the freezer. A failed read
+  of a frozen item (e.g. the freezer disk is gone) is logged as an error and
+  counted in `ancient/readerror`, and the item is reported as missing.
 - Writes are unchanged; new blocks still go to the key-value store.
 - Kept in the key-value store: the genesis block, the `H`+hash to number
   mapping (needed by `ReadHeaderNumber`), total difficulty, and tx lookup
   entries.
+- Read-only mode (`DBConfig.FreezerReadOnly`) is for offline tools: if blocks
+  were frozen, the freezer is opened read-only from `--datadir.ancient` or the
+  directory recorded in MiscDB, without `--db.freezer` and without a freeze
+  loop. `ken init` and the `snapshot` subcommands use it, and accept
+  `--datadir.ancient` for a moved freezer.
+- `db-migration` opens the source freezer read-only and, after the key-value
+  copy, copies the freezer files into `<dst datadir>/ancient/chain` and records
+  that directory in the destination MiscDB. A single-DB, DynamoDB or memory
+  destination is refused up front when the source has frozen blocks.
+- Chain export reads frozen blocks through the DBManager. Import into a new
+  node writes to the key-value store and the loop freezes the blocks later;
+  import into a node that froze them skips them, because `HasBlock` sees the
+  freezer (`TestFreezer_ExportImport`).
 - `DBManager.FrozenBlocks()` returns how many blocks are frozen (0 when the
   freezer is disabled).
 
@@ -46,9 +62,19 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   like geth.
 - Order per round: append to the freezer, fsync the freezer, record the freezer
   directory in MiscDB, delete the blocks from the key-value stores in one batch
-  per DB, then delete any side chain blocks at the frozen heights.
+  per DB, then delete any side chain blocks at the frozen heights. Every 30,000
+  frozen blocks (outside the freezer lock) the frozen key ranges of the
+  header, body and receipts DBs are compacted, so the space is freed. A range
+  compaction flushes the memtable, so it is not run after every small round.
+  In a local test with 3,000 small blocks the key-value size went from 3.8 MB
+  to 1.7 MB with the compaction, and grew to 4.2 MB without it (tombstones).
 - A missing header, body or receipts entry stops the round with an error log.
   Nothing is deleted in that case.
+- Metrics, under `klay/db/chaindata/ancient/`: `frozen` (gauge, frozen
+  blocks), `lag` (gauge, blocks below the threshold that are not frozen yet),
+  `freeze/time` (timer, one sample per round), `compact/time` (timer, one
+  sample per compaction), `readerror` (counter), and the freezer's own `read`,
+  `write` (meters) and `size` (counter).
 
 **Crash safety and misuse checks**
 - On open, a batch that was fsynced but not yet deleted from the key-value
@@ -61,12 +87,21 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
 - Once blocks have been frozen, MiscDB stores the freezer directory
   (`AncientDir` key). Opening the database without the freezer, or with an empty
   freezer at another path, fails. Otherwise the node would start with a hole in
-  its chain. A freezer moved to a new path (e.g. to an HDD) is accepted, because
-  the genesis check confirms it is the same chain.
+  its chain. A freezer moved to a new path (e.g. to an HDD) is accepted if its
+  genesis matches and the key-value store continues where it ends: block
+  `frozen` must be in the key-value store and its parent must be the last frozen
+  block. An older copy of the freezer fails that check instead of leaving a
+  hole in the chain.
 
 **Rewind (SetHead)**: rewinding below the freezer head is **refused** with an
 error (`Cannot rewind below the frozen blocks`), in the same way the existing
-live-pruning guard refuses rewinds. Truncating the freezer would also work, but
+live-pruning guard refuses rewinds. `SetHead` pauses the freeze loop
+(`DBManager.PauseFreezer`) from the check until the rewind is done, so a
+running batch cannot freeze the blocks the rewind deletes. The rewind is also
+refused when the target block has no state and the search for a block with
+state would go below the freezer head; without that check `HeaderChain.SetHead`
+would follow the search down and delete the total difficulty and other
+key-value data of frozen blocks. Truncating the freezer would also work, but
 then a mistaken `debug_setHead` could silently throw away immutable history,
 and the threshold already covers realistic recovery rewinds. Repair rewinds at
 startup (`setHeadBeyondRoot(..., repair=true)`) only move head markers and
@@ -86,7 +121,7 @@ leave the key-value store. geth's ~25-hour equivalent felt too tight for that.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--db.freezer` | off | Enable the freezer and the freeze loop (experimental). |
-| `--db.freezer.threshold` | `172800` | Number of recent blocks kept in the key-value DBs. |
+| `--db.freezer.threshold` | `172800` | Number of recent blocks kept in the key-value DBs. At least 128 and twice `--state.block-interval`, so that a crash recovery never has to rewind into the freezer; the node refuses to start otherwise. |
 | `--datadir.ancient` | `<chaindata>/ancient` | Freezer root. A relative path is resolved against the chaindata directory. Tables go into `<root>/chain`. |
 
 Environment variables: `KAIA_DB_FREEZER`, `KAIA_DB_FREEZER_THRESHOLD`,
@@ -127,12 +162,9 @@ make ken    # or: go build -o build/bin/ken ./cmd/ken
 5. Restart with the same flags. The freezer resumes where it stopped. Restarting
    without `--db.freezer` should fail with
    `old blocks were moved to the freezer at …`.
-6. Reclaim disk space. LevelDB only drops deleted keys during compaction, so run
-   ```
-   debug.chaindbCompact({preset: "allbutstate"})
-   ```
-   then compare `du -sh chaindata/{header,body,receipts}` with
-   `du -sh /hdd/kairos-ancient`.
+6. Compare `du -sh chaindata/{header,body,receipts}` with
+   `du -sh /hdd/kairos-ancient`. The loop compacts every 30,000 frozen blocks,
+   so no manual `debug.chaindbCompact` is needed.
 
 To try an interrupted batch, kill the process (`kill -9`) during a
 `Froze chain segment` round and restart. Look for
@@ -141,26 +173,11 @@ between the fsync and the delete.
 
 ## Not handled yet
 
-- **`kcn db-migration`**: it copies key-value DBs only. The migrated MiscDB
-  carries the freezer marker, so the destination refuses to open until the
-  freezer directory is copied and enabled by hand.
-- **Chain export/import**: not tested. Export reads through the DBManager, so it
-  should see frozen blocks. Import writes to the key-value store, and the loop
-  freezes the blocks later.
-- **Other commands that build their own `DBConfig`** (`snapshot`, `chaincmd`,
-  migration): they have no freezer flags, so on a frozen database they fail on
-  the marker instead of reading a partial chain.
 - **`--db.single`**, **DynamoDB**, **MemoryDB**, **secondary RocksDB**: the
   freezer is disabled with a warning. Secondary RocksDB is excluded because the
   primary holds the freezer's exclusive file lock.
-- **Reclaiming disk**: no automatic range compaction after deletion. Use
-  `debug_chaindbCompact` for now.
-- **Metrics**: only the freezer's read/write meters and size counter
-  (`klay/db/chaindata/ancient/*`). There are no freeze-loop metrics (lag,
-  batch time) and no frozen-blocks gauge.
 - **Freezer truncation**: SetHead below the freezer head is refused, not
-  supported. The SetHead check and the freeze loop are not synchronised.
-  A race needs a rewind deeper than the threshold while a batch is running.
+  supported.
 - **Dangling side chains** above the freezer head (geth deletes them) are not
   followed. Kaia's BFT finality makes side chains essentially non-existent.
 - **Tail pruning / history expiry and era files**: the tail-group code is

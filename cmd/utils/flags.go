@@ -344,7 +344,7 @@ var (
 	}
 	FreezerThresholdFlag = &cli.Uint64Flag{
 		Name:     "db.freezer.threshold",
-		Usage:    "Number of recent blocks kept in the key-value databases when the freezer is enabled",
+		Usage:    "Number of recent blocks kept in the key-value databases when the freezer is enabled (at least 128 and twice the trie block interval)",
 		Value:    database.DefaultFreezerThreshold,
 		Aliases:  []string{},
 		EnvVars:  []string{"KLAYTN_DB_FREEZER_THRESHOLD", "KAIA_DB_FREEZER_THRESHOLD"},

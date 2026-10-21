@@ -316,6 +316,8 @@ type DBManager interface {
 
 	// FrozenBlocks returns the number of blocks moved to the freezer.
 	FrozenBlocks() uint64
+	// PauseFreezer stops moving blocks to the freezer until resume is called.
+	PauseFreezer() (frozen uint64, resume func())
 }
 
 type DBEntryType uint8
@@ -451,6 +453,7 @@ type databaseManager struct {
 	freezerQuit    chan struct{}
 	freezerTrigger chan chan struct{} // Manual blocking freeze trigger, test determinism
 	freezerWg      sync.WaitGroup
+	freezeLock     sync.Mutex // Held by a freeze round and by PauseFreezer
 }
 
 func NewMemoryDBManager() DBManager {
@@ -498,6 +501,7 @@ type DBConfig struct {
 	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer
 	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
 	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
+	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer is opened for reads only
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"

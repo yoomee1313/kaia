@@ -102,6 +102,8 @@ func getConfig(ctx *cli.Context) *database.DBConfig {
 		SingleDB:           ctx.Bool(utils.SingleDBFlag.Name),
 		NumStateTrieShards: ctx.Uint(utils.NumStateTrieShardsFlag.Name),
 		OpenFilesLimit:     database.GetOpenFilesLimit(),
+		FreezerReadOnly:    true,
+		AncientDir:         ctx.String(utils.AncientDirFlag.Name),
 
 		LevelDBCacheSize:    ctx.Int(utils.LevelDBCacheSizeFlag.Name),
 		LevelDBCompression:  database.LevelDBCompressionType(ctx.Int(utils.LevelDBCompressionTypeFlag.Name)),
