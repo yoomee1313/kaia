@@ -22,11 +22,16 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database/ancient"
+	"github.com/rcrowley/go-metrics"
 )
 
 const (
@@ -48,17 +53,37 @@ const (
 	// before doing an fsync and deleting them from the key-value store.
 	freezerBatchLimit = 30000
 
+	// freezerCompactInterval is the number of frozen blocks after which their
+	// key ranges are compacted. A range compaction flushes the memtable, so it
+	// is not run after every small round.
+	freezerCompactInterval = freezerBatchLimit
+
 	// DefaultAncientDirName is the freezer root under chaindata used when no
 	// ancient directory is configured.
 	DefaultAncientDirName = "ancient"
 )
 
+var (
+	frozenBlocksGauge  = metrics.NewRegisteredGauge(dbMetricPrefix+"ancient/frozen", nil)
+	freezerLagGauge    = metrics.NewRegisteredGauge(dbMetricPrefix+"ancient/lag", nil)
+	freezeTimer        = metrics.NewRegisteredTimer(dbMetricPrefix+"ancient/freeze/time", nil)
+	freezeCompactTimer = metrics.NewRegisteredTimer(dbMetricPrefix+"ancient/compact/time", nil)
+
+	freezerReadErrorCounter = metrics.NewRegisteredCounter(dbMetricPrefix+"ancient/readerror", nil)
+)
+
 // openFreezer opens the block freezer if it is enabled and supported by the
 // configured backend. It fails on an I/O or consistency error, and if blocks
-// were frozen before but the freezer is now disabled or empty.
+// were frozen before but the freezer is now disabled or empty. With
+// FreezerReadOnly, an existing freezer is opened for reads only, and no freeze
+// loop is started.
 func (dbm *databaseManager) openFreezer() error {
 	dbc := dbm.config
-	enabled := dbc.EnableFreezer
+	miscDB := dbm.getDatabase(MiscDB)
+	marker, _ := miscDB.Get(ancientDirKey)
+
+	readonly := !dbc.EnableFreezer && dbc.FreezerReadOnly && len(marker) != 0
+	enabled := dbc.EnableFreezer || readonly
 	switch {
 	case !enabled:
 	case dbc.DBType == MemoryDB || dbc.DBType == DynamoDB:
@@ -68,8 +93,6 @@ func (dbm *databaseManager) openFreezer() error {
 		logger.Warn("Freezer is not supported for a secondary RocksDB yet, disabling it")
 		enabled = false
 	}
-	miscDB := dbm.getDatabase(MiscDB)
-	marker, _ := miscDB.Get(ancientDirKey)
 	if !enabled {
 		if len(marker) != 0 {
 			return fmt.Errorf("old blocks were moved to the freezer at %s, enable the freezer to read them", marker)
@@ -77,15 +100,20 @@ func (dbm *databaseManager) openFreezer() error {
 		return nil
 	}
 
-	root := dbc.AncientDir
-	if root == "" {
-		root = DefaultAncientDirName
+	var dir string
+	if readonly && dbc.AncientDir == "" {
+		dir = string(marker)
+	} else {
+		root := dbc.AncientDir
+		if root == "" {
+			root = DefaultAncientDirName
+		}
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(dbc.Dir, root)
+		}
+		dir = filepath.Join(root, ancient.ChainFreezerName)
 	}
-	if !filepath.IsAbs(root) {
-		root = filepath.Join(dbc.Dir, root)
-	}
-	dir := filepath.Join(root, ancient.ChainFreezerName)
-	f, err := ancient.NewChainFreezer(dir, dbMetricPrefix, false)
+	f, err := ancient.NewChainFreezer(dir, dbMetricPrefix, readonly)
 	if err != nil {
 		return err
 	}
@@ -95,10 +123,15 @@ func (dbm *databaseManager) openFreezer() error {
 		return fmt.Errorf("freezer at %s is empty, but old blocks were moved to the freezer at %s", dir, marker)
 	}
 	dbm.freezer = f
-	if err := dbm.checkFreezer(); err != nil {
+	if err := dbm.checkFreezer(readonly); err != nil {
 		f.Close()
 		dbm.freezer = nil
 		return err
+	}
+	frozenBlocksGauge.Update(int64(frozen))
+	if readonly {
+		logger.Info("Opened block freezer read-only", "dir", dir, "frozen", frozen)
+		return nil
 	}
 	if frozen > 0 && string(marker) != dir {
 		if err := miscDB.Put(ancientDirKey, []byte(dir)); err != nil {
@@ -115,9 +148,9 @@ func (dbm *databaseManager) openFreezer() error {
 }
 
 // checkFreezer verifies that the freezer belongs to the chain in the key-value
-// store and finishes the deletion of a batch that was frozen right before an
-// unclean shutdown.
-func (dbm *databaseManager) checkFreezer() error {
+// store and, unless readonly, finishes the deletion of a batch that was frozen
+// right before an unclean shutdown.
+func (dbm *databaseManager) checkFreezer(readonly bool) error {
 	frozen, _ := dbm.freezer.Ancients()
 	if frozen == 0 {
 		return nil
@@ -128,6 +161,23 @@ func (dbm *databaseManager) checkFreezer() error {
 	if kvGenesis, _ := hdb.Get(headerHashKey(0)); len(kvGenesis) != 0 {
 		if frozenGenesis := dbm.readAncientHash(0); !bytes.Equal(kvGenesis, frozenGenesis) {
 			return fmt.Errorf("freezer genesis mismatch: kv %x, freezer %x", kvGenesis, frozenGenesis)
+		}
+	}
+
+	// The key-value store must continue where the freezer ends. Otherwise the
+	// freezer is an older copy and the blocks in between are gone.
+	if head := dbm.ReadHeaderNumber(dbm.ReadHeadBlockHash()); head != nil && *head >= frozen {
+		data, _ := hdb.Get(headerHashKey(frozen))
+		if len(data) == 0 {
+			return fmt.Errorf("freezer at %s ends at block %d, but block %d is not in the key-value store; the freezer is older than the chain",
+				dbm.freezerDir(), frozen-1, frozen)
+		}
+		header := new(types.Header)
+		if err := rlp.DecodeBytes(dbm.ReadHeaderRLP(common.BytesToHash(data), frozen), header); err != nil {
+			return fmt.Errorf("invalid header of block %d after the freezer: %v", frozen, err)
+		}
+		if frozenHash := dbm.readAncientHash(frozen - 1); !bytes.Equal(header.ParentHash[:], frozenHash) {
+			return fmt.Errorf("block %d does not follow the freezer head: parent %x, freezer %x", frozen, header.ParentHash, frozenHash)
 		}
 	}
 
@@ -146,7 +196,7 @@ func (dbm *databaseManager) checkFreezer() error {
 		}
 		first--
 	}
-	if first == frozen {
+	if first == frozen || readonly {
 		return nil
 	}
 	hashes := make([]common.Hash, 0, frozen-first)
@@ -162,11 +212,19 @@ func (dbm *databaseManager) closeFreezer() {
 	if dbm.freezer == nil {
 		return
 	}
-	close(dbm.freezerQuit)
-	dbm.freezerWg.Wait()
+	if dbm.freezerQuit != nil {
+		close(dbm.freezerQuit)
+		dbm.freezerWg.Wait()
+	}
 	if err := dbm.freezer.Close(); err != nil {
 		logger.Error("Failed to close block freezer", "err", err)
 	}
+}
+
+// freezerDir returns the directory of the open freezer.
+func (dbm *databaseManager) freezerDir() string {
+	dir, _ := dbm.freezer.AncientDatadir()
+	return dir
 }
 
 // FrozenBlocks returns the number of blocks stored in the freezer, i.e. blocks
@@ -179,13 +237,33 @@ func (dbm *databaseManager) FrozenBlocks() uint64 {
 	return frozen
 }
 
+// PauseFreezer stops the freeze loop from moving blocks out of the key-value
+// store until resume is called, and returns the number of frozen blocks. A
+// rewind holds it so that the blocks it deletes are not frozen meanwhile.
+func (dbm *databaseManager) PauseFreezer() (frozen uint64, resume func()) {
+	dbm.freezeLock.Lock()
+	return dbm.FrozenBlocks(), dbm.freezeLock.Unlock
+}
+
 // readAncientHash returns the frozen canonical hash of the given block number,
 // or nil if the block is not frozen.
 func (dbm *databaseManager) readAncientHash(number uint64) []byte {
-	if dbm.freezer == nil {
+	if dbm.freezer == nil || number >= dbm.FrozenBlocks() {
 		return nil
 	}
-	data, _ := dbm.freezer.Ancient(ancient.ChainFreezerHashTable, number)
+	return dbm.retrieveAncient(ancient.ChainFreezerHashTable, number)
+}
+
+// retrieveAncient returns a frozen item. The block must be frozen, so an error
+// means the freezer cannot be read, e.g. because its disk failed. It is logged
+// and counted, and the item is reported as missing.
+func (dbm *databaseManager) retrieveAncient(kind string, number uint64) []byte {
+	data, err := dbm.freezer.Ancient(kind, number)
+	if err != nil {
+		freezerReadErrorCounter.Inc(1)
+		logger.Error("Failed to read from the block freezer", "kind", kind, "number", number, "err", err)
+		return nil
+	}
 	return data
 }
 
@@ -203,8 +281,7 @@ func (dbm *databaseManager) readAncient(kind string, hash common.Hash, number ui
 	if !dbm.isFrozenCanon(hash, number) {
 		return nil
 	}
-	data, _ := dbm.freezer.Ancient(kind, number)
-	return data
+	return dbm.retrieveAncient(kind, number)
 }
 
 // freeze is a background thread that periodically moves blocks older than the
@@ -213,8 +290,9 @@ func (dbm *databaseManager) freeze() {
 	defer dbm.freezerWg.Done()
 
 	var (
-		backoff   bool
-		triggered chan struct{} // Used in tests
+		backoff     bool
+		triggered   chan struct{} // Used in tests
+		compactFrom = dbm.FrozenBlocks()
 	)
 	timer := time.NewTimer(freezerRecheckInterval)
 	defer timer.Stop()
@@ -243,34 +321,77 @@ func (dbm *databaseManager) freeze() {
 				return
 			}
 		}
-		threshold, ok := dbm.freezeThreshold()
-		if !ok {
-			backoff = true
-			continue
-		}
-		// Short circuit if the blocks below threshold are already frozen.
-		frozen := dbm.FrozenBlocks()
-		if frozen > threshold {
-			backoff = true
-			continue
-		}
-		first, last := frozen, threshold
-		if last-first+1 > freezerBatchLimit {
-			last = first + freezerBatchLimit - 1
-		}
-		start := time.Now()
-		if err := dbm.freezeRange(first, last); err != nil {
+		first, n, err := dbm.freezeOnce()
+		if err != nil {
 			logger.Error("Error in block freeze operation", "err", err)
-			backoff = true
-			continue
 		}
-		logger.Info("Froze chain segment", "from", first, "to", last, "elapsed", common.PrettyDuration(time.Since(start)))
-
+		if end := first + n; n > 0 && end-compactFrom >= freezerCompactInterval {
+			dbm.compactFrozen(compactFrom, end-1)
+			compactFrom = end
+		}
 		// Avoid database thrashing with tiny writes
-		if last-first+1 < freezerBatchLimit {
+		if n < freezerBatchLimit {
 			backoff = true
 		}
 	}
+}
+
+// freezeOnce freezes the next batch of blocks below the threshold and returns
+// the first block number and the number of blocks it froze.
+func (dbm *databaseManager) freezeOnce() (uint64, uint64, error) {
+	dbm.freezeLock.Lock()
+	defer dbm.freezeLock.Unlock()
+
+	threshold, ok := dbm.freezeThreshold()
+	if !ok {
+		freezerLagGauge.Update(0)
+		return 0, 0, nil
+	}
+	// Short circuit if the blocks below threshold are already frozen.
+	frozen := dbm.FrozenBlocks()
+	if frozen > threshold {
+		freezerLagGauge.Update(0)
+		return 0, 0, nil
+	}
+	first, last := frozen, threshold
+	if last-first+1 > freezerBatchLimit {
+		last = first + freezerBatchLimit - 1
+	}
+	start := time.Now()
+	if err := dbm.freezeRange(first, last); err != nil {
+		freezerLagGauge.Update(int64(threshold - frozen + 1))
+		return 0, 0, err
+	}
+	elapsed := time.Since(start)
+	freezeTimer.Update(elapsed)
+	frozenBlocksGauge.Update(int64(last + 1))
+	freezerLagGauge.Update(int64(threshold - last))
+	logger.Info("Froze chain segment", "from", first, "to", last, "elapsed", common.PrettyDuration(elapsed))
+	return first, last - first + 1, nil
+}
+
+// compactFrozen compacts the key ranges of the frozen blocks [first, last] in
+// the header, body and receipts databases. Deleted keys only free disk space
+// once they are compacted, and old block data is rarely touched by the
+// background compaction. Blocks frozen since the last compaction before a
+// restart are left to the background compaction.
+func (dbm *databaseManager) compactFrozen(first, last uint64) {
+	start := time.Now()
+	for _, r := range []struct {
+		entry  DBEntryType
+		prefix []byte
+	}{
+		{headerDB, headerPrefix},
+		{BodyDB, blockBodyPrefix},
+		{ReceiptsDB, blockReceiptsPrefix},
+	} {
+		from := append(append([]byte{}, r.prefix...), common.Int64ToByteBigEndian(first)...)
+		to := append(append([]byte{}, r.prefix...), common.Int64ToByteBigEndian(last+1)...)
+		if err := dbm.getDatabase(r.entry).Compact(from, to); err != nil {
+			logger.Warn("Failed to compact frozen blocks", "db", r.entry, "from", first, "to", last, "err", err)
+		}
+	}
+	freezeCompactTimer.Update(time.Since(start))
 }
 
 // freezeThreshold returns the highest block number that may be frozen.
@@ -340,8 +461,7 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 		logger.Crit("Failed to flush frozen tables", "err", err)
 	}
 	// Remember the freezer before any block is gone from the key-value store.
-	dir, _ := dbm.freezer.AncientDatadir()
-	if err := dbm.getDatabase(MiscDB).Put(ancientDirKey, []byte(dir)); err != nil {
+	if err := dbm.getDatabase(MiscDB).Put(ancientDirKey, []byte(dbm.freezerDir())); err != nil {
 		logger.Crit("Failed to store the freezer directory", "err", err)
 	}
 	if err := dbm.deleteFrozenBlocks(first, hashes); err != nil {
@@ -418,4 +538,80 @@ func (dbm *databaseManager) deleteFrozenBlocks(first uint64, hashes []common.Has
 		dbm.DeleteBlock(hash, sideNumbers[i])
 	}
 	return nil
+}
+
+// checkFreezerMigration fails if dbm has frozen blocks and the destination of a
+// DB migration cannot hold them.
+func (dbm *databaseManager) checkFreezerMigration(dstdbm DBManager) error {
+	if dbm.FrozenBlocks() == 0 {
+		return nil
+	}
+	dst := dstdbm.GetDBConfig()
+	if dst.SingleDB || dst.DBType == MemoryDB || dst.DBType == DynamoDB {
+		return fmt.Errorf("the source has %d frozen blocks, but the destination (DBType %s, single %v) does not support the freezer",
+			dbm.FrozenBlocks(), dst.DBType, dst.SingleDB)
+	}
+	return nil
+}
+
+// migrateFreezer copies the freezer files of dbm into the default freezer
+// directory of the migrated database, and records that directory in its
+// MiscDB. The copied MiscDB still names the source freezer until then.
+func (dbm *databaseManager) migrateFreezer(dstdbm DBManager, quit chan struct{}) error {
+	if dbm.FrozenBlocks() == 0 {
+		return nil
+	}
+	src := dbm.freezerDir()
+	dst := filepath.Join(dstdbm.GetDBConfig().Dir, DefaultAncientDirName, ancient.ChainFreezerName)
+	if entries, _ := os.ReadDir(dst); len(entries) != 0 {
+		return fmt.Errorf("freezer directory %s of the destination is not empty", dst)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	start := time.Now()
+	for _, e := range entries {
+		if e.IsDir() || e.Name() == "FLOCK" {
+			continue
+		}
+		select {
+		case <-quit:
+			return ErrDBMigrationInterrupted
+		default:
+		}
+		if err := copyFile(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return fmt.Errorf("failed to copy freezer file %s: %w", e.Name(), err)
+		}
+	}
+	if err := dstdbm.getDatabase(MiscDB).Put(ancientDirKey, []byte(dst)); err != nil {
+		return err
+	}
+	logger.Info("Finish freezer migration", "src", src, "dst", dst, "frozen", dbm.FrozenBlocks(), "elapsed", time.Since(start))
+	return nil
+}
+
+// copyFile copies the file at src to dst and syncs it.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

@@ -177,6 +177,8 @@ func TestFreezer_FreezeAndRead(t *testing.T) {
 
 	triggerFreeze(t, dbm)
 	require.Equal(t, uint64(frozen), dbm.FrozenBlocks())
+	assert.Equal(t, int64(frozen), frozenBlocksGauge.Value())
+	assert.Equal(t, int64(0), freezerLagGauge.Value())
 
 	// The genesis block stays in the key-value store.
 	assertBlockInKV(t, dbm, blocks[0])
@@ -246,6 +248,35 @@ func TestFreezer_BelowThreshold(t *testing.T) {
 	}
 }
 
+// TestFreezer_Pause checks that no block is frozen while the freezer is paused.
+func TestFreezer_Pause(t *testing.T) {
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 5))
+	defer dbm.Close()
+	blocks := writeFreezerTestChain(t, dbm, 20)
+
+	frozen, resume := dbm.PauseFreezer()
+	assert.Equal(t, uint64(0), frozen)
+	done := make(chan struct{})
+	dbm.freezerTrigger <- done
+	select {
+	case <-done:
+		t.Fatal("freeze round finished while the freezer was paused")
+	case <-time.After(200 * time.Millisecond):
+	}
+	assert.Equal(t, uint64(0), dbm.FrozenBlocks())
+	for _, b := range blocks {
+		assertBlockInKV(t, dbm, b)
+	}
+
+	resume()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("freeze loop did not finish after resume")
+	}
+	assert.Equal(t, uint64(15), dbm.FrozenBlocks())
+}
+
 // TestFreezer_InterruptedBatch simulates a crash after a batch was flushed to
 // the freezer but before it was deleted from the key-value store. Reopening
 // finishes the deletion.
@@ -292,6 +323,18 @@ func TestFreezer_InterruptedBatch(t *testing.T) {
 	}
 }
 
+// copyFreezerTestDir copies the freezer files in src to a new directory dst.
+func copyFreezerTestDir(t *testing.T, src, dst string) {
+	require.NoError(t, os.MkdirAll(dst, 0o755))
+	entries, err := os.ReadDir(src)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if e.Name() != "FLOCK" {
+			require.NoError(t, copyFile(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())))
+		}
+	}
+}
+
 // TestFreezer_RequiredAfterFreezing checks that a database whose blocks were
 // frozen cannot be opened without the freezer or with an empty freezer.
 func TestFreezer_RequiredAfterFreezing(t *testing.T) {
@@ -316,10 +359,128 @@ func TestFreezer_RequiredAfterFreezing(t *testing.T) {
 	emptyDBC.AncientDir = t.TempDir()
 	assert.ErrorContains(t, open(emptyDBC), "is empty")
 
+	// An older copy of the freezer leaves a hole before the key-value store.
+	staleRoot := t.TempDir()
+	copyFreezerTestDir(t, filepath.Join(dir, DefaultAncientDirName, ancient.ChainFreezerName), filepath.Join(staleRoot, ancient.ChainFreezerName))
+	dbm = openFreezerTestDBM(t, newFreezerTestConfig(dir, true, 5))
+	parent := dbm.ReadHeadBlockHash()
+	for i := 10; i < 15; i++ {
+		b := genFreezerTestBlock(t, uint64(i), parent, "canonical")
+		writeFreezerTestBlock(dbm, b, true)
+		parent = b.hash()
+	}
+	dbm.WriteHeadBlockHash(parent)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(10), dbm.FrozenBlocks())
+	dbm.Close()
+	staleDBC := newFreezerTestConfig(dir, true, 5)
+	staleDBC.AncientDir = staleRoot
+	assert.ErrorContains(t, open(staleDBC), "older than the chain")
+
 	// The freezer directory can be moved, e.g. to another disk.
 	movedRoot := filepath.Join(t.TempDir(), "moved")
 	require.NoError(t, os.Rename(filepath.Join(dir, DefaultAncientDirName), movedRoot))
 	movedDBC := newFreezerTestConfig(dir, true, 5)
 	movedDBC.AncientDir = movedRoot
 	assert.NoError(t, open(movedDBC))
+}
+
+// TestFreezer_ReadOnly checks that a tool can read frozen blocks without
+// enabling the freezer, and that it never freezes blocks itself.
+func TestFreezer_ReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(dir, true, 5))
+	blocks := writeFreezerTestChain(t, dbm, 10)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(5), dbm.FrozenBlocks())
+	dbm.Close()
+
+	readOnly := func(ancientDir string) *DBConfig {
+		dbc := newFreezerTestConfig(dir, false, 1)
+		dbc.FreezerReadOnly = true
+		dbc.AncientDir = ancientDir
+		return dbc
+	}
+	dbm = openFreezerTestDBM(t, readOnly(""))
+	assert.Equal(t, uint64(5), dbm.FrozenBlocks())
+	assert.Nil(t, dbm.freezerTrigger, "no freeze loop")
+	for _, b := range blocks {
+		assertBlockReadable(t, dbm, b)
+	}
+	for _, b := range blocks[5:] {
+		assertBlockInKV(t, dbm, b) // threshold 1 is ignored
+	}
+	dbm.Close()
+
+	// A moved freezer is found with the ancient directory.
+	movedRoot := filepath.Join(t.TempDir(), "moved")
+	require.NoError(t, os.Rename(filepath.Join(dir, DefaultAncientDirName), movedRoot))
+	dbm = openFreezerTestDBM(t, readOnly(movedRoot))
+	assert.Equal(t, uint64(5), dbm.FrozenBlocks())
+	assertBlockReadable(t, dbm, blocks[1])
+	dbm.Close()
+
+	// Without frozen blocks, read-only mode opens no freezer.
+	dbm = openFreezerTestDBM(t, &DBConfig{Dir: t.TempDir(), DBType: LevelDB, NumStateTrieShards: 1, FreezerReadOnly: true})
+	assert.Nil(t, dbm.freezer)
+	dbm.Close()
+}
+
+// TestFreezer_Migration checks that a DB migration copies the freezer and that
+// the migrated database reads frozen blocks from its own copy.
+func TestFreezer_Migration(t *testing.T) {
+	srcDir := t.TempDir()
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(srcDir, true, 5))
+	blocks := writeFreezerTestChain(t, dbm, 10)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(5), dbm.FrozenBlocks())
+	dbm.Close()
+
+	srcDBC := newFreezerTestConfig(srcDir, false, 0)
+	srcDBC.FreezerReadOnly = true
+	src := openFreezerTestDBM(t, srcDBC)
+
+	// A destination that cannot hold the freezer is refused before copying.
+	single := openFreezerTestDBM(t, &DBConfig{Dir: t.TempDir(), DBType: LevelDB, SingleDB: true, NumStateTrieShards: 1})
+	assert.ErrorContains(t, src.StartDBMigration(single), "does not support the freezer")
+	single.Close()
+
+	dstDir := t.TempDir()
+	dst := openFreezerTestDBM(t, newFreezerTestConfig(dstDir, false, 0))
+	require.NoError(t, src.StartDBMigration(dst))
+	src.Close()
+	dst.Close()
+
+	// The source freezer is no longer needed.
+	require.NoError(t, os.RemoveAll(filepath.Join(srcDir, DefaultAncientDirName)))
+	dst = openFreezerTestDBM(t, newFreezerTestConfig(dstDir, true, 5))
+	defer dst.Close()
+	assert.Equal(t, uint64(5), dst.FrozenBlocks())
+	for _, b := range blocks {
+		assertBlockReadable(t, dst, b)
+	}
+}
+
+// TestFreezer_ReadError checks that a failing freezer read is counted rather
+// than silently reported as a missing block.
+func TestFreezer_ReadError(t *testing.T) {
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 5))
+	defer dbm.Close()
+	blocks := writeFreezerTestChain(t, dbm, 10)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(5), dbm.FrozenBlocks())
+
+	// Reads of blocks that are not frozen never touch the freezer.
+	before := freezerReadErrorCounter.Count()
+	assert.Nil(t, dbm.ReadHeader(common.HexToHash("0xdead"), 100))
+	assert.Equal(t, before, freezerReadErrorCounter.Count())
+
+	// Simulate a freezer that can no longer be read.
+	require.NoError(t, dbm.freezer.Close())
+	dbm.ClearHeaderChainCache()
+	dbm.ClearBlockChainCache()
+	assert.Nil(t, dbm.ReadBodyRLP(blocks[2].hash(), 2))
+	assert.Greater(t, freezerReadErrorCounter.Count(), before)
+	assertBlockInKV(t, dbm, blocks[7])
+	assertBlockReadable(t, dbm, blocks[7])
 }

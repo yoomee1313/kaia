@@ -19,11 +19,14 @@
 package blockchain
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/faker"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/assert"
@@ -322,6 +325,51 @@ type frozenTestDB struct {
 }
 
 func (db *frozenTestDB) FrozenBlocks() uint64 { return db.frozen }
+
+func (db *frozenTestDB) PauseFreezer() (uint64, func()) { return db.frozen, func() {} }
+
+// TestSetHeadBelowFreezerToFindState checks that SetHead refuses a rewind that
+// has to go below the frozen blocks to find a block with state, and leaves the
+// chain untouched.
+func TestSetHeadBelowFreezerToFindState(t *testing.T) {
+	var (
+		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		address = crypto.PubkeyToAddress(key.PublicKey)
+		gspec   = &Genesis{Config: params.TestChainConfig, Alloc: GenesisAlloc{address: {Balance: big.NewInt(1000000000)}}}
+		signer  = types.LatestSignerForChainID(gspec.Config.ChainID)
+		db      = &frozenTestDB{DBManager: database.NewMemoryDBManager()}
+	)
+	genesis := gspec.MustCommit(db)
+	chain, err := NewBlockChain(db, nil, gspec.Config, faker.NewFullFaker(), vm.Config{})
+	require.NoError(t, err)
+	defer chain.Stop()
+	chain.Config().Istanbul = params.GetDefaultIstanbulConfig()
+
+	// Every block changes the state, and only blocks up to 2 keep their state.
+	blocks, _ := GenerateChain(gspec.Config, genesis, faker.NewFaker(), db, 8, func(i int, b *BlockGen) {
+		tx, err := types.SignTx(types.NewTransaction(b.TxNonce(address), common.Address{byte(i + 1)}, big.NewInt(1), params.TxGas, nil, nil), signer, key)
+		require.NoError(t, err)
+		b.AddTx(tx)
+	})
+	_, err = chain.InsertChain(blocks)
+	require.NoError(t, err)
+	for _, b := range blocks[2:] {
+		chain.stateCache.TrieDB().Dereference(b.Root())
+		db.DeleteTrieNode(b.Root().ExtendZero())
+	}
+
+	db.frozen = 5 // blocks [0, 4] are frozen
+	assert.ErrorContains(t, chain.SetHead(5), "frozen")
+	assert.Equal(t, uint64(8), chain.CurrentBlock().NumberU64())
+	for _, b := range blocks {
+		assert.NotNil(t, chain.GetTd(b.Hash(), b.NumberU64()), "td %d", b.NumberU64())
+		assert.Equal(t, b.Hash(), chain.GetBlockByNumber(b.NumberU64()).Hash())
+	}
+
+	db.frozen = 0
+	assert.NoError(t, chain.SetHead(5))
+	assert.Equal(t, uint64(2), chain.CurrentBlock().NumberU64())
+}
 
 // TestSetHeadBelowFreezer checks that SetHead refuses to delete frozen blocks.
 func TestSetHeadBelowFreezer(t *testing.T) {

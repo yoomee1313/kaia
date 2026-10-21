@@ -221,10 +221,28 @@ func checkSyncMode(config *Config) error {
 	return nil
 }
 
+// checkFreezerThreshold makes sure that the blocks a crash recovery may rewind
+// to stay in the key-value store. The state is committed to disk every
+// TrieBlockInterval blocks, so a recovery can rewind up to that far.
+func checkFreezerThreshold(config *Config) error {
+	if !config.EnableFreezer {
+		return nil
+	}
+	minThreshold := max(uint64(blockchain.DefaultBlockInterval), 2*uint64(config.TrieBlockInterval))
+	if config.FreezerThreshold < minThreshold {
+		return fmt.Errorf("freezer threshold %d is too low, it must be at least %d (and twice the trie block interval %d)",
+			config.FreezerThreshold, minThreshold, config.TrieBlockInterval)
+	}
+	return nil
+}
+
 // New creates a new CN object (including the
 // initialisation of the common CN object)
 func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	if err := checkSyncMode(config); err != nil {
+		return nil, err
+	}
+	if err := checkFreezerThreshold(config); err != nil {
 		return nil, err
 	}
 
