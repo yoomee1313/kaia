@@ -462,6 +462,7 @@ var SnapshotFlags = []cli.Flag{
 	altsrc.NewBoolFlag(RocksDBDisableMetricsFlag),
 	altsrc.NewIntFlag(RocksDBMaxOpenFilesFlag),
 	altsrc.NewBoolFlag(RocksDBCacheIndexAndFilterFlag),
+	altsrc.NewPathFlag(AncientDirFlag),
 }
 
 var DBMigrationSrcFlags = []cli.Flag{
@@ -487,6 +488,7 @@ var DBMigrationSrcFlags = []cli.Flag{
 	altsrc.NewBoolFlag(RocksDBDisableMetricsFlag),
 	altsrc.NewIntFlag(RocksDBMaxOpenFilesFlag),
 	altsrc.NewBoolFlag(RocksDBCacheIndexAndFilterFlag),
+	altsrc.NewPathFlag(AncientDirFlag),
 }
 
 var DBMigrationDstFlags = []cli.Flag{
