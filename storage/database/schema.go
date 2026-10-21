@@ -51,6 +51,10 @@ var (
 	// fastTrieProgressKey tracks the number of trie entries imported during fast sync.
 	fastTrieProgressKey = []byte("TrieSync")
 
+	// ancientDirKey tracks the freezer directory once blocks have been moved out
+	// of the key-value store.
+	ancientDirKey = []byte("AncientDir")
+
 	validSectionKey = []byte("count")
 
 	sectionHeadKeyPrefix = []byte("shead")

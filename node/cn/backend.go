@@ -679,7 +679,8 @@ func CreateDB(ctx *node.ServiceContext, config *Config, name string) database.DB
 		LevelDBCacheSize: config.LevelDBCacheSize, LevelDBCompression: config.LevelDBCompression,
 		PebbleDBCacheSize: config.PebbleDBCacheSize, OpenFilesLimit: database.GetOpenFilesLimit(),
 		LevelDBBufferPool: config.LevelDBBufferPool, EnableDBPerfMetrics: config.EnableDBPerfMetrics, RocksDBConfig: &config.RocksDBConfig, DynamoDBConfig: &config.DynamoDBConfig,
-		UseFlatTrie: config.UseFlatTrie,
+		UseFlatTrie:   config.UseFlatTrie,
+		EnableFreezer: config.EnableFreezer, AncientDir: config.AncientDir, FreezerThreshold: config.FreezerThreshold,
 	}
 	return ctx.OpenDatabase(dbc)
 }

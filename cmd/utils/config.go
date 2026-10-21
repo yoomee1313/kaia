@@ -641,6 +641,9 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	}
 	cfg.SingleDB = ctx.Bool(SingleDBFlag.Name)
 	cfg.NumStateTrieShards = ctx.Uint(NumStateTrieShardsFlag.Name)
+	cfg.EnableFreezer = ctx.Bool(FreezerFlag.Name)
+	cfg.FreezerThreshold = ctx.Uint64(FreezerThresholdFlag.Name)
+	cfg.AncientDir = ctx.String(AncientDirFlag.Name)
 	if !database.IsPow2(cfg.NumStateTrieShards) {
 		log.Fatalf("%v should be power of 2 but %v is not!", NumStateTrieShardsFlag.Name, cfg.NumStateTrieShards)
 	}

@@ -335,6 +335,28 @@ var (
 		EnvVars:  []string{"KLAYTN_DB_NUM_STATETRIE_SHARDS", "KAIA_DB_NUM_STATETRIE_SHARDS"},
 		Category: "DATABASE",
 	}
+	FreezerFlag = &cli.BoolFlag{
+		Name:     "db.freezer",
+		Usage:    "(experimental) Move canonical blocks older than db.freezer.threshold from the key-value databases to the append-only freezer",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_DB_FREEZER", "KAIA_DB_FREEZER"},
+		Category: "DATABASE",
+	}
+	FreezerThresholdFlag = &cli.Uint64Flag{
+		Name:     "db.freezer.threshold",
+		Usage:    "Number of recent blocks kept in the key-value databases when the freezer is enabled",
+		Value:    database.DefaultFreezerThreshold,
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_DB_FREEZER_THRESHOLD", "KAIA_DB_FREEZER_THRESHOLD"},
+		Category: "DATABASE",
+	}
+	AncientDirFlag = &cli.PathFlag{
+		Name:     "datadir.ancient",
+		Usage:    "Root directory of the block freezer (default = inside chaindata). A relative path is resolved against the chaindata directory",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_DATADIR_ANCIENT", "KAIA_DATADIR_ANCIENT"},
+		Category: "DATABASE",
+	}
 	LevelDBCacheSizeFlag = &cli.IntFlag{
 		Name:     "db.leveldb.cache-size",
 		Usage:    "Size of in-memory cache in LevelDB (MiB)",
