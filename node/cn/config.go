@@ -51,6 +51,7 @@ func GetDefaultConfig() *Config {
 		SyncMode:             downloader.FullSync,
 		NetworkId:            params.MainnetNetworkId,
 		LevelDBCacheSize:     768,
+		FreezerThreshold:     database.DefaultFreezerThreshold,
 		PebbleDBCacheSize:    768,
 		TrieCacheSize:        512,
 		TrieTimeout:          5 * time.Minute,
@@ -120,6 +121,9 @@ type Config struct {
 	SkipBcVersionCheck   bool `toml:"-"`
 	SingleDB             bool
 	NumStateTrieShards   uint
+	EnableFreezer        bool
+	FreezerThreshold     uint64
+	AncientDir           string
 	EnableDBPerfMetrics  bool
 	LevelDBCompression   database.LevelDBCompressionType
 	LevelDBBufferPool    bool

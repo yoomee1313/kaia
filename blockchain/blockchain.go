@@ -532,6 +532,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 				lastPruned, head)
 		}
 	}
+	// Frozen blocks are immutable. Rewinding below the freezer head would require
+	// truncating the freezer, which is not supported yet.
+	if frozen := bc.db.FrozenBlocks(); frozen > 0 && head+1 < frozen {
+		return fmt.Errorf("[SetHead] Cannot rewind below the frozen blocks. frozenBlocks=%d targetHead=%d", frozen, head)
+	}
 	_, err := bc.setHeadBeyondRoot(head, common.Hash{}, false)
 	return err
 }
