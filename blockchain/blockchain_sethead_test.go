@@ -22,9 +22,12 @@ import (
 	"testing"
 
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/consensus/faker"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Tests a sethead for a short canonical chain where a recent block was already
@@ -310,4 +313,31 @@ func testSetHeadEarlyExit(t *testing.T, tt *rewindTest) {
 
 	db.WriteLastPrunedBlockNumber(tt.setheadBlock - 1)
 	assert.Nil(t, chain.SetHead(tt.setheadBlock))
+}
+
+// frozenTestDB reports a fixed number of frozen blocks.
+type frozenTestDB struct {
+	database.DBManager
+	frozen uint64
+}
+
+func (db *frozenTestDB) FrozenBlocks() uint64 { return db.frozen }
+
+// TestSetHeadBelowFreezer checks that SetHead refuses to delete frozen blocks.
+func TestSetHeadBelowFreezer(t *testing.T) {
+	db := &frozenTestDB{DBManager: database.NewMemoryDBManager()}
+	genesis := new(Genesis).MustCommit(db)
+	chain, err := NewBlockChain(db, nil, params.TestChainConfig, faker.NewFullFaker(), vm.Config{})
+	require.NoError(t, err)
+	defer chain.Stop()
+	chain.Config().Istanbul = params.GetDefaultIstanbulConfig()
+
+	blocks, _ := GenerateChain(params.TestChainConfig, genesis, faker.NewFaker(), db, 8, func(i int, b *BlockGen) {})
+	_, err = chain.InsertChain(blocks)
+	require.NoError(t, err)
+
+	db.frozen = 5 // blocks [0, 4] are frozen
+	assert.ErrorContains(t, chain.SetHead(3), "frozen")
+	assert.NoError(t, chain.SetHead(4))
+	assert.Equal(t, uint64(4), chain.CurrentBlock().NumberU64())
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/kaiachain/kaia/storage/database/ancient"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -312,6 +313,9 @@ type DBManager interface {
 
 	Stat(string) (string, error)
 	Compact([]byte, []byte) error
+
+	// FrozenBlocks returns the number of blocks moved to the freezer.
+	FrozenBlocks() uint64
 }
 
 type DBEntryType uint8
@@ -437,6 +441,12 @@ type databaseManager struct {
 	inMigration          bool
 	migrationBlockNumber uint64
 	migrationOldDBPath   string
+
+	// Block freezer (ancient store). nil if disabled.
+	freezer        *ancient.Freezer
+	freezerQuit    chan struct{}
+	freezerTrigger chan chan struct{} // Manual blocking freeze trigger, test determinism
+	freezerWg      sync.WaitGroup
 }
 
 func NewMemoryDBManager() DBManager {
@@ -479,6 +489,11 @@ type DBConfig struct {
 
 	// FlatTrie related configurations
 	UseFlatTrie bool
+
+	// Freezer related configurations
+	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer
+	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
+	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -603,6 +618,9 @@ func newDatabaseManager(dbc *DBConfig) *databaseManager {
 func NewDBManager(dbc *DBConfig) DBManager {
 	if dbc.SingleDB {
 		logger.Info("Single database is used for persistent storage", "DBType", dbc.DBType)
+		if dbc.EnableFreezer {
+			logger.Warn("Freezer is not supported with a single database yet, disabling it")
+		}
 		if dbm, err := singleDatabaseDBManager(dbc); err != nil {
 			logger.Crit("Failed to create a single database", "DBType", dbc.DBType, "err", err)
 		} else {
@@ -625,6 +643,9 @@ func NewDBManager(dbc *DBConfig) DBManager {
 			}
 		}
 		dbm.migrationOldDBPath = dbm.getMigrationOldDBPath()
+		if err := dbm.openFreezer(); err != nil {
+			logger.Crit("Failed to open block freezer", "err", err)
+		}
 		return dbm
 	}
 	logger.Crit("Must not reach here!")
@@ -1032,6 +1053,9 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 }
 
 func (dbm *databaseManager) Close() {
+	// Stop the freeze loop before the key-value stores are closed.
+	dbm.closeFreezer()
+
 	// If single DB, only close the first database.
 	if dbm.config.SingleDB {
 		dbm.dbs[0].Close()
@@ -1061,6 +1085,9 @@ func (dbm *databaseManager) ReadCanonicalHash(number uint64) common.Hash {
 
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerHashKey(number))
+	if len(data) == 0 {
+		data = dbm.readAncientHash(number)
+	}
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -1214,10 +1241,10 @@ func (dbm *databaseManager) HasHeader(hash common.Hash, number uint64) bool {
 	}
 
 	db := dbm.getDatabase(headerDB)
-	if has, err := db.Has(headerKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(headerKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadHeader retrieves the block header corresponding to the hash.
@@ -1245,6 +1272,9 @@ func (dbm *databaseManager) ReadHeader(hash common.Hash, number uint64) *types.H
 func (dbm *databaseManager) ReadHeaderRLP(hash common.Hash, number uint64) rlp.RawValue {
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerHeaderTable, hash, number)
+	}
 	return data
 }
 
@@ -1315,10 +1345,10 @@ func (dbm *databaseManager) ReadHeaderNumber(hash common.Hash) *uint64 {
 // HasBody verifies the existence of a block body corresponding to the hash.
 func (dbm *databaseManager) HasBody(hash common.Hash, number uint64) bool {
 	db := dbm.getDatabase(BodyDB)
-	if has, err := db.Has(blockBodyKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(blockBodyKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadBody retrieves the block body corresponding to the hash.
@@ -1366,6 +1396,9 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 	// not found in cache, find body in database
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1395,6 +1428,9 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(*number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, *number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1514,6 +1550,9 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 	db := dbm.getDatabase(ReceiptsDB)
 	// Retrieve the flattened receipt slice
 	data, _ := db.Get(blockReceiptsKey(number, blockHash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerReceiptTable, blockHash, number)
+	}
 	if len(data) == 0 {
 		return nil
 	}
