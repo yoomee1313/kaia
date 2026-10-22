@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"fmt"
+	"math"
 	"math/big"
 	"sort"
 	"time"
@@ -170,16 +171,16 @@ func NewNodeMapFromABv2(profiles []multicall.Profile, stakingAmounts []*big.Int)
 		nodeState := valset.NodeState(p.State)
 		node := &valset.Node{
 			State:         nodeState,
-			StakingAmount: new(big.Int).Div(stakingAmounts[i], big.NewInt(params.KAIA)).Uint64(),
+			StakingAmount: saturateUint64(new(big.Int).Div(stakingAmounts[i], big.NewInt(params.KAIA))),
 		}
 		switch nodeState {
 		case valset.ValReady, valset.ValInactive:
 			if p.TimeoutAt.Sign() > 0 {
-				node.IdleTimeout = time.Unix(p.TimeoutAt.Int64(), 0)
+				node.IdleTimeout = saturateUnix(p.TimeoutAt)
 			}
 		case valset.ValPaused:
 			if p.TimeoutAt.Sign() > 0 {
-				node.PausedTimeout = time.Unix(p.TimeoutAt.Int64(), 0)
+				node.PausedTimeout = saturateUnix(p.TimeoutAt)
 			}
 		}
 		nodes[p.NodeId] = node
@@ -210,17 +211,52 @@ func ReadABv2Snapshot(
 	}
 
 	return &ABv2Snapshot{
-		Nodes: nodes,
-		ABv2TransitionParam: ABv2TransitionParam{
-			PauseTimeout:            time.Duration(res.PauseTimeout.Int64()) * time.Second,
-			IdleTimeout:             time.Duration(res.IdleTimeout.Int64()) * time.Second,
-			PfsThreshold:            res.PfsThreshold.Uint64(),
-			CfsThreshold:            res.CfsThreshold.Uint64(),
-			EpochVACount:            res.EpochVACount.Uint64(),
-			MaxValActivePausedCount: res.MaxValActivePausedCount.Uint64(),
-		},
+		Nodes:               nodes,
+		ABv2TransitionParam: NewABv2TransitionParam(res),
 		SuspendedValidators: res.SuspendedValidators,
 	}, nil
+}
+
+// NewABv2TransitionParam converts the uint256 config values of a MultiCall result.
+// The configurator can set any nonzero uint256, so values are saturated instead of truncated.
+func NewABv2TransitionParam(res multicall.MultiCallContractNodeStatesResult) ABv2TransitionParam {
+	return ABv2TransitionParam{
+		PauseTimeout:            saturateSeconds(res.PauseTimeout),
+		IdleTimeout:             saturateSeconds(res.IdleTimeout),
+		PfsThreshold:            saturateUint64(res.PfsThreshold),
+		CfsThreshold:            saturateUint64(res.CfsThreshold),
+		EpochVACount:            saturateUint64(res.EpochVACount),
+		MaxValActivePausedCount: saturateUint64(res.MaxValActivePausedCount),
+	}
+}
+
+const (
+	// maxABv2TimeoutSeconds is the longest timeout in whole seconds that fits in a
+	// time.Duration (about 292 years). Whole seconds keep the in-memory deadline equal
+	// to the timeoutAt written to ABv2, and block time plus this cannot overflow time.Time.
+	maxABv2TimeoutSeconds = math.MaxInt64 / int64(time.Second)
+	// maxABv2TimeoutAt is the latest timeoutAt read from ABv2 (9999-12-31T23:59:59Z),
+	// the last second time.Time encodes as RFC 3339. Deadlines the node writes stay
+	// far below it, so it only caps values set by contract actions such as pause().
+	maxABv2TimeoutAt = 253402300799
+)
+
+// saturateUint64 returns the uint256 x as a uint64, or math.MaxUint64 if it does not fit.
+func saturateUint64(x *big.Int) uint64 {
+	if !x.IsUint64() {
+		return math.MaxUint64
+	}
+	return x.Uint64()
+}
+
+// saturateSeconds returns the uint256 x seconds as a time.Duration, capped at maxABv2TimeoutSeconds.
+func saturateSeconds(x *big.Int) time.Duration {
+	return time.Duration(min(saturateUint64(x), uint64(maxABv2TimeoutSeconds))) * time.Second
+}
+
+// saturateUnix returns the uint256 x Unix seconds as a time.Time, capped at maxABv2TimeoutAt.
+func saturateUnix(x *big.Int) time.Time {
+	return time.Unix(int64(min(saturateUint64(x), maxABv2TimeoutAt)), 0)
 }
 
 // ReadEpochVACount reads the epoch VA count from AddressBookV2.
@@ -234,7 +270,7 @@ func ReadEpochVACount(backend bind.ContractCaller, num *big.Int) (uint64, error)
 	if err != nil {
 		return 0, err
 	}
-	return n.Uint64(), nil
+	return saturateUint64(n), nil
 }
 
 // ReadABv2EpochBlockInterval reads the epoch block interval baked into AddressBookV2.
@@ -247,7 +283,7 @@ func ReadABv2EpochBlockInterval(backend bind.ContractCaller, num *big.Int) (uint
 	if err != nil {
 		return 0, err
 	}
-	return n.Uint64(), nil
+	return saturateUint64(n), nil
 }
 
 // ReadAddressBookV2BlsAll reads BLS public key info for all nodes from

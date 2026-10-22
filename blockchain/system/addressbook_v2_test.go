@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -101,6 +102,130 @@ func TestABv2SnapshotTransitionParam(t *testing.T) {
 	assert.Equal(t, 40*time.Second, param.IdleTimeout)
 	assert.Equal(t, 50*time.Second, param.PauseTimeout)
 	assert.Equal(t, uint64(60), param.MaxValActivePausedCount)
+}
+
+func TestABv2Saturate(t *testing.T) {
+	var (
+		pow2       = func(n uint) *big.Int { return new(big.Int).Lsh(common.Big1, n) }
+		maxUint256 = new(big.Int).Sub(pow2(256), common.Big1)
+		maxSeconds = time.Duration(math.MaxInt64/int64(time.Second)) * time.Second
+		maxUnix    = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC).Unix()
+	)
+	cases := []struct {
+		name    string
+		x       *big.Int
+		uint64  uint64
+		seconds time.Duration
+		unix    int64
+	}{
+		{"zero", big.NewInt(0), 0, 0, 0},
+		{"normal", big.NewInt(28800), 28800, 8 * time.Hour, 28800},
+		{"max duration seconds", big.NewInt(math.MaxInt64 / int64(time.Second)), math.MaxInt64 / uint64(time.Second), maxSeconds, math.MaxInt64 / int64(time.Second)},
+		{"max duration seconds + 1", big.NewInt(math.MaxInt64/int64(time.Second) + 1), math.MaxInt64/uint64(time.Second) + 1, maxSeconds, math.MaxInt64/int64(time.Second) + 1},
+		{"max unix", big.NewInt(maxUnix), uint64(maxUnix), maxSeconds, maxUnix},
+		{"max unix + 1", big.NewInt(maxUnix + 1), uint64(maxUnix) + 1, maxSeconds, maxUnix},
+		{"2^63-1", big.NewInt(math.MaxInt64), math.MaxInt64, maxSeconds, maxUnix},
+		{"2^63", pow2(63), 1 << 63, maxSeconds, maxUnix},
+		{"2^64-1", new(big.Int).SetUint64(math.MaxUint64), math.MaxUint64, maxSeconds, maxUnix},
+		{"2^64", pow2(64), math.MaxUint64, maxSeconds, maxUnix},
+		{"2^64 + 5", new(big.Int).Add(pow2(64), big.NewInt(5)), math.MaxUint64, maxSeconds, maxUnix},
+		{"2^255", pow2(255), math.MaxUint64, maxSeconds, maxUnix},
+		{"uint256 max", maxUint256, math.MaxUint64, maxSeconds, maxUnix},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.uint64, saturateUint64(tc.x))
+			assert.Equal(t, tc.seconds, saturateSeconds(tc.x))
+			assert.Equal(t, time.Unix(tc.unix, 0), saturateUnix(tc.x))
+			assert.Equal(t, tc.unix, saturateUnix(tc.x).Unix())
+		})
+	}
+}
+
+func TestNewABv2TransitionParam(t *testing.T) {
+	// Kairos values are read unchanged.
+	param := NewABv2TransitionParam(multicall.MultiCallContractNodeStatesResult{
+		PauseTimeout:            big.NewInt(28800),
+		IdleTimeout:             big.NewInt(2592000),
+		PfsThreshold:            big.NewInt(2),
+		CfsThreshold:            big.NewInt(300),
+		EpochVACount:            big.NewInt(4),
+		MaxValActivePausedCount: big.NewInt(50),
+	})
+	assert.Equal(t, ABv2TransitionParam{
+		EpochVACount:            4,
+		PfsThreshold:            2,
+		CfsThreshold:            300,
+		IdleTimeout:             30 * 24 * time.Hour,
+		PauseTimeout:            8 * time.Hour,
+		MaxValActivePausedCount: 50,
+	}, param)
+
+	// A value whose low 64 bits are zero saturates instead of truncating to 0.
+	pow64 := new(big.Int).Lsh(common.Big1, 64)
+	param = NewABv2TransitionParam(multicall.MultiCallContractNodeStatesResult{
+		PauseTimeout:            pow64,
+		IdleTimeout:             pow64,
+		PfsThreshold:            pow64,
+		CfsThreshold:            pow64,
+		EpochVACount:            pow64,
+		MaxValActivePausedCount: pow64,
+	})
+	maxSeconds := time.Duration(math.MaxInt64/int64(time.Second)) * time.Second
+	assert.Equal(t, ABv2TransitionParam{
+		EpochVACount:            math.MaxUint64,
+		PfsThreshold:            math.MaxUint64,
+		CfsThreshold:            math.MaxUint64,
+		IdleTimeout:             maxSeconds,
+		PauseTimeout:            maxSeconds,
+		MaxValActivePausedCount: math.MaxUint64,
+	}, param)
+}
+
+// The deadline from a saturated timeout must survive the write to ABv2 and the read back.
+func TestABv2SaturatedDeadlineRoundTrip(t *testing.T) {
+	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(common.Big1, 256), common.Big1)
+	blockTime := time.Unix(1700000000, 0)
+	deadline := blockTime.Add(saturateSeconds(maxUint256))
+	require.True(t, deadline.After(blockTime.AddDate(290, 0, 0)))
+
+	addr := common.HexToAddress("0x0001")
+	_, msg, err := EncodeProcessSystemTransition(params.Rules{}, valset.NodeMap{
+		addr: {State: valset.ValInactive, IdleTimeout: deadline},
+	}, 0)
+	require.NoError(t, err)
+	args, err := AddressBookV2ABI.Methods["processSystemTransition"].Inputs.Unpack(msg.Data()[4:])
+	require.NoError(t, err)
+	timeoutAts := args[2].([]*big.Int)
+	require.Len(t, timeoutAts, 1)
+	assert.Equal(t, deadline.Unix(), timeoutAts[0].Int64())
+
+	nodes, err := NewNodeMapFromABv2(
+		[]multicall.Profile{{NodeId: addr, State: valset.ValInactive.ToUint8(), TimeoutAt: timeoutAts[0]}},
+		[]*big.Int{big.NewInt(0)},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, deadline, nodes[addr].IdleTimeout)
+}
+
+func TestNewNodeMapFromABv2HugeValues(t *testing.T) {
+	var (
+		addr1      = common.HexToAddress("0x0001")
+		addr2      = common.HexToAddress("0x0002")
+		maxUint256 = new(big.Int).Sub(new(big.Int).Lsh(common.Big1, 256), common.Big1)
+		// block.timestamp + pauseTimeout from pause(); its low 64 bits are a past time.
+		pausedAt = new(big.Int).Add(new(big.Int).Lsh(common.Big1, 255), big.NewInt(1700000000))
+		maxTime  = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	)
+	nodes, err := NewNodeMapFromABv2([]multicall.Profile{
+		{NodeId: addr1, State: valset.ValInactive.ToUint8(), TimeoutAt: maxUint256},
+		{NodeId: addr2, State: valset.ValPaused.ToUint8(), TimeoutAt: pausedAt},
+	}, []*big.Int{maxUint256, maxUint256})
+	require.NoError(t, err)
+
+	assert.True(t, maxTime.Equal(nodes[addr1].IdleTimeout))
+	assert.True(t, maxTime.Equal(nodes[addr2].PausedTimeout))
+	assert.Equal(t, uint64(math.MaxUint64), nodes[addr1].StakingAmount)
 }
 
 // The real AddressBookV2 bytecode must accept the proof SignCreateNodeProof builds.

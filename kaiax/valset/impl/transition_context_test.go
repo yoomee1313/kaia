@@ -17,6 +17,7 @@
 package impl
 
 import (
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/system"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/contracts/bindings/multicall"
 	"github.com/kaiachain/kaia/kaiax/gov"
 	"github.com/kaiachain/kaia/kaiax/valset"
 	"github.com/stretchr/testify/assert"
@@ -1036,6 +1038,69 @@ func TestApplyAllTransitions_RetainedSetExitsWithinSlotLimits(t *testing.T) {
 			assert.Equal(t, tc.expectedEpochVACount, result.epochVACountForWrite)
 		})
 	}
+}
+
+// The configurator can set any nonzero uint256 timeout. The read saturates it, so a
+// huge timeout gives a far deadline instead of one that expires in the same block.
+func TestApplyAllTransitions_HugeABv2Timeouts(t *testing.T) {
+	maxUint256 := new(big.Int).Sub(new(big.Int).Lsh(common.Big1, 256), common.Big1)
+	param := system.NewABv2TransitionParam(multicall.MultiCallContractNodeStatesResult{
+		PauseTimeout:            maxUint256,
+		IdleTimeout:             maxUint256,
+		PfsThreshold:            big.NewInt(2),
+		CfsThreshold:            new(big.Int).SetUint64(testCFSThreshold),
+		EpochVACount:            big.NewInt(2),
+		MaxValActivePausedCount: new(big.Int).SetUint64(testMaxValCount),
+	})
+	var (
+		deadline   = testBlockTime.Add(time.Duration(math.MaxInt64/int64(time.Second)) * time.Second)
+		centuryOn  = testBlockTime.AddDate(100, 0, 0)
+		laterBlock = func(ctx *TransitionContext) *TransitionContext {
+			ctx.BlockTime = centuryOn
+			ctx.IsEpoch = false
+			ctx.PfReport = nil
+			return ctx
+		}
+	)
+
+	t.Run("idle", func(t *testing.T) {
+		m := NodeMap{
+			addr1: {State: ValExiting, StakingAmount: aboveMinStake},
+			addr2: {State: ValActive, StakingAmount: aboveMinStake},
+		}
+		ctx := buildCtx(t, ctxOpts{MinStake: testMinStake})
+		ctx.SetABv2TransitionParam(param)
+		ctx.IsEpoch = true
+
+		out := ctx.ApplyAllTransitions(m).Nodes
+		assert.Equal(t, ValInactive, out[addr1].State)
+		assert.Equal(t, deadline, out[addr1].IdleTimeout)
+
+		out = laterBlock(ctx).ApplyAllTransitions(out).Nodes
+		assert.Equal(t, ValInactive, out[addr1].State)
+	})
+
+	t.Run("pause", func(t *testing.T) {
+		m := NodeMap{
+			addr1: {State: ValActive, StakingAmount: aboveMinStake},
+			addr2: {State: ValActive, StakingAmount: aboveMinStake},
+		}
+		ctx := buildCtx(t, ctxOpts{
+			MinStake:         testMinStake,
+			MaxSlotAvailable: noSlotLimit,
+			MinActiveCount:   1,
+			PFS:              map[common.Address]uint64{addr1: 1},
+			PfReport:         []common.Address{addr1},
+		})
+		ctx.SetABv2TransitionParam(param)
+
+		out := ctx.ApplyAllTransitions(m).Nodes
+		assert.Equal(t, ValPaused, out[addr1].State)
+		assert.Equal(t, deadline, out[addr1].PausedTimeout)
+
+		out = laterBlock(ctx).ApplyAllTransitions(out).Nodes
+		assert.Equal(t, ValPaused, out[addr1].State)
+	})
 }
 
 //#endregion
