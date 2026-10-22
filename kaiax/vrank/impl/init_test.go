@@ -497,6 +497,49 @@ func TestVRankModule_RestartAfterStop(t *testing.T) {
 	}
 }
 
+// Tests that broadcast doesn't block when the module is stopped or the broadcast loop can't keep up.
+// Its callers are the consensus preprepare relay and peer message handlers.
+func TestVRankModule_BroadcastNeverBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop bool
+	}{
+		{name: "stopped", stop: true},
+		{name: "full", stop: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			module := newCN(t, withoutStart()).VRankModule
+
+			// Nobody reads sink, so the broadcast loop stalls on its first message.
+			sink := make(chan *vrank.VRankBroadcastEvent)
+			sub := module.SubscribeVRank(sink)
+			defer sub.Unsubscribe()
+
+			require.NoError(t, module.Start())
+			defer module.Stop()
+			if tc.stop {
+				module.Stop()
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for i := 0; i < broadcastChSize+2; i++ {
+					module.broadcast([]common.Address{numToAddr(0)}, "test")
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("broadcast blocked, broadcastCh len=%d", len(module.broadcastCh))
+			}
+			if tc.stop {
+				assert.Zero(t, len(module.broadcastCh), "a stopped module must not queue broadcasts")
+			}
+		})
+	}
+}
+
 // strictSealer rejects a header with no author stashed, the way IstanbulSealer.Author rejects a
 // header with no author seal. Genesis is the case that matters.
 type strictSealer struct{ testIstanbulSealer }

@@ -31,6 +31,7 @@ import (
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/rcrowley/go-metrics"
 )
 
 const (
@@ -49,6 +50,8 @@ var (
 	_ vrank.VRankModule = &VRankModule{}
 
 	logger = log.NewModuleLogger(log.KaiaxVrank)
+
+	droppedBroadcastCounter = metrics.NewRegisteredCounter("kaiax/vrank/broadcast/dropped", nil)
 )
 
 type InitOpts struct {

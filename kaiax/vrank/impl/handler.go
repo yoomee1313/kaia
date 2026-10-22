@@ -359,7 +359,25 @@ func (v *VRankModule) broadcast(targets []common.Address, msg any) {
 		Targets: targets,
 		Msg:     msg,
 	}
-	v.broadcastCh <- req
+	v.lifecycleMu.Lock()
+	stopCh := v.stopCh
+	v.lifecycleMu.Unlock()
+
+	// Never block: the callers are the consensus preprepare relay and peer message handlers, which must not
+	// wait on a stopped or stalled broadcast loop. Drop the message instead.
+	select {
+	case <-stopCh:
+		droppedBroadcastCounter.Inc(1)
+		logger.Debug("Dropping VRank broadcast since the module is stopped")
+		return
+	default:
+	}
+	select {
+	case v.broadcastCh <- req:
+	default:
+		droppedBroadcastCounter.Inc(1)
+		logger.Warn("Dropping VRank broadcast due to full broadcast queue", "targets", len(targets))
+	}
 }
 
 func (v *VRankModule) isProposer(blockNum, round uint64) bool {
