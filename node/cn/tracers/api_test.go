@@ -403,6 +403,33 @@ func traceCallPrestate(t *testing.T, api *API, call kaiaapi.CallArgs, config *Tr
 	return prestate
 }
 
+// TestTraceCallJSTracerReleasesVM checks that a JS tracer's VM is released when
+// tracing fails before GetResult, and when the tracer code is rejected.
+func TestTraceCallJSTracerReleasesVM(t *testing.T) {
+	accounts := newAccounts(2)
+	genesis := &blockchain.Genesis{Alloc: blockchain.GenesisAlloc{
+		accounts[1].addr: {Balance: big.NewInt(params.KAIA)},
+	}}
+	api := NewUnsafeAPI(newTestBackend(t, 1, genesis, func(i int, b *blockchain.BlockGen) {}))
+
+	before := liveVMs.Load()
+	for _, code := range []string{
+		"4byteTracer",
+		`{step: function() {}, fault: function() {}, result: function() { return 1 }}`,
+		`{fault: function() {}}`, // rejected by New
+		`{`,                      // compile error
+	} {
+		// accounts[0] has no balance, so the transfer fails in ApplyMessage.
+		_, err := api.TraceCall(context.Background(), kaiaapi.CallArgs{
+			From:  accounts[0].addr,
+			To:    &accounts[1].addr,
+			Value: hexutil.Big(*big.NewInt(1000)),
+		}, rpc.NewBlockNumberOrHashWithNumber(rpc.LatestBlockNumber), &TraceConfig{Tracer: &code})
+		assert.Error(t, err, code)
+	}
+	assert.Equal(t, before, liveVMs.Load())
+}
+
 func TestTraceCallPrestateTracerKeepsLogicalPrestate(t *testing.T) {
 	t.Parallel()
 
