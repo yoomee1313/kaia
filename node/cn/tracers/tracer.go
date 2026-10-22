@@ -410,12 +410,15 @@ type Context struct {
 	TxHash    common.Hash // Hash of the transaction being traced (zero if dangling call)
 }
 
+// liveVMs counts the JavaScript VMs that have not been destroyed yet.
+var liveVMs atomic.Int64
+
 // New instantiates a new tracer instance. code specifies either a predefined
 // tracer name or a Javascript snippet, which must evaluate to an expression
 // returning an object with 'step', 'fault' and 'result' functions.
 // However, if unsafeTrace is false, code should specify predefined tracer name,
 // otherwise error is returned.
-func New(code string, ctx *Context, unsafeTrace bool) (*Tracer, error) {
+func New(code string, ctx *Context, unsafeTrace bool) (_ *Tracer, err error) {
 	// Resolve any tracers by name and assemble the tracer object
 	foundTracer, ok := tracer(code)
 	if ok {
@@ -439,6 +442,12 @@ func New(code string, ctx *Context, unsafeTrace bool) (*Tracer, error) {
 		frame:           newFrame(),
 		frameResult:     newFrameResult(),
 	}
+	liveVMs.Add(1)
+	defer func() {
+		if err != nil {
+			tracer.destroy()
+		}
+	}()
 	if ctx.BlockHash != (common.Hash{}) {
 		tracer.ctx["blockHash"] = ctx.BlockHash
 
@@ -839,10 +848,20 @@ func (jst *Tracer) GetResult() (json.RawMessage, error) {
 		jst.err = wrapError("result", err)
 	}
 	// Clean up the JavaScript environment
-	jst.vm.DestroyHeap()
-	jst.vm.Destroy()
+	jst.destroy()
 
 	return result, jst.err
+}
+
+// destroy releases the JavaScript VM. It is safe to call more than once.
+func (jst *Tracer) destroy() {
+	if jst.vm == nil {
+		return
+	}
+	jst.vm.DestroyHeap()
+	jst.vm.Destroy()
+	jst.vm = nil
+	liveVMs.Add(-1)
 }
 
 // addToObj pushes a field to a JS object.

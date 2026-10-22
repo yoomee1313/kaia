@@ -1023,9 +1023,13 @@ func (api *CommonAPI) traceTx(ctx context.Context, message blockchain.Message, b
 			}
 		} else {
 			// Construct the JavaScript tracer to execute with
-			if tracer, err = New(*config.Tracer, new(Context), api.unsafeTrace); err != nil {
+			var jsTracer *Tracer
+			if jsTracer, err = New(*config.Tracer, new(Context), api.unsafeTrace); err != nil {
 				return nil, err
 			}
+			// GetResult releases the JS VM. Release it here too, as tracing can fail before that.
+			defer jsTracer.destroy()
+			tracer = jsTracer
 		}
 		if len(syntheticBalance) > 0 {
 			if prestateTracer, ok := tracer.(*vm.PrestateTracer); ok {
