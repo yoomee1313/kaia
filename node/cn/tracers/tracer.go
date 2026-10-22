@@ -64,12 +64,43 @@ func popSlice(ctx *duktape.Context) []byte {
 	return blob
 }
 
-// pushBigInt create a JavaScript BigInteger in the VM.
+// pushBigInt create a JavaScript BigInteger in the VM, or undefined if that fails.
 func pushBigInt(n *big.Int, ctx *duktape.Context) {
-	ctx.GetGlobalString("bigInt")
+	ctx.PushHeapStash()
+	ctx.GetPropString(-1, "bigInt")
+	ctx.Remove(-2)
 	ctx.PushString(n.String())
-	ctx.Call(1)
+	if ctx.Pcall(1) != 0 {
+		ctx.Pop()
+		ctx.PushUndefined()
+	}
 }
+
+// tracerLoaderJS evaluates the tracer code and wraps it in an object with no
+// prototype, so that the Go side reads only plain properties and never runs
+// user code outside a protected call. It captures eval and Object.create
+// before any user code runs.
+const tracerLoaderJS = `(function(evalFn, create) {
+	return function(code) {
+		var obj = evalFn("(" + code + ")");
+		var wrapper = create(null);
+		var names = ["step", "fault", "result", "enter", "exit"];
+		for (var i = 0; i < names.length; i++) {
+			var name = names[i];
+			wrapper["has_" + name] = name in obj;
+			if (wrapper["has_" + name]) {
+				wrapper[name] = (function(name) {
+					return function(a, b) { return obj[name](a, b); };
+				})(name);
+			}
+		}
+		return wrapper;
+	};
+})(eval, Object.create)`
+
+// defPropValue defines a writable, enumerable and configurable data property
+// (duk_def_prop flags). Unlike a put, it never calls a setter.
+const defPropValue = 1<<6 | 1<<5 | 1<<4 | 1<<3 | 1<<2 | 1<<1 | 1<<0
 
 // opWrapper provides a JavaScript wrapper around OpCode.
 type opWrapper struct {
@@ -541,46 +572,25 @@ func New(code string, ctx *Context, unsafeTrace bool) (_ *Tracer, err error) {
 		copy(makeSlice(ctx.PushFixedBuffer(size), uint(size)), blob[start:end])
 		return 1
 	})
-	// Push the JavaScript tracer as object #0 onto the JSVM stack and validate it
-	if err := tracer.vm.PevalString("(" + code + ")"); err != nil {
-		logger.Warn("Failed to compile tracer", "err", err)
-		return nil, err
-	}
-	tracer.tracerObject = 0 // yeah, nice, eval can't return the index itself
-
-	hasStep := tracer.vm.GetPropString(tracer.tracerObject, "step")
-	tracer.vm.Pop()
-
-	if !tracer.vm.GetPropString(tracer.tracerObject, "fault") {
-		return nil, fmt.Errorf("Trace object must expose a function fault()")
-	}
-	tracer.vm.Pop()
-
-	if !tracer.vm.GetPropString(tracer.tracerObject, "result") {
-		return nil, fmt.Errorf("Trace object must expose a function result()")
-	}
-	tracer.vm.Pop()
-
-	hasEnter := tracer.vm.GetPropString(tracer.tracerObject, "enter")
-	tracer.vm.Pop()
-	hasExit := tracer.vm.GetPropString(tracer.tracerObject, "exit")
-	tracer.vm.Pop()
-
-	if hasEnter != hasExit {
-		return nil, fmt.Errorf("trace object must expose either both or none of enter() and exit()")
-	}
-	if !hasStep {
-		// If there's no step function, the enter and exit must be present
-		if !hasEnter {
-			return nil, fmt.Errorf("trace object must expose either step() or both enter() and exit()")
-		}
-	}
-	tracer.traceCallFrames = hasEnter
-	tracer.traceSteps = hasStep
-
-	// Tracer is valid, inject the big int library to access large numbers
+	// Inject the big int library and keep the builtins the Go side calls in the heap
+	// stash, which JS cannot reach. A JS error thrown through a Go function or an
+	// unprotected duktape call crashes the process, and user code may replace any
+	// global, so all of this happens before the user code runs.
 	tracer.vm.EvalString(bigIntegerJS)
 	tracer.vm.PutGlobalString("bigInt")
+
+	tracer.vm.PushHeapStash()
+	tracer.vm.GetGlobalString("bigInt")
+	tracer.vm.PutPropString(-2, "bigInt")
+	tracer.vm.EvalString("JSON.stringify")
+	tracer.vm.PutPropString(-2, "stringify")
+	tracer.vm.EvalString(tracerLoaderJS)
+	tracer.vm.PutPropString(-2, "load")
+	tracer.vm.Pop()
+
+	// Reserve object #0 for the tracer; it is loaded last.
+	tracer.vm.PushUndefined()
+	tracer.tracerObject = 0
 
 	// Push the global environment state as object #1 into the JSVM stack
 	tracer.stateObject = tracer.vm.PushObject()
@@ -635,6 +645,43 @@ func New(code string, ctx *Context, unsafeTrace bool) (_ *Tracer, err error) {
 	tracer.dbWrapper.pushObject(tracer.vm)
 	tracer.vm.PutPropString(tracer.stateObject, "db")
 
+	// Define ctx now, so that setting it later cannot hit a setter added by user code.
+	tracer.vm.PushUndefined()
+	tracer.vm.PutPropString(tracer.stateObject, "ctx")
+
+	// Evaluate the user code through the loader, inside a protected call.
+	tracer.vm.PushHeapStash()
+	tracer.vm.GetPropString(-1, "load")
+	tracer.vm.Remove(-2)
+	tracer.vm.PushString(code)
+	if tracer.vm.Pcall(1) != 0 {
+		err := errors.New(tracer.vm.SafeToString(-1))
+		logger.Warn("Failed to compile tracer", "err", err)
+		return nil, err
+	}
+	tracer.vm.Replace(tracer.tracerObject)
+
+	hasStep := tracer.hasMethod("step")
+	if !tracer.hasMethod("fault") {
+		return nil, fmt.Errorf("Trace object must expose a function fault()")
+	}
+	if !tracer.hasMethod("result") {
+		return nil, fmt.Errorf("Trace object must expose a function result()")
+	}
+	hasEnter := tracer.hasMethod("enter")
+	hasExit := tracer.hasMethod("exit")
+	if hasEnter != hasExit {
+		return nil, fmt.Errorf("trace object must expose either both or none of enter() and exit()")
+	}
+	if !hasStep {
+		// If there's no step function, the enter and exit must be present
+		if !hasEnter {
+			return nil, fmt.Errorf("trace object must expose either step() or both enter() and exit()")
+		}
+	}
+	tracer.traceCallFrames = hasEnter
+	tracer.traceSteps = hasStep
+
 	return tracer, nil
 }
 
@@ -665,8 +712,9 @@ func (jst *Tracer) call(noret bool, method string, args ...string) (json.RawMess
 	// Push a JSON marshaller onto the stack. We can't marshal from the out-
 	// side because duktape can crash on large nestings and we can't catch
 	// C++ exceptions ourselves from Go. TODO(karalabe): Yuck, why wrap?!
-	jst.vm.PushString("(JSON.stringify)")
-	jst.vm.Eval()
+	jst.vm.PushHeapStash()
+	jst.vm.GetPropString(-1, "stringify")
+	jst.vm.Remove(-2)
 
 	jst.vm.Swap(-1, -2)
 	if code = jst.vm.Pcall(1); code != 0 {
@@ -866,8 +914,16 @@ func (jst *Tracer) destroy() {
 
 // addToObj pushes a field to a JS object.
 func (jst *Tracer) addToObj(obj int, key string, val interface{}) {
+	jst.vm.PushString(key)
 	pushValue(jst.vm, val)
-	jst.vm.PutPropString(obj, key)
+	jst.vm.DefProp(obj, defPropValue)
+}
+
+// hasMethod reports whether the loaded tracer object has the given method.
+func (jst *Tracer) hasMethod(name string) bool {
+	jst.vm.GetPropString(jst.tracerObject, "has_"+name)
+	defer jst.vm.Pop()
+	return jst.vm.GetBoolean(-1)
 }
 
 func pushValue(ctx *duktape.Context, val interface{}) {
