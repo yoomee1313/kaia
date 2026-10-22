@@ -246,3 +246,37 @@ func TestEnterExit(t *testing.T) {
 		t.Errorf("Number of invocations of enter() and exit() is wrong. Have %s, want %s\n", have, want)
 	}
 }
+
+// TestTracerHostileCode checks that tracer code that throws from places the Go side
+// touches, or replaces builtins the Go side uses, fails or runs but never crashes
+// the process. Most of these used to abort it; the rest guard paths that were already safe.
+func TestTracerHostileCode(t *testing.T) {
+	const rest = `fault: function() {}, result: function() { return 1 }`
+	for _, code := range []string{
+		`null`,
+		`(function() { throw null })()`,
+		`(function() { throw {get name() { throw 1 }, get message() { throw 2 }} })()`,
+		`{get step() { throw 1 }, ` + rest + `}`,
+		`{step: function(log) { bigInt = undefined; log.stack.peek(0) }, ` + rest + `}`,
+		`{step: function(log) { String.prototype.charAt = function() { throw 1 }; log.stack.peek(0) }, ` + rest + `}`,
+		`{step: function(log) { String.prototype.charAt = Array.prototype.push = Array.prototype.slice = Math.floor = parseInt = function() { throw 1 }; log.stack.peek(0) }, ` + rest + `}`,
+		`{step: function(log) { (function f() { toHex(toWord("0x1")); log.stack.peek(0); f() })() }, ` + rest + `}`,
+		`new Proxy({step: function() {}, ` + rest + `}, {get: function() { throw 1 }})`,
+		`{step: function() {}, fault: function() {}, result: function() { JSON = undefined; return 1 }}`,
+		`{step: function() {}, fault: function() {}, result: function() { return {toJSON: function() { throw null }} }}`,
+		`(function() {
+			Object.defineProperty(Object.prototype, "has_step", {get: function() { throw 1 }});
+			Object.defineProperty(Object.prototype, "gasPrice", {set: function() { throw 1 }});
+			Object.defineProperty(this, "bigInt", {get: function() { throw 1 }});
+			return {step: function(log) { log.stack.peek(0) }, ` + rest + `};
+		})()`,
+	} {
+		tracer, err := New(code, new(Context), true)
+		if err != nil {
+			continue
+		}
+		tracer.CaptureTxStart(10000)
+		tracer.CaptureStart(vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(1)}, &dummyStatedb{}, params.TestChainConfig, &vm.Config{}), common.Address{}, common.Address{}, false, nil, 1000, big.NewInt(1))
+		runTrace(tracer)
+	}
+}
