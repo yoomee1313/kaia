@@ -1408,7 +1408,7 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
@@ -1435,7 +1435,7 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
