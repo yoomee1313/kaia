@@ -49,23 +49,23 @@ const ChainFreezerName = "chain"
 // chainFreezerTableConfigs configures the settings for tables in the chain freezer.
 // Hashes are random and do not compress, so snappy is disabled for them. Total
 // difficulty is not frozen; it stays in the key-value store.
-var chainFreezerTableConfigs = map[string]freezerTableConfig{
-	ChainFreezerHeaderTable:  {noSnappy: false},
-	ChainFreezerHashTable:    {noSnappy: true},
-	ChainFreezerBodiesTable:  {noSnappy: false},
-	ChainFreezerReceiptTable: {noSnappy: false},
+var chainFreezerTableConfigs = map[string]TableConfig{
+	ChainFreezerHeaderTable:  {NoSnappy: false},
+	ChainFreezerHashTable:    {NoSnappy: true},
+	ChainFreezerBodiesTable:  {NoSnappy: false},
+	ChainFreezerReceiptTable: {NoSnappy: false},
 }
 
-// freezerTableConfig contains the settings for a freezer table.
-type freezerTableConfig struct {
-	// noSnappy disables item compression when true.
-	noSnappy bool
+// TableConfig contains the settings for a freezer table.
+type TableConfig struct {
+	// NoSnappy disables item compression when true.
+	NoSnappy bool
 
-	// tailGroup names a logical group of tables that share the same tail
+	// TailGroup names a logical group of tables that share the same tail
 	// position. Tables in the same group are pruned together and must agree
 	// on their tail. An empty value means the table is not prunable; its
 	// tail is always 0.
-	tailGroup string
+	TailGroup string
 }
 
 // AncientReaderOp contains the methods required to read from immutable ancient data.
@@ -94,6 +94,10 @@ type AncientWriteOp interface {
 	// AppendRaw adds an item without RLP-encoding it.
 	AppendRaw(kind string, number uint64, item []byte) error
 }
+
+// DefaultTableSize is the maximum size of a freezer data file, for callers of
+// NewFreezer that define their own tables.
+const DefaultTableSize = freezerTableSize
 
 // NewChainFreezer opens (or creates) the block data freezer at the given
 // directory. The metrics are registered under the given namespace.

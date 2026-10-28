@@ -106,7 +106,7 @@ type freezerTable struct {
 
 	// table configuration (compression, prunability). Note: compression flag
 	// does not apply retroactively to existing files.
-	config      freezerTableConfig
+	config      TableConfig
 	readonly    bool
 	maxFileSize uint32 // Max file size for data-files
 	name        string
@@ -132,20 +132,20 @@ type freezerTable struct {
 }
 
 // newFreezerTable opens the given path as a freezer table.
-func newFreezerTable(path, name string, config freezerTableConfig, readonly bool) (*freezerTable, error) {
+func newFreezerTable(path, name string, config TableConfig, readonly bool) (*freezerTable, error) {
 	return newTable(path, name, metrics.NilMeter{}, metrics.NilMeter{}, metrics.NewCounter(), freezerTableSize, config, readonly)
 }
 
 // newTable opens a freezer table, creating the data and index files if they are
 // non-existent. Both files are truncated to the shortest common length to ensure
 // they don't go out of sync.
-func newTable(path string, name string, readMeter, writeMeter metrics.Meter, sizeGauge metrics.Counter, maxFilesize uint32, config freezerTableConfig, readonly bool) (*freezerTable, error) {
+func newTable(path string, name string, readMeter, writeMeter metrics.Meter, sizeGauge metrics.Counter, maxFilesize uint32, config TableConfig, readonly bool) (*freezerTable, error) {
 	// Ensure the containing directory exists and open the indexEntry file
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return nil, err
 	}
 	var idxName string
-	if config.noSnappy {
+	if config.NoSnappy {
 		idxName = fmt.Sprintf("%s.ridx", name) // raw index file
 	} else {
 		idxName = fmt.Sprintf("%s.cidx", name) // compressed index file
@@ -941,7 +941,7 @@ func (t *freezerTable) openFile(num uint32, opener func(string) (*os.File, error
 	var exist bool
 	if f, exist = t.files[num]; !exist {
 		var name string
-		if t.config.noSnappy {
+		if t.config.NoSnappy {
 			name = fmt.Sprintf("%s.%04d.rdat", t.name, num)
 		} else {
 			name = fmt.Sprintf("%s.%04d.cdat", t.name, num)
@@ -1057,13 +1057,13 @@ func (t *freezerTable) RetrieveItems(start, count, maxBytes uint64) ([][]byte, e
 		item := diskData[offset : offset+diskSize]
 		offset += diskSize
 		decompressedSize := diskSize
-		if !t.config.noSnappy {
+		if !t.config.NoSnappy {
 			decompressedSize, _ = snappy.DecodedLen(item)
 		}
 		if i > 0 && maxBytes != 0 && uint64(outputSize+decompressedSize) > maxBytes {
 			break
 		}
-		if !t.config.noSnappy {
+		if !t.config.NoSnappy {
 			data, err := snappy.Decode(nil, item)
 			if err != nil {
 				return nil, err
@@ -1206,7 +1206,7 @@ func (t *freezerTable) RetrieveBytes(item, offset, length uint64) ([]byte, error
 	}
 
 	// Perform the partial read if no-compression was enabled upon
-	if t.config.noSnappy {
+	if t.config.NoSnappy {
 		if offset > uint64(itemSize) || offset+length > uint64(itemSize) {
 			return nil, fmt.Errorf("requested range out of bounds: item size %d, offset %d, length %d", itemSize, offset, length)
 		}
