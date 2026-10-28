@@ -138,6 +138,7 @@ type CacheConfig struct {
 	TrieNodeCacheConfig  *statedb.TrieNodeCacheConfig // Configures trie node cache
 	SnapshotCacheSize    int                          // Memory allowance (MB) to use for caching snapshot entries in memory
 	SnapshotAsyncGen     bool                         // Enables snapshot data generation asynchronously
+	BASRecordDir         string                       // If set, block access sets of inserted blocks are recorded under this directory (experimental)
 }
 
 // gcBlock is used for priority queue for GC.
@@ -166,6 +167,7 @@ type BlockChain struct {
 
 	db      database.DBManager // Low level persistent database to store final content in
 	snaps   *snapshot.Tree     // Snapshot tree for fast trie leaf access
+	bas     *basRecorder       // Block access set recorder, nil unless enabled
 	triegc  *prque.Prque       // Priority queue mapping block numbers to tries to gc
 	chBlock chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
 	chPrune chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
@@ -357,6 +359,12 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 			recover = true
 		}
 		bc.snaps, _ = snapshot.New(bc.db, bc.stateCache.TrieDB(), bc.cacheConfig.SnapshotCacheSize, head.Root(), bc.cacheConfig.SnapshotAsyncGen, true, recover)
+	}
+
+	if cacheConfig.BASRecordDir != "" {
+		if bc.bas, err = newBASRecorder(cacheConfig.BASRecordDir); err != nil {
+			return nil, err
+		}
 	}
 
 	// Take ownership of this particular state
@@ -1142,6 +1150,10 @@ func (bc *BlockChain) Stop() {
 	atomic.StoreInt32(&bc.procInterrupt, 1)
 
 	bc.wg.Wait()
+
+	if bc.bas != nil {
+		bc.bas.close(bc.CurrentBlock().NumberU64())
+	}
 
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
@@ -2112,7 +2124,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			validateStart    time.Time
 		)
 
-		if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); cached != nil {
+		// The speculative state was executed without the access recorder, so recording skips the cache.
+		if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); bc.bas == nil && cached != nil {
 			validateStart = time.Now()
 			if err = bc.validator.ValidateStateWithCache(block, cached); err == nil {
 				stateDB = cached.State
@@ -2133,6 +2146,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			if err != nil {
 				return i, events, coalescedLogs, err
 			}
+			if bc.bas != nil {
+				stateDB.EnableBlockAccessRecorder()
+			}
 
 			// Process block using the parent state as reference point.
 			receipts, logs, usedGas, internalTxTraces, procStats, err = bc.processor.Process(context.Background(), block, stateDB, bc.vmConfig)
@@ -2151,6 +2167,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			}
 		}
 		afterValidate := time.Now()
+
+		if bc.bas != nil {
+			bc.bas.record(bc, block, parent.Root(), stateDB)
+		}
 
 		// Write the block to the chain and get the writeResult.
 		// Pre-commit announcement is only worth its state copy for live

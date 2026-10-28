@@ -373,6 +373,7 @@ var FlagGroups = []FlagGroup{
 			SnapshotFlag,
 			SnapshotCacheSizeFlag,
 			SnapshotAsyncGen,
+			BASRecordDirFlag,
 			DocRootFlag,
 		},
 	},

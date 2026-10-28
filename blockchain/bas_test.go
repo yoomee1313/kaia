@@ -18,7 +18,10 @@ package blockchain
 
 import (
 	"crypto/ecdsa"
+	"io"
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/holiman/uint256"
@@ -33,6 +36,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -194,8 +198,12 @@ func (env *basTestEnv) setCodeTx(b *BlockGen, from int, target common.Address, d
 
 // generate makes the blocks and inserts them into a new chain.
 func (env *basTestEnv) generate(n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
+	return env.generateWithCache(nil, n, gen)
+}
+
+func (env *basTestEnv) generateWithCache(cacheConfig *CacheConfig, n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
 	blocks, _ := GenerateChain(env.config, env.genesis, env.sealer, env.db, n, gen)
-	chain, err := NewBlockChain(env.db, nil, env.config, env.sealer, vm.Config{})
+	chain, err := NewBlockChain(env.db, cacheConfig, env.config, env.sealer, vm.Config{})
 	require.NoError(env.t, err)
 	env.t.Cleanup(chain.Stop)
 	chain.Processor().RegisterBlockStateModule(env.sealer)
@@ -450,6 +458,41 @@ func TestBlockAccessSetTampered(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, statedb.ApplyBlockAccessSet(set))
 	require.NotEqual(t, blocks[0].Root(), statedb.IntermediateRoot(true))
+}
+
+// TestBASRecorder records the sets while blocks are inserted and reads them back.
+func TestBASRecorder(t *testing.T) {
+	env := newBASTestEnv(t, "prague", 2)
+	dir := t.TempDir()
+	cacheConfig := &CacheConfig{
+		CacheSize:           512,
+		BlockInterval:       DefaultBlockInterval,
+		TriesInMemory:       DefaultTriesInMemory,
+		TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
+		BASRecordDir:        dir,
+	}
+	chain, blocks := env.generateWithCache(cacheConfig, 5, func(i int, b *BlockGen) {
+		if i%2 == 0 {
+			b.AddTx(env.legacyTx(b, 1, &env.addrs[0], big.NewInt(params.KAIA), nil))
+			b.AddTx(env.legacyTx(b, 1, nil, common.Big0, basInitCode(basStoreCode())))
+		}
+	})
+	require.Zero(t, chain.bas.sinceLog.failures+chain.bas.stats.failures)
+	chain.Stop()
+
+	file, err := os.Open(filepath.Join(dir, "bas-000000.rlp"))
+	require.NoError(t, err)
+	defer file.Close()
+	stream := rlp.NewStream(file, 0)
+	for _, block := range blocks {
+		var rec BASFileRecord
+		require.NoError(t, stream.Decode(&rec))
+		require.Equal(t, block.NumberU64(), rec.Number)
+		require.Equal(t, block.Hash(), rec.Hash)
+		require.NoError(t, verifyBAS(chain, block, chain.GetHeaderByHash(block.ParentHash()).Root, rec.Set))
+	}
+	var rec BASFileRecord
+	require.ErrorIs(t, stream.Decode(&rec), io.EOF)
 }
 
 func mustKey(t *testing.T) *ecdsa.PrivateKey {
