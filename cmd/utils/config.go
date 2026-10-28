@@ -804,6 +804,7 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	} else {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
+	cfg.BASRecordDir = ctx.String(BASRecordDirFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

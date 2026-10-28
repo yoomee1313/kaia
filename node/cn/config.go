@@ -138,6 +138,7 @@ type Config struct {
 	TrieNodeCacheConfig  statedb.TrieNodeCacheConfig
 	SnapshotCacheSize    int
 	SnapshotAsyncGen     bool
+	BASRecordDir         string
 
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`

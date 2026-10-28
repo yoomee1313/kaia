@@ -524,6 +524,12 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	BASRecordDirFlag = &cli.StringFlag{
+		Name:     "bas.record-dir",
+		Usage:    "Records the block access set of every inserted block under the given directory, after checking it reproduces the state root (experimental)",
+		EnvVars:  []string{"KAIA_BAS_RECORD_DIR"},
+		Category: "MISC",
+	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{
 		Name:     "state.cache-size",
 		Usage:    "Size of in-memory cache of the global state (in MiB) to flush matured singleton trie nodes to disk",
