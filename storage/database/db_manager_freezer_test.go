@@ -248,6 +248,60 @@ func TestFreezer_BelowThreshold(t *testing.T) {
 	}
 }
 
+// blockDBSize returns the on-disk size of the header, body and receipts databases.
+func blockDBSize(t *testing.T, dir string) int64 {
+	var size int64
+	for _, entry := range []DBEntryType{headerDB, BodyDB, ReceiptsDB} {
+		err := filepath.Walk(filepath.Join(dir, dbBaseDirs[entry]), func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				size += info.Size()
+			}
+			return err
+		})
+		require.NoError(t, err)
+	}
+	return size
+}
+
+// TestFreezer_Compaction checks that the freeze loop compacts the key ranges
+// of the frozen blocks once enough blocks are frozen, so that their space is
+// freed.
+func TestFreezer_Compaction(t *testing.T) {
+	const (
+		numBlocks = 1000
+		threshold = 10
+	)
+	defer func(interval uint64) { freezerCompactInterval = interval }(freezerCompactInterval)
+	freezerCompactInterval = 500
+
+	// Start from compacted tables, as a node does whose blocks are old. The
+	// sizes are taken with the database closed, when the obsolete table files
+	// of the compaction are removed.
+	dir := t.TempDir()
+	dbc := newFreezerTestConfig(dir, true, threshold)
+	dbm := openFreezerTestDBM(t, dbc)
+	writeFreezerTestChain(t, dbm, numBlocks)
+	for _, entry := range []DBEntryType{headerDB, BodyDB, ReceiptsDB} {
+		require.NoError(t, dbm.getDatabase(entry).Compact(nil, nil))
+	}
+	dbm.Close()
+	before := blockDBSize(t, dir)
+
+	// The loop starts a round as soon as the database is opened.
+	compactions := freezeCompactTimer.Count()
+	dbm = openFreezerTestDBM(t, dbc)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(numBlocks-threshold), dbm.FrozenBlocks())
+	assert.Equal(t, compactions+1, freezeCompactTimer.Count())
+	dbm.Close()
+	after := blockDBSize(t, dir)
+
+	// The total difficulty and the hash to number mappings of the frozen
+	// blocks stay, so not everything is freed. Without the compaction, the size
+	// grows because of the deletion markers.
+	assert.Less(t, after, before/4, "block DB size before %d, after %d", before, after)
+}
+
 // TestFreezer_CloseTwice checks that closing the database twice does not panic.
 func TestFreezer_CloseTwice(t *testing.T) {
 	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 10))

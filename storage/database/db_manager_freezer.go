@@ -53,15 +53,15 @@ const (
 	// before doing an fsync and deleting them from the key-value store.
 	freezerBatchLimit = 30000
 
-	// freezerCompactInterval is the number of frozen blocks after which their
-	// key ranges are compacted. A range compaction flushes the memtable, so it
-	// is not run after every small round.
-	freezerCompactInterval = freezerBatchLimit
-
 	// DefaultAncientDirName is the freezer root under chaindata used when no
 	// ancient directory is configured.
 	DefaultAncientDirName = "ancient"
 )
+
+// freezerCompactInterval is the number of frozen blocks after which their key
+// ranges are compacted. A range compaction flushes the memtable, so it is not
+// run after every small round. It is a variable so that tests can lower it.
+var freezerCompactInterval uint64 = freezerBatchLimit
 
 var (
 	frozenBlocksGauge  = metrics.NewRegisteredGauge(dbMetricPrefix+"ancient/frozen", nil)

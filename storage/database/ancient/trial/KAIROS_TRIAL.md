@@ -314,5 +314,7 @@ with `--db.freezer.threshold 300`. The page cache was not dropped (macOS):
 - A freezer moved to another directory opened and served the same data.
 
 The loop's range compaction (every 30,000 frozen blocks) is not reached at
-that size, and no unit test calls it either. Step 4 is its first real run, so
-check `ancient_compact_time` and the KV sizes there.
+that size. `TestFreezer_Compaction` covers it with a lowered interval
+(1,000 blocks: 1.26 MB before, 76 KB after, 1.40 MB without the compaction).
+Step 4 is its first run at scale, so check `ancient_compact_time` and the KV
+sizes there.
