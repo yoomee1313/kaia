@@ -111,7 +111,15 @@ export KEN="./build/bin/ken --kairos --datadir $DATADIR $DBFLAGS \
   --nodiscover --maxconnections 0 \
   --rpc --rpcaddr 127.0.0.1 --rpcport 8551 --rpcapi kaia,debug \
   --metrics --prometheus --prometheusport 61001"
+
+# Start and stop by PID, so that nothing else named ken is touched.
+start() { log=$1; shift; nohup $KEN "$@" > ~/ken-$log.log 2>&1 & echo $! > ~/ken.pid; }
+stop() { kill -INT $(cat ~/ken.pid); while kill -0 $(cat ~/ken.pid) 2>/dev/null; do sleep 1; done; }
 ```
+
+If another service on the VM already uses 8551, 61001 or the P2P port 32323,
+pick other ports (`--rpcport`, `--prometheusport`, `--port`). A node that
+cannot bind the metrics port still runs, but exports no metrics.
 
 Record the sizes:
 
@@ -131,20 +139,18 @@ Start the node and pick the blocks. The boundary is `head - threshold + 1`,
 which is where the freezer will stop because the head does not move:
 
 ```bash
-nohup $KEN > ~/ken-baseline.log 2>&1 &
+start baseline
 ./build/bin/rpclatency sample -threshold 172800 -n 300 -seed 1 -out ~/blocks.json
 ```
 
 Measure cold (node restarted and page cache dropped), then warm:
 
 ```bash
-cold() { pkill -INT -x ken; while pgrep -x ken > /dev/null; do sleep 1; done
-         sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
-         nohup $KEN > ~/ken-$1.log 2>&1 & sleep 60; }
-cold baseline
+cold() { stop; sudo sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'; start "$@"; sleep 60; }
+cold baseline-cold
 ./build/bin/rpclatency measure -blocks ~/blocks.json -out ~/before-cold.json | tee ~/before-cold.txt
 ./build/bin/rpclatency measure -blocks ~/blocks.json -out ~/before-warm.json | tee ~/before-warm.txt
-pkill -INT -x ken
+stop
 ```
 
 Compare responses only against the same node. A load-balanced endpoint such
@@ -154,7 +160,7 @@ different order on each backend, so the digests differ there.
 ## 4. Freeze
 
 ```bash
-nohup $KEN --db.freezer --datadir.ancient /hdd/ancient > ~/ken-freeze.log 2>&1 &
+start freeze --db.freezer --datadir.ancient /hdd/ancient
 grep -m1 'Opened block freezer' ~/ken-freeze.log
 iostat -dxm 60 > ~/iostat-freeze.txt &
 ```
@@ -169,7 +175,7 @@ m() { curl -s localhost:61001/metrics | grep -E '^klaytn_klay_db_chaindata_ancie
 while sleep 600; do date -u +%FT%TZ; m; done > ~/metrics-freeze.txt &
 ```
 
-Timers are in nanoseconds; `ancient_write` is bytes per second (1-minute rate).
+The metrics appear a few seconds after the start. Timers are in nanoseconds; `ancient_write` is bytes per second (1-minute rate).
 In `iostat-freeze.txt`, `%util` and `wMB/s` of the freezer disk against the
 `rMB/s` of the KV disk tell which side limits the speed. Record the
 `elapsed` of the first rounds early on: at 10 s per round the catch-up of
@@ -178,8 +184,8 @@ about 7,700 rounds takes about 21 hours.
 The catch-up is done when `ancient_lag` is 0 and no new `Froze chain segment`
 lines appear.
 
-**Interrupted batch (optional, once).** Run `pkill -9 -x ken` during a round,
-restart with the same command and look for
+**Interrupted batch (optional, once).** Run `kill -9 $(cat ~/ken.pid)` during a round,
+restart with the same `start` command and look for
 `Deleting leftover frozen blocks from key-value store` (if the kill came between
 the fsync and the delete) and then normal rounds again.
 
@@ -237,11 +243,19 @@ Run these with the node from step 5 (freezer enabled):
 curl -s -H 'content-type: application/json' localhost:8551 \
   --data '{"jsonrpc":"2.0","id":1,"method":"debug_setHead","params":["0x1000"]}'
 # want: "Cannot rewind below the frozen blocks"
-pkill -INT -x ken; while pgrep -x ken > /dev/null; do sleep 1; done
+stop
 
 # Starting without the freezer must fail with
 # "old blocks were moved to the freezer at /hdd/ancient/chain".
 ./build/bin/ken --kairos --datadir $DATADIR $DBFLAGS --nodiscover --maxconnections 0 2>&1 | tail -3
+
+# Moving the freezer (e.g. to another disk) must work: the freezer at the new
+# path is accepted because the key-value store continues where it ends.
+sudo mkdir -p /hdd/moved && sudo chown $USER /hdd/moved && mv /hdd/ancient /hdd/moved/ancient
+start moved --db.freezer --datadir.ancient /hdd/moved/ancient
+grep -m1 'Opened block freezer' ~/ken-moved.log   # want: frozen=<boundary>
+./build/bin/rpclatency measure -blocks ~/blocks.json -compare ~/before-warm.json | tail -1
+stop
 ```
 
 ## 7. Lower throughput (optional)
@@ -282,3 +296,23 @@ input for that.
 gcloud compute instances delete $TRIAL_VM --zone $ZONE
 gcloud compute disks delete kairos-trial-kv kairos-trial-ancient --zone $ZONE
 ```
+
+## Local dry run
+
+Steps 3 to 6 were run on 2026-10-28 on a laptop, using a one-validator local
+chain (homi, 908 blocks, about 3,400 transfers) copied to a `ken` datadir
+with `--db.freezer.threshold 300`. The page cache was not dropped (macOS):
+- Freezing worked in two stages: threshold 600, then `kill -9`, then a
+  restart with threshold 300. The rounds froze blocks 0-308 and 309-608 in
+  about 64 ms each.
+- All 1,200 responses were equal before and after the freeze. Frozen-block
+  reads were within 0.05 ms of the key-value reads at p50.
+- `frozen`=609, `lag`=0 and `readerror`=0, and `size` matched `du`.
+- `debug_setHead` into the freezer, a start without `--db.freezer`, and a
+  start with an empty freezer at another path were refused with the
+  documented errors.
+- A freezer moved to another directory opened and served the same data.
+
+The loop's range compaction (every 30,000 frozen blocks) is not reached at
+that size, and no unit test calls it either. Step 4 is its first real run, so
+check `ancient_compact_time` and the KV sizes there.
