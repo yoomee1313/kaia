@@ -207,18 +207,21 @@ func (dbm *databaseManager) checkFreezer(readonly bool) error {
 	return dbm.deleteFrozenBlocks(first, hashes)
 }
 
-// closeFreezer stops the freeze loop and closes the freezer.
+// closeFreezer stops the freeze loop and closes the freezer. It can be called
+// more than once.
 func (dbm *databaseManager) closeFreezer() {
 	if dbm.freezer == nil {
 		return
 	}
-	if dbm.freezerQuit != nil {
-		close(dbm.freezerQuit)
-		dbm.freezerWg.Wait()
-	}
-	if err := dbm.freezer.Close(); err != nil {
-		logger.Error("Failed to close block freezer", "err", err)
-	}
+	dbm.freezerCloseOnce.Do(func() {
+		if dbm.freezerQuit != nil {
+			close(dbm.freezerQuit)
+			dbm.freezerWg.Wait()
+		}
+		if err := dbm.freezer.Close(); err != nil {
+			logger.Error("Failed to close block freezer", "err", err)
+		}
+	})
 }
 
 // freezerDir returns the directory of the open freezer.
@@ -326,6 +329,14 @@ func (dbm *databaseManager) freeze() {
 			logger.Error("Error in block freeze operation", "err", err)
 		}
 		if end := first + n; n > 0 && end-compactFrom >= freezerCompactInterval {
+			// A range compaction can take long, so do not start one on shutdown.
+			// The range is left to the background compaction.
+			select {
+			case <-dbm.freezerQuit:
+				logger.Info("Block freezer shutting down")
+				return
+			default:
+			}
 			dbm.compactFrozen(compactFrom, end-1)
 			compactFrom = end
 		}

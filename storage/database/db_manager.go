@@ -449,11 +449,12 @@ type databaseManager struct {
 	closed    bool
 
 	// Block freezer (ancient store). nil if disabled.
-	freezer        *ancient.Freezer
-	freezerQuit    chan struct{}
-	freezerTrigger chan chan struct{} // Manual blocking freeze trigger, test determinism
-	freezerWg      sync.WaitGroup
-	freezeLock     sync.Mutex // Held by a freeze round and by PauseFreezer
+	freezer          *ancient.Freezer
+	freezerQuit      chan struct{}
+	freezerTrigger   chan chan struct{} // Manual blocking freeze trigger, test determinism
+	freezerWg        sync.WaitGroup
+	freezerCloseOnce sync.Once
+	freezeLock       sync.Mutex // Held by a freeze round and by PauseFreezer
 }
 
 func NewMemoryDBManager() DBManager {
