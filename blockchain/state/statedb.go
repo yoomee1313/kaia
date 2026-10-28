@@ -112,6 +112,9 @@ type StateDB struct {
 
 	prefetching bool
 
+	// Optional recorder of the block access set, nil unless enabled.
+	blockAccess *accessRecorder
+
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
 	AccountHashes        time.Duration
@@ -393,6 +396,9 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	if s.blockAccess != nil {
+		s.blockAccess.slotRead(addr, hash)
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(s.db, hash)
@@ -402,6 +408,9 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	if s.blockAccess != nil {
+		s.blockAccess.slotRead(addr, hash)
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetCommittedState(s.db, hash)
@@ -708,6 +717,16 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 	if obj := s.stateObjects[addr]; obj != nil {
 		return obj
 	}
+	obj := s.loadStateObject(addr)
+	if s.blockAccess != nil {
+		s.blockAccess.accountLoaded(addr, obj)
+	}
+	return obj
+}
+
+// loadStateObject loads the object for the given address from the snapshot or
+// the database and inserts it into the live set. It returns nil if not found.
+func (s *StateDB) loadStateObject(addr common.Address) *stateObject {
 	// If no live objects are available, attempt to use snapshots
 	var (
 		acc account.Account
@@ -813,6 +832,19 @@ func (s *StateDB) createObject(addr common.Address) (newobj, prev *stateObject) 
 func (s *StateDB) createObjectWithMap(addr common.Address, accountType account.AccountType,
 	values map[account.AccountValueKeyType]interface{},
 ) (newobj, prev *stateObject) {
+	acc, err := account.NewAccountWithMap(accountType, values)
+	if err != nil {
+		logger.Error("An error occurred on call NewAccountWithMap", "err", err)
+	}
+	newobj, prev = s.createObjectWithAccount(addr, acc)
+	newobj.setNonce(0) // sets the object to dirty
+	return newobj, prev
+}
+
+// createObjectWithAccount creates a new state object holding the given account.
+// If there is an existing account with the given address, it is overwritten and
+// returned as the second return value.
+func (s *StateDB) createObjectWithAccount(addr common.Address, acc account.Account) (newobj, prev *stateObject) {
 	prev = s.getDeletedStateObject(addr) // Note, prev might have been deleted, we need that!
 
 	var prevdestruct bool
@@ -822,12 +854,7 @@ func (s *StateDB) createObjectWithMap(addr common.Address, accountType account.A
 			s.snapDestructs[prev.addrHash] = struct{}{}
 		}
 	}
-	acc, err := account.NewAccountWithMap(accountType, values)
-	if err != nil {
-		logger.Error("An error occurred on call NewAccountWithMap", "err", err)
-	}
 	newobj = newObject(s, addr, acc)
-	newobj.setNonce(0) // sets the object to dirty
 	if prev == nil {
 		s.journal.append(createObjectChange{account: &addr})
 	} else {
@@ -1070,6 +1097,9 @@ func (s *StateDB) GetRefund() uint64 {
 // Finalise finalises the state by removing the self destructed objects
 // and clears the journal as well as the refunds.
 func (stateDB *StateDB) Finalise(deleteEmptyObjects bool, setStorageRoot bool) {
+	if stateDB.blockAccess != nil {
+		stateDB.blockAccess.capture(stateDB, true, deleteEmptyObjects)
+	}
 	for addr := range stateDB.journal.dirties {
 		so, exist := stateDB.stateObjects[addr]
 		if !exist {
@@ -1134,6 +1164,7 @@ func (s *StateDB) SetTxContext(thash, bhash common.Hash, ti int) {
 	s.thash = thash
 	s.bhash = bhash
 	s.txIndex = ti
+	s.SetBlockAccessIndex(ti + 1)
 }
 
 func (s *StateDB) clearJournalAndRefund() {

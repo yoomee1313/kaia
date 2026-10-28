@@ -97,6 +97,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 	processStats.AfterApplyTxs = time.Now()
 
+	// Changes of FinalizeState belong to the phase after the last tx.
+	statedb.SetBlockAccessIndex(len(block.Transactions()) + 1)
+
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
 	if _, err := p.FinalizeState(header, statedb, block.Transactions(), receipts); err != nil {
 		return nil, nil, 0, nil, processStats, err
