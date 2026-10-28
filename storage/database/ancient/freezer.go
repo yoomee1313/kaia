@@ -79,9 +79,9 @@ type Freezer struct {
 // data according to the given parameters.
 //
 // The 'tables' argument defines the freezer tables and their configuration.
-// Each value is a freezerTableConfig describing whether Snappy compression
-// is disabled (noSnappy) and which tail group the table belongs to.
-func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize uint32, tables map[string]freezerTableConfig) (*Freezer, error) {
+// Each value is a TableConfig describing whether Snappy compression
+// is disabled (NoSnappy) and which tail group the table belongs to.
+func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize uint32, tables map[string]TableConfig) (*Freezer, error) {
 	// Create the initial freezer object
 	var (
 		readMeter  = metrics.NewRegisteredMeter(namespace+"ancient/read", nil)
@@ -365,7 +365,7 @@ func (f *Freezer) TruncateTail(group string, tail uint64) (uint64, error) {
 		return prev, nil
 	}
 	for _, table := range f.tables {
-		if table.config.tailGroup != group {
+		if table.config.TailGroup != group {
 			continue
 		}
 		if err := table.truncateTail(tail); err != nil {
@@ -429,19 +429,19 @@ func (f *Freezer) validate() error {
 			return fmt.Errorf("freezer table %s has a differing head: %d != %d", kind, items, head)
 		}
 		// Validate the table tail
-		if table.config.tailGroup == "" {
+		if table.config.TailGroup == "" {
 			if table.itemHidden.Load() != 0 {
 				return fmt.Errorf("non-prunable freezer table '%s' has a non-zero tail: %d", kind, table.itemHidden.Load())
 			}
 			continue
 		}
 		hidden := table.itemHidden.Load()
-		if t, ok := tails[table.config.tailGroup]; ok {
+		if t, ok := tails[table.config.TailGroup]; ok {
 			if t != hidden {
-				return fmt.Errorf("freezer table %s has differing tail in group %q: %d != %d", kind, table.config.tailGroup, hidden, t)
+				return fmt.Errorf("freezer table %s has differing tail in group %q: %d != %d", kind, table.config.TailGroup, hidden, t)
 			}
 		} else {
-			tails[table.config.tailGroup] = hidden
+			tails[table.config.TailGroup] = hidden
 		}
 	}
 	f.head.Store(head)
@@ -500,22 +500,22 @@ func (f *Freezer) repair() error {
 	// it to all members. Non-prunable tables must remain at tail 0.
 	tails := make(map[string]uint64)
 	for kind, table := range f.tables {
-		if table.config.tailGroup == "" {
+		if table.config.TailGroup == "" {
 			if table.itemHidden.Load() != 0 {
 				panic(fmt.Sprintf("non-prunable freezer table %s has non-zero tail: %v", kind, table.itemHidden.Load()))
 			}
 			continue
 		}
 		hidden := table.itemHidden.Load()
-		if t, ok := tails[table.config.tailGroup]; !ok || hidden > t {
-			tails[table.config.tailGroup] = hidden
+		if t, ok := tails[table.config.TailGroup]; !ok || hidden > t {
+			tails[table.config.TailGroup] = hidden
 		}
 	}
 	for _, table := range f.tables {
-		if table.config.tailGroup == "" {
+		if table.config.TailGroup == "" {
 			continue
 		}
-		if err := table.truncateTail(tails[table.config.tailGroup]); err != nil {
+		if err := table.truncateTail(tails[table.config.TailGroup]); err != nil {
 			return err
 		}
 	}
