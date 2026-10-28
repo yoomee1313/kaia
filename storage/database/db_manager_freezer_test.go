@@ -248,6 +248,17 @@ func TestFreezer_BelowThreshold(t *testing.T) {
 	}
 }
 
+// TestFreezer_CloseTwice checks that closing the database twice does not panic.
+func TestFreezer_CloseTwice(t *testing.T) {
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 10))
+	writeFreezerTestChain(t, dbm, 12)
+	triggerFreeze(t, dbm)
+	assert.Equal(t, uint64(2), dbm.FrozenBlocks())
+
+	dbm.Close()
+	assert.NotPanics(t, dbm.Close)
+}
+
 // TestFreezer_Pause checks that no block is frozen while the freezer is paused.
 func TestFreezer_Pause(t *testing.T) {
 	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 5))
