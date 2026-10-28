@@ -130,6 +130,10 @@ Environment variables: `KAIA_DB_FREEZER`, `KAIA_DB_FREEZER_THRESHOLD`,
 
 ## Trying it on a Kairos chaindata copy
 
+The full measurement runbook for the `dev-archive-kairos` copy (GCP disks,
+baseline, freeze speed, read latency with `trial/rpclatency.go`) is in
+`trial/KAIROS_TRIAL.md`. The steps below are the short version.
+
 Use a **copy**. Once blocks are frozen, the chaindata cannot be opened without
 the freezer.
 
