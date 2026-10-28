@@ -84,9 +84,9 @@ type Freezer struct {
 func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize uint32, tables map[string]TableConfig) (*Freezer, error) {
 	// Create the initial freezer object
 	var (
-		readMeter  = metrics.NewRegisteredMeter(namespace+"ancient/read", nil)
-		writeMeter = metrics.NewRegisteredMeter(namespace+"ancient/write", nil)
-		sizeGauge  = metrics.NewRegisteredCounter(namespace+"ancient/size", nil)
+		readMeter  = metrics.GetOrRegisterMeter(namespace+"ancient/read", nil)
+		writeMeter = metrics.GetOrRegisterMeter(namespace+"ancient/write", nil)
+		sizeGauge  = metrics.GetOrRegisterCounter(namespace+"ancient/size", nil)
 	)
 	// Ensure the datadir is not a symbolic link if it exists.
 	if info, err := os.Lstat(datadir); !os.IsNotExist(err) {

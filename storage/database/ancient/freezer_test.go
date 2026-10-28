@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/rcrowley/go-metrics"
 	"github.com/stretchr/testify/require"
 )
 
@@ -393,4 +394,43 @@ func TestFreezerCloseSync(t *testing.T) {
 	} else if have, want := err.Error(), "[closed closed]"; have != want {
 		t.Fatalf("want %v, have %v", want, have)
 	}
+}
+
+// TestFreezerMetricsReopen checks that a freezer reopened under the same
+// namespace reports to the same metrics, and that its size is counted once.
+func TestFreezerMetricsReopen(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	namespace := "test/freezer/reopen/"
+	// The size of a full data file is counted as the maximum file size, so a single
+	// data file keeps the expected size exact.
+
+	f, err := NewFreezer(dir, namespace, false, DefaultTableSize, freezerTestTableDef)
+	require.NoError(t, err)
+	_, err = f.ModifyAncients(func(op AncientWriteOp) error {
+		for i := uint64(0); i < 10; i++ {
+			if err := op.AppendRaw("test", i, getChunk(256, int(i))); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	size, err := f.AncientSize("test")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	sizeCounter := metrics.GetOrRegisterCounter(namespace+"ancient/size", nil)
+	require.Zero(t, sizeCounter.Count())
+
+	f, err = NewFreezer(dir, namespace, false, DefaultTableSize, freezerTestTableDef)
+	require.NoError(t, err)
+	defer f.Close()
+	require.Equal(t, int64(size), sizeCounter.Count())
+
+	readMeter := metrics.GetOrRegisterMeter(namespace+"ancient/read", nil)
+	before := readMeter.Count()
+	_, err = f.Ancient("test", 0)
+	require.NoError(t, err)
+	require.Greater(t, readMeter.Count(), before)
 }
