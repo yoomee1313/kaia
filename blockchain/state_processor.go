@@ -101,6 +101,9 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 	}
 	processStats.AfterApplyTxs = time.Now()
 
+	// Changes of FinalizeState belong to the phase after the last tx.
+	statedb.SetBlockAccessIndex(len(block.Transactions()) + 1)
+
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards).
 	// Block assembly is skipped: insertion/speculative paths never use the assembled block.
 	if err := p.finalizeStateRoot(header, statedb, block.Transactions(), receipts); err != nil {

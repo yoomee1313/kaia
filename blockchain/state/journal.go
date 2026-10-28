@@ -25,6 +25,7 @@ package state
 import (
 	"math/big"
 
+	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
 )
 
@@ -122,6 +123,12 @@ type (
 		account            *common.Address
 		prevcode, prevhash []byte
 	}
+	accountChange struct {
+		account       *common.Address
+		prev          account.Account
+		prevcode      Code
+		prevDirtyCode bool
+	}
 
 	// Changes to other state values.
 	refundChange struct {
@@ -215,6 +222,15 @@ func (ch codeChange) revert(s *StateDB) {
 }
 
 func (ch codeChange) dirtied() *common.Address {
+	return ch.account
+}
+
+func (ch accountChange) revert(s *StateDB) {
+	obj := s.getStateObject(*ch.account)
+	obj.account, obj.code, obj.dirtyCode = ch.prev, ch.prevcode, ch.prevDirtyCode
+}
+
+func (ch accountChange) dirtied() *common.Address {
 	return ch.account
 }
 
