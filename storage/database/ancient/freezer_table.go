@@ -915,6 +915,11 @@ func (t *freezerTable) Close() error {
 	if err := t.doSync(); err != nil {
 		return err
 	}
+	// The size counter is shared by the tables of all freezers opened with the
+	// same namespace, so remove this table's share when it is closed.
+	if size, err := t.sizeNolock(); err == nil {
+		t.sizeGauge.Dec(int64(size))
+	}
 	var errs []error
 	doClose := func(f *os.File) {
 		if err := f.Close(); err != nil {
