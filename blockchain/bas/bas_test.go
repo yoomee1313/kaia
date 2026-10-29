@@ -96,3 +96,30 @@ func TestDecodeRejectsNonCanonical(t *testing.T) {
 		require.Error(t, err, name)
 	}
 }
+
+func TestFreezer(t *testing.T) {
+	dir := t.TempDir()
+	f, err := OpenFreezer(dir, false)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), f.Next()) // the genesis set
+
+	builder := NewBuilder()
+	builder.SetBalance(common.Address{1}, 1, big.NewInt(7))
+	enc, err := builder.Build().Encode()
+	require.NoError(t, err)
+	require.NoError(t, f.Append(1, enc))
+	require.ErrorIs(t, f.Append(3, enc), ErrFreezerGap)
+	require.ErrorIs(t, f.Append(1, enc), ErrFreezerGap)
+	require.NoError(t, f.Close())
+
+	f, err = OpenFreezer(dir, true)
+	require.NoError(t, err)
+	defer f.Close()
+	require.Equal(t, uint64(2), f.Next())
+	set, err := f.Read(1)
+	require.NoError(t, err)
+	require.Equal(t, big.NewInt(7), set.Accounts[0].BalanceChanges[0].Balance)
+	genesis, err := f.Read(0)
+	require.NoError(t, err)
+	require.Empty(t, genesis.Accounts)
+}

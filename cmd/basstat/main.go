@@ -14,9 +14,10 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-// basstat summarizes the block access set files written by --bas.record-dir:
-// sizes (raw and zstd) and per-block counts of accounts, slots and changes.
-// It is an experimental tool.
+// basstat summarizes the BAS freezer written by --bas.record-dir: sizes (raw
+// and zstd) and per-block counts of accounts, slots and changes. It is an
+// experimental tool. The freezer is locked while a node writes to it, so run
+// it on a stopped node or on a copy.
 //
 //	basstat [-from N] [-to M] <bas-record-dir>
 package main
@@ -25,14 +26,10 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"sort"
 
-	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/bas"
-	"github.com/kaiachain/kaia/rlp"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -45,54 +42,39 @@ type stats struct {
 }
 
 func main() {
-	from := flag.Uint64("from", 0, "first block")
+	from := flag.Uint64("from", 1, "first block")
 	to := flag.Uint64("to", ^uint64(0), "end block (exclusive)")
 	flag.Parse()
 	if flag.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: basstat [-from N] [-to M] <bas-record-dir>")
 		os.Exit(2)
 	}
-	files, err := filepath.Glob(filepath.Join(flag.Arg(0), "bas-*.rlp"))
+	freezer, err := bas.OpenFreezer(flag.Arg(0), true)
 	if err != nil {
 		fatal(err)
 	}
-	sort.Strings(files)
+	defer freezer.Close()
 
 	s := new(stats)
-	for _, f := range files {
-		if err := s.readFile(f, *from, *to); err != nil {
+	end := min(*to, freezer.Next())
+	for number := *from; number < end; {
+		encs, err := freezer.ReadRawRange(number, end-number, 64<<20)
+		if err != nil {
 			fatal(err)
 		}
+		for _, enc := range encs {
+			set, err := bas.Decode(enc)
+			if err != nil {
+				fatal(fmt.Errorf("block %d: %w", number, err))
+			}
+			s.add(enc, set)
+			number++
+		}
+	}
+	if size, err := freezer.Size(); err == nil {
+		fmt.Printf("freezer on disk     %d (snappy, whole freezer)\n", size)
 	}
 	s.print()
-}
-
-func (s *stats) readFile(path string, from, to uint64) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	stream := rlp.NewStream(file, 0)
-	for {
-		var rec blockchain.BASFileRecord
-		if err := stream.Decode(&rec); err == io.EOF {
-			return nil
-		} else if err != nil {
-			// The file may be appended to by a running node.
-			fmt.Fprintln(os.Stderr, "stop at partial record:", path, err)
-			return nil
-		}
-		if rec.Number < from || rec.Number >= to {
-			continue
-		}
-		set, err := bas.Decode(rec.Set)
-		if err != nil {
-			return fmt.Errorf("block %d: %w", rec.Number, err)
-		}
-		s.add(rec.Set, set)
-	}
 }
 
 func (s *stats) add(enc []byte, set *bas.BlockAccessSet) {
