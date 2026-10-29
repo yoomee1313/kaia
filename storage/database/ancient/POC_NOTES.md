@@ -93,24 +93,25 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   block. An older copy of the freezer fails that check instead of leaving a
   hole in the chain.
 
-**Rewind (SetHead)**: rewinding below the freezer head is **refused** with an
-error (`Cannot rewind below the frozen blocks`), in the same way the existing
-live-pruning guard refuses rewinds. `SetHead` pauses the freeze loop
-(`DBManager.PauseFreezer`) from the check until the rewind is done, so a
-running batch cannot freeze the blocks the rewind deletes. The rewind is also
-refused when the target block has no state and the search for a block with
-state would go below the freezer head; without that check `HeaderChain.SetHead`
-would follow the search down and delete the total difficulty and other
-key-value data of frozen blocks. Truncating the freezer would also work, but
-then a mistaken `debug_setHead` could silently throw away immutable history,
-and the threshold already covers realistic recovery rewinds. Repair rewinds at
-startup (`setHeadBeyondRoot(..., repair=true)`) only move head markers and
-delete nothing, so they are not affected.
+**Rewind (SetHead)**: a rewind below the freezer head truncates the freezer,
+as in geth. `SetHead` pauses the freeze loop (`DBManager.PauseFreezer`) until
+the rewind is done, so a running batch cannot freeze the blocks the rewind
+deletes. The rewind first moves the head markers and deletes the key-value
+data (total difficulty, hash to number entries, and anything else still in the
+key-value store), as without the freezer. Then `DBManager.TruncateFrozen`
+removes the frozen blocks above the new head header and fsyncs the freezer.
+This also covers a target without state, where the rewind continues down to a
+block with state. If the node stops between the two steps, the frozen blocks
+above the head header are removed the next time the database is opened (not
+in read-only mode). Repair rewinds at startup
+(`setHeadBeyondRoot(..., repair=true)`) only move head markers and delete
+nothing, so they do not truncate. As with key-value blocks, a mistaken
+`debug_setHead` deletes history, and the blocks have to be synced again.
 
 **Threshold default: 172,800 blocks (2 days).** With instant BFT finality the
 threshold does not need to cover reorg depth, as geth's 90,000 blocks
-(about 12.5 days at 12 s) do. Instead it sets (1) how far `SetHead` may rewind
-and (2) which recent blocks stay on the fast disk, where most RPC reads
+(about 12.5 days at 12 s) do. Instead it sets (1) how far a rewind can go without
+truncating the freezer and (2) which recent blocks stay on the fast disk, where most RPC reads
 (receipts, logs, recent blocks) land. Two days covers state-recovery rewinds,
 which are bounded by the trie commit interval (128 blocks by default), with
 plenty of margin, and gives an operator a weekend to react before blocks
@@ -161,8 +162,8 @@ make ken    # or: go build -o build/bin/ken ./cmd/ken
    it runs thousands of back-to-back batches. The elapsed time per batch gives
    the migration speed. A shorter `--db.freezer.threshold` freezes more for a
    quick trial.
-4. Check reads: repeat the reference reads from step 1 and compare. Also try
-   `debug.setHead` to a frozen block, which should return an error.
+4. Check reads: repeat the reference reads from step 1 and compare.
+   `debug.setHead` to a frozen block truncates the freezer, so try it last.
 5. Restart with the same flags. The freezer resumes where it stopped. Restarting
    without `--db.freezer` should fail with
    `old blocks were moved to the freezer at …`.
@@ -180,8 +181,8 @@ between the fsync and the delete.
 - **`--db.single`**, **DynamoDB**, **MemoryDB**, **secondary RocksDB**: the
   freezer is disabled with a warning. Secondary RocksDB is excluded because the
   primary holds the freezer's exclusive file lock.
-- **Freezer truncation**: SetHead below the freezer head is refused, not
-  supported.
+- **Reset to another genesis** (`ResetWithGenesisBlock`): the freezer keeps
+  block 0, so a different genesis fails the genesis check on the next open.
 - **Dangling side chains** above the freezer head (geth deletes them) are not
   followed. Kaia's BFT finality makes side chains essentially non-existent.
 - **Tail pruning / history expiry and era files**: the tail-group code is

@@ -532,14 +532,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 				lastPruned, head)
 		}
 	}
-	// Frozen blocks are immutable. Rewinding below the freezer head would require
-	// truncating the freezer, which is not supported yet. The freezer is paused
-	// until the rewind is done, so that it does not freeze the deleted blocks.
-	frozen, resume := bc.db.PauseFreezer()
+	// The freezer is paused until the rewind is done, so that it does not freeze
+	// the blocks being deleted. Frozen blocks above the new head are removed at
+	// the end of the rewind.
+	_, resume := bc.db.PauseFreezer()
 	defer resume()
-	if frozen > 0 && head+1 < frozen {
-		return fmt.Errorf("[SetHead] Cannot rewind below the frozen blocks. frozenBlocks=%d targetHead=%d", frozen, head)
-	}
 	_, err := bc.setHeadBeyondRoot(head, common.Hash{}, false)
 	return err
 }
@@ -560,14 +557,6 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 	var rootNumber uint64 // (no root == always 0)
 
 	originLatestBlkNum := bc.CurrentBlock().Number().Uint64()
-
-	// An explicit rewind must not go below the freezer head, also when it has
-	// to rewind further to find a block with state. SetHead pauses the freezer,
-	// so the number does not change during the rewind.
-	frozen := uint64(0)
-	if !repair {
-		frozen = bc.db.FrozenBlocks()
-	}
 
 	updateFn := func(header *types.Header) (uint64, error) {
 		// Rewind the block chain, ensuring we don't end up with a stateless head block
@@ -606,10 +595,6 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 					logger.Debug("Skipping block with threshold state", "number", newHeadBlock.NumberU64(), "hash", newHeadBlock.Hash().String(), "root", newHeadBlock.Root().String())
 					newHeadBlock = bc.GetBlock(newHeadBlock.ParentHash(), newHeadBlock.NumberU64()-1) // Keep rewinding
 				}
-			}
-			if frozen > 0 && newHeadBlock.NumberU64()+1 < frozen {
-				return 0, fmt.Errorf("[SetHead] Cannot rewind below the frozen blocks to find a block with state. frozenBlocks=%d stateBlock=%d",
-					frozen, newHeadBlock.NumberU64())
 			}
 			if newHeadBlock.NumberU64() == 0 {
 				if _, err := state.New(newHeadBlock.Root(), bc.stateCache, bc.snaps, nil); err != nil {
@@ -710,6 +695,13 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 			}
 		}
 		logger.Trace("[SetHead] Snapshot database deleted", "from", originLatestBlkNum, "to", votingEpoch)
+
+		// Frozen blocks above the new head header go last, after the head markers
+		// and the key-value data, like the deletions above. If the rewind is
+		// interrupted before this, they are removed when the database is opened.
+		if err := bc.db.TruncateFrozen(bc.hc.CurrentHeader().Number.Uint64() + 1); err != nil {
+			return 0, err
+		}
 	}
 
 	// Clear out any stale content from the caches

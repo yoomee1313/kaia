@@ -238,11 +238,6 @@ Also note the restart time: the time from start to `Opened block freezer` in
 Run these with the node from step 5 (freezer enabled):
 
 ```bash
-# Rewinding into the freezer must fail. Only use a block number below the
-# boundary: a number at or above it really rewinds the trial chain.
-curl -s -H 'content-type: application/json' localhost:8551 \
-  --data '{"jsonrpc":"2.0","id":1,"method":"debug_setHead","params":["0x1000"]}'
-# want: "Cannot rewind below the frozen blocks"
 stop
 
 # Starting without the freezer must fail with
@@ -270,7 +265,27 @@ gcloud compute disks update kairos-trial-ancient --zone $ZONE --provisioned-thro
 gcloud compute disks describe kairos-trial-ancient --zone $ZONE --format='value(provisionedThroughput)'
 ```
 
-## 8. Results to report
+## 8. Rewind into the freezer (last)
+
+A rewind below the freezer head truncates the freezer and deletes the blocks
+above the target, so run it after every other measurement. Pick a target about
+100,000 blocks below the boundary:
+
+```bash
+start rewind --db.freezer --datadir.ancient /hdd/moved/ancient   # the path from step 6
+curl -s -H 'content-type: application/json' localhost:8551 \
+  --data '{"jsonrpc":"2.0","id":1,"method":"debug_setHead","params":["<target as hex>"]}'
+grep -E 'Rewinding blockchain|Truncated block freezer' ~/ken-rewind.log   # want: to=<target + 1>
+stop; start rewind2 --db.freezer --datadir.ancient /hdd/moved/ancient
+grep -m1 'Opened block freezer' ~/ken-rewind2.log   # want: frozen=<target + 1>
+./build/bin/rpclatency measure -blocks ~/blocks.json -compare ~/before-warm.json | tail -1
+stop
+```
+
+The compare must show no `MISMATCH`. Blocks above the target are gone and
+count as not comparable. Record how long the rewind took.
+
+## 9. Results to report
 
 | Metric | Value |
 |---|---|
@@ -283,14 +298,14 @@ gcloud compute disks describe kairos-trial-ancient --zone $ZONE --format='value(
 | Same at concurrency 16, and at the lower throughput | |
 | `MISMATCH` count (want 0), `ancient_readerror` (want 0) | |
 | Restart time with the freezer | |
-| `debug_setHead` and start without the freezer: refused as expected? | |
+| Start without the freezer refused? `debug_setHead` into the freezer: time, `frozen` = target + 1 after a restart, 0 mismatches? | |
 | Monthly cost: KV pd-balanced at the new size + freezer disk (capacity + throughput) vs. 11.1 TB pd-balanced today | |
 
 The KV savings show up in the bill only after the data moves to a smaller
 pd-balanced disk; a disk cannot be shrunk. The size after the freeze is the
 input for that.
 
-## 9. Clean up
+## 10. Clean up
 
 ```bash
 gcloud compute instances delete $TRIAL_VM --zone $ZONE
@@ -299,7 +314,7 @@ gcloud compute disks delete kairos-trial-kv kairos-trial-ancient --zone $ZONE
 
 ## Local dry run
 
-Steps 3 to 6 were run on 2026-10-28 on a laptop, using a one-validator local
+Steps 3 to 6 and 8 were run on 2026-10-28 and 2026-10-29 on a laptop, using a one-validator local
 chain (homi, 908 blocks, about 3,400 transfers) copied to a `ken` datadir
 with `--db.freezer.threshold 300`. The page cache was not dropped (macOS):
 - Freezing worked in two stages: threshold 600, then `kill -9`, then a
@@ -308,9 +323,12 @@ with `--db.freezer.threshold 300`. The page cache was not dropped (macOS):
 - All 1,200 responses were equal before and after the freeze. Frozen-block
   reads were within 0.05 ms of the key-value reads at p50.
 - `frozen`=609, `lag`=0 and `readerror`=0, and `size` matched `du`.
-- `debug_setHead` into the freezer, a start without `--db.freezer`, and a
-  start with an empty freezer at another path were refused with the
-  documented errors.
+- A start without `--db.freezer` and a start with an empty freezer at
+  another path were refused with the documented errors.
+- `debug_setHead` to block 256 (2026-10-29, after SetHead support was added)
+  truncated the freezer from 609 to 257 blocks. After a restart, `frozen` was
+  257, block 257 was gone, and the 252 responses for blocks up to 256 were
+  unchanged.
 - A freezer moved to another directory opened and served the same data.
 
 The loop's range compaction (every 30,000 frozen blocks) is not reached at

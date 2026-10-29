@@ -318,6 +318,9 @@ type DBManager interface {
 	FrozenBlocks() uint64
 	// PauseFreezer stops moving blocks to the freezer until resume is called.
 	PauseFreezer() (frozen uint64, resume func())
+	// TruncateFrozen removes the frozen blocks from number items on. The caller
+	// must hold PauseFreezer.
+	TruncateFrozen(items uint64) error
 }
 
 type DBEntryType uint8

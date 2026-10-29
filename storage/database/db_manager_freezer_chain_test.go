@@ -33,10 +33,18 @@ import (
 )
 
 func newFreezerChain(t *testing.T) (database.DBManager, *blockchain.BlockChain, *types.Block) {
-	dbm := database.NewDBManager(&database.DBConfig{
-		Dir: t.TempDir(), DBType: database.LevelDB, NumStateTrieShards: 1,
+	return newFreezerChainAt(t, t.TempDir())
+}
+
+func openFreezerDB(dir string) database.DBManager {
+	return database.NewDBManager(&database.DBConfig{
+		Dir: dir, DBType: database.LevelDB, NumStateTrieShards: 1,
 		EnableFreezer: true, FreezerThreshold: 5,
 	})
+}
+
+func newFreezerChainAt(t *testing.T, dir string) (database.DBManager, *blockchain.BlockChain, *types.Block) {
+	dbm := openFreezerDB(dir)
 	genesis := new(blockchain.Genesis).MustCommit(dbm)
 	chain, err := blockchain.NewBlockChain(dbm, nil, params.TestChainConfig, faker.NewFullFaker(), vm.Config{})
 	require.NoError(t, err)
@@ -103,4 +111,57 @@ func TestFreezer_ExportImport(t *testing.T) {
 
 	// The source node finds the frozen blocks and has nothing to import.
 	assert.Equal(t, 0, importBlocks(t, src, bytes.NewReader(exported.Bytes())))
+}
+
+// TestFreezer_SetHead rewinds a chain below its frozen blocks, builds a fork on
+// the new head, freezes it and reopens the database.
+func TestFreezer_SetHead(t *testing.T) {
+	const (
+		numBlocks = 20
+		head      = 8
+	)
+	dir := t.TempDir()
+	dbm, chain, genesis := newFreezerChainAt(t, dir)
+	blocks, _ := blockchain.GenerateChain(params.TestChainConfig, genesis, faker.NewFaker(), dbm, numBlocks, func(int, *blockchain.BlockGen) {})
+	_, err := chain.InsertChain(blocks)
+	require.NoError(t, err)
+	database.TriggerFreeze(t, dbm)
+	require.Equal(t, uint64(numBlocks+1-5), dbm.FrozenBlocks())
+
+	require.NoError(t, chain.SetHead(head))
+	assert.Equal(t, uint64(head), chain.CurrentBlock().NumberU64())
+	assert.Equal(t, uint64(head+1), dbm.FrozenBlocks())
+	for _, b := range blocks[:head] {
+		assert.Equal(t, b.Hash(), chain.GetBlockByNumber(b.NumberU64()).Hash(), "block %d", b.NumberU64())
+	}
+	for _, b := range blocks[head:] {
+		assert.Nil(t, chain.GetBlockByNumber(b.NumberU64()), "block %d", b.NumberU64())
+		assert.False(t, chain.HasBlock(b.Hash(), b.NumberU64()), "block %d", b.NumberU64())
+	}
+
+	// A fork on the new head is inserted and frozen in place of the old blocks.
+	fork, _ := blockchain.GenerateChain(params.TestChainConfig, blocks[head-1], faker.NewFaker(), dbm, numBlocks, func(_ int, b *blockchain.BlockGen) {
+		b.SetExtra([]byte("fork"))
+	})
+	_, err = chain.InsertChain(fork)
+	require.NoError(t, err)
+	database.TriggerFreeze(t, dbm)
+	require.Equal(t, uint64(head+numBlocks+1-5), dbm.FrozenBlocks())
+	for _, b := range fork {
+		assert.Equal(t, b.Hash(), chain.GetBlockByNumber(b.NumberU64()).Hash(), "fork block %d", b.NumberU64())
+	}
+	chain.Stop()
+	dbm.Close()
+
+	// The rewound and refrozen chain opens again.
+	dbm = openFreezerDB(dir)
+	defer dbm.Close()
+	chain, err = blockchain.NewBlockChain(dbm, nil, params.TestChainConfig, faker.NewFullFaker(), vm.Config{})
+	require.NoError(t, err)
+	defer chain.Stop()
+	assert.Equal(t, uint64(head+numBlocks+1-5), dbm.FrozenBlocks())
+	assert.Equal(t, fork[len(fork)-1].Hash(), chain.CurrentBlock().Hash())
+	for _, b := range append(blocks[:head], fork...) {
+		assert.Equal(t, b.Hash(), dbm.ReadCanonicalHash(b.NumberU64()), "block %d", b.NumberU64())
+	}
 }
