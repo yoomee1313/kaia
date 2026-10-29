@@ -17,64 +17,61 @@
 package blockchain
 
 import (
-	"bufio"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain/bas"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/rlp"
 )
 
-const (
-	basFileBlocks    = 100_000 // blocks per BAS file
-	basStatsInterval = 10_000  // blocks between stats logs
-)
+const basStatsInterval = 10_000 // blocks between stats logs
 
-// BASFileRecord is one entry of a BAS file. A file is a plain sequence of
-// RLP-encoded records.
-type BASFileRecord struct {
-	Number uint64
-	Hash   common.Hash
-	Set    []byte // RLP-encoded bas.BlockAccessSet
-}
-
-// basRecorder writes the block access set of every inserted block to files
-// under dir, after checking that the set reproduces the state root. It is an
-// experimental tool to measure BAS on real chains.
+// basRecorder appends the block access set of every inserted block to a BAS
+// freezer under dir, after checking that the set reproduces the state root.
+// Item N of the freezer is the set of block N. It is an experimental tool to
+// measure BAS on real chains.
 type basRecorder struct {
-	dir     string
-	fileNum uint64
-	file    *os.File
-	w       *bufio.Writer
+	freezer *bas.Freezer
 
 	stats    basStats
 	sinceLog basStats
 }
 
 type basStats struct {
-	blocks, txs, bytes, failures uint64
-	verifyTime                   time.Duration
+	blocks, txs, bytes, failures, gaps uint64
+	verifyTime                         time.Duration
 }
 
 func newBASRecorder(dir string) (*basRecorder, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	freezer, err := bas.OpenFreezer(dir, false)
+	if err != nil {
 		return nil, err
 	}
-	logger.Warn("Recording block access sets (experimental)", "dir", dir)
-	return &basRecorder{dir: dir}, nil
+	logger.Warn("Recording block access sets (experimental)", "dir", dir, "next", freezer.Next())
+	return &basRecorder{freezer: freezer}, nil
 }
 
 // record encodes the set recorded by statedb, applies it to the parent state
-// and writes it out only if the resulting root matches the block.
+// and appends it only if the resulting root matches the block.
 func (r *basRecorder) record(bc *BlockChain, block *types.Block, parentRoot common.Hash, statedb *state.StateDB) {
+	number := block.NumberU64()
+	if next := r.freezer.Next(); number < next {
+		return // already stored, e.g. a block inserted again after a rewind
+	} else if number > next {
+		// The freezer has no gaps, so nothing can be recorded until the
+		// blocks before this one are.
+		if r.sinceLog.gaps == 0 {
+			logger.Warn("Block access set not recorded: missing earlier blocks", "number", number, "next", next)
+		}
+		r.sinceLog.gaps++
+		return
+	}
+
 	enc, err := statedb.BlockAccessSet().Encode()
 	if err != nil {
-		logger.Error("Failed to encode block access set", "number", block.NumberU64(), "err", err)
+		logger.Error("Failed to encode block access set", "number", number, "err", err)
 		r.sinceLog.failures++
 		return
 	}
@@ -83,13 +80,13 @@ func (r *basRecorder) record(bc *BlockChain, block *types.Block, parentRoot comm
 	err = verifyBAS(bc, block, parentRoot, enc)
 	r.sinceLog.verifyTime += time.Since(start)
 	if err != nil {
-		logger.Error("Block access set failed the self-check", "number", block.NumberU64(), "hash", block.Hash(), "err", err)
+		logger.Error("Block access set failed the self-check", "number", number, "hash", block.Hash(), "err", err)
 		r.sinceLog.failures++
 		return
 	}
 
-	if err := r.write(&BASFileRecord{Number: block.NumberU64(), Hash: block.Hash(), Set: enc}); err != nil {
-		logger.Error("Failed to write block access set", "number", block.NumberU64(), "err", err)
+	if err := r.freezer.Append(number, enc); err != nil {
+		logger.Error("Failed to write block access set", "number", number, "err", err)
 		r.sinceLog.failures++
 		return
 	}
@@ -97,7 +94,7 @@ func (r *basRecorder) record(bc *BlockChain, block *types.Block, parentRoot comm
 	r.sinceLog.txs += uint64(len(block.Transactions()))
 	r.sinceLog.bytes += uint64(len(enc))
 	if r.sinceLog.blocks >= basStatsInterval {
-		r.logStats(block.NumberU64())
+		r.logStats(number)
 	}
 }
 
@@ -119,39 +116,16 @@ func verifyBAS(bc *BlockChain, block *types.Block, parentRoot common.Hash, enc [
 	return nil
 }
 
-func (r *basRecorder) write(rec *BASFileRecord) error {
-	if num := rec.Number / basFileBlocks; r.file == nil || num != r.fileNum {
-		if err := r.closeFile(); err != nil {
-			return err
-		}
-		path := filepath.Join(r.dir, fmt.Sprintf("bas-%06d.rlp", num))
-		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			return err
-		}
-		r.fileNum, r.file, r.w = num, file, bufio.NewWriter(file)
-	}
-	return rlp.Encode(r.w, rec)
-}
-
-func (r *basRecorder) closeFile() error {
-	if r.file == nil {
-		return nil
-	}
-	if err := r.w.Flush(); err != nil {
-		return err
-	}
-	err := r.file.Close()
-	r.file, r.w = nil, nil
-	return err
-}
-
 func (r *basRecorder) logStats(number uint64) {
+	if err := r.freezer.Sync(); err != nil {
+		logger.Error("Failed to sync the BAS freezer", "err", err)
+	}
 	s := &r.sinceLog
 	r.stats.blocks += s.blocks
 	r.stats.txs += s.txs
 	r.stats.bytes += s.bytes
 	r.stats.failures += s.failures
+	r.stats.gaps += s.gaps
 	r.stats.verifyTime += s.verifyTime
 
 	perBlock, perTx := uint64(0), uint64(0)
@@ -161,18 +135,20 @@ func (r *basRecorder) logStats(number uint64) {
 	if s.txs > 0 {
 		perTx = s.bytes / s.txs
 	}
+	size, _ := r.freezer.Size()
 	logger.Info("Block access set stats", "number", number,
 		"blocks", s.blocks, "txs", s.txs, "bytes", s.bytes, "bytesPerBlock", perBlock, "bytesPerTx", perTx,
-		"failures", s.failures, "verify", common.PrettyDuration(s.verifyTime),
-		"totalBlocks", r.stats.blocks, "totalBytes", r.stats.bytes, "totalFailures", r.stats.failures)
+		"failures", s.failures, "gaps", s.gaps, "verify", common.PrettyDuration(s.verifyTime),
+		"totalBlocks", r.stats.blocks, "totalBytes", r.stats.bytes, "totalFailures", r.stats.failures,
+		"freezerSize", size)
 	*s = basStats{}
 }
 
 func (r *basRecorder) close(number uint64) {
-	if r.sinceLog.blocks > 0 || r.sinceLog.failures > 0 {
+	if r.sinceLog.blocks > 0 || r.sinceLog.failures > 0 || r.sinceLog.gaps > 0 {
 		r.logStats(number)
 	}
-	if err := r.closeFile(); err != nil {
-		logger.Error("Failed to close block access set file", "err", err)
+	if err := r.freezer.Close(); err != nil {
+		logger.Error("Failed to close the BAS freezer", "err", err)
 	}
 }

@@ -526,7 +526,7 @@ var (
 	}
 	BASRecordDirFlag = &cli.StringFlag{
 		Name:     "bas.record-dir",
-		Usage:    "Records the block access set of every inserted block under the given directory, after checking it reproduces the state root (experimental)",
+		Usage:    "Appends the block access set of every inserted block to a BAS freezer in the given directory, after checking it reproduces the state root (experimental)",
 		EnvVars:  []string{"KAIA_BAS_RECORD_DIR"},
 		Category: "MISC",
 	}

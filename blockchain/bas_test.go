@@ -18,10 +18,7 @@ package blockchain
 
 import (
 	"crypto/ecdsa"
-	"io"
 	"math/big"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/holiman/uint256"
@@ -480,19 +477,32 @@ func TestBASRecorder(t *testing.T) {
 	require.Zero(t, chain.bas.sinceLog.failures+chain.bas.stats.failures)
 	chain.Stop()
 
-	file, err := os.Open(filepath.Join(dir, "bas-000000.rlp"))
+	freezer, err := bas.OpenFreezer(dir, true)
 	require.NoError(t, err)
-	defer file.Close()
-	stream := rlp.NewStream(file, 0)
+	defer freezer.Close()
+	require.Equal(t, uint64(len(blocks)+1), freezer.Next()) // genesis + blocks
+	genesis, err := freezer.Read(0)
+	require.NoError(t, err)
+	require.Empty(t, genesis.Accounts)
 	for _, block := range blocks {
-		var rec BASFileRecord
-		require.NoError(t, stream.Decode(&rec))
-		require.Equal(t, block.NumberU64(), rec.Number)
-		require.Equal(t, block.Hash(), rec.Hash)
-		require.NoError(t, verifyBAS(chain, block, chain.GetHeaderByHash(block.ParentHash()).Root, rec.Set))
+		enc, err := freezer.ReadRaw(block.NumberU64())
+		require.NoError(t, err)
+		require.NoError(t, verifyBAS(chain, block, chain.GetHeaderByHash(block.ParentHash()).Root, enc))
 	}
-	var rec BASFileRecord
-	require.ErrorIs(t, stream.Decode(&rec), io.EOF)
+}
+
+// TestBASRecorderGap checks that a block after a gap is not recorded, and that
+// a block already stored is skipped.
+func TestBASRecorderGap(t *testing.T) {
+	r, err := newBASRecorder(t.TempDir())
+	require.NoError(t, err)
+	defer r.close(0)
+
+	r.record(nil, types.NewBlockWithHeader(&types.Header{Number: big.NewInt(3)}), common.Hash{}, nil)
+	require.Equal(t, uint64(1), r.sinceLog.gaps)
+	r.record(nil, types.NewBlockWithHeader(&types.Header{Number: big.NewInt(0)}), common.Hash{}, nil)
+	require.Equal(t, uint64(1), r.freezer.Next())
+	require.Zero(t, r.sinceLog.blocks)
 }
 
 func mustKey(t *testing.T) *ecdsa.PrivateKey {
