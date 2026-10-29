@@ -20,42 +20,42 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kaiachain/kaia/blockchain/bas"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 )
 
-const basStatsInterval = 10_000 // blocks between stats logs
+const balStatsInterval = 10_000 // blocks between stats logs
 
-// basRecorder appends the block access set of every inserted block to a BAS
-// freezer under dir, after checking that the set reproduces the state root.
-// Item N of the freezer is the set of block N. It is an experimental tool to
-// measure BAS on real chains.
-type basRecorder struct {
-	freezer *bas.Freezer
+// balRecorder appends the block access list of every inserted block to a BAL
+// freezer under dir, after checking that the list reproduces the state root.
+// Item N of the freezer is the list of block N. It is an experimental tool to
+// measure BAL on real chains.
+type balRecorder struct {
+	freezer *bal.Freezer
 
-	stats    basStats
-	sinceLog basStats
+	stats    balStats
+	sinceLog balStats
 }
 
-type basStats struct {
+type balStats struct {
 	blocks, txs, bytes, failures, gaps uint64
 	verifyTime                         time.Duration
 }
 
-func newBASRecorder(dir string) (*basRecorder, error) {
-	freezer, err := bas.OpenFreezer(dir, false)
+func newBALRecorder(dir string) (*balRecorder, error) {
+	freezer, err := bal.OpenFreezer(dir, false)
 	if err != nil {
 		return nil, err
 	}
-	logger.Warn("Recording block access sets (experimental)", "dir", dir, "next", freezer.Next())
-	return &basRecorder{freezer: freezer}, nil
+	logger.Warn("Recording block access lists (experimental)", "dir", dir, "next", freezer.Next())
+	return &balRecorder{freezer: freezer}, nil
 }
 
-// record encodes the set recorded by statedb, applies it to the parent state
+// record encodes the list recorded by statedb, applies it to the parent state
 // and appends it only if the resulting root matches the block.
-func (r *basRecorder) record(bc *BlockChain, block *types.Block, parentRoot common.Hash, statedb *state.StateDB) {
+func (r *balRecorder) record(bc *BlockChain, block *types.Block, parentRoot common.Hash, statedb *state.StateDB) {
 	number := block.NumberU64()
 	if next := r.freezer.Next(); number < next {
 		return // already stored, e.g. a block inserted again after a rewind
@@ -63,43 +63,43 @@ func (r *basRecorder) record(bc *BlockChain, block *types.Block, parentRoot comm
 		// The freezer has no gaps, so nothing can be recorded until the
 		// blocks before this one are.
 		if r.sinceLog.gaps == 0 {
-			logger.Warn("Block access set not recorded: missing earlier blocks", "number", number, "next", next)
+			logger.Warn("Block access list not recorded: missing earlier blocks", "number", number, "next", next)
 		}
 		r.sinceLog.gaps++
 		return
 	}
 
-	enc, err := statedb.BlockAccessSet().Encode()
+	enc, err := statedb.BlockAccessList().Encode()
 	if err != nil {
-		logger.Error("Failed to encode block access set", "number", number, "err", err)
+		logger.Error("Failed to encode block access list", "number", number, "err", err)
 		r.sinceLog.failures++
 		return
 	}
 
 	start := time.Now()
-	err = verifyBAS(bc, block, parentRoot, enc)
+	err = verifyBAL(bc, block, parentRoot, enc)
 	r.sinceLog.verifyTime += time.Since(start)
 	if err != nil {
-		logger.Error("Block access set failed the self-check", "number", number, "hash", block.Hash(), "err", err)
+		logger.Error("Block access list failed the self-check", "number", number, "hash", block.Hash(), "err", err)
 		r.sinceLog.failures++
 		return
 	}
 
 	if err := r.freezer.Append(number, enc); err != nil {
-		logger.Error("Failed to write block access set", "number", number, "err", err)
+		logger.Error("Failed to write block access list", "number", number, "err", err)
 		r.sinceLog.failures++
 		return
 	}
 	r.sinceLog.blocks++
 	r.sinceLog.txs += uint64(len(block.Transactions()))
 	r.sinceLog.bytes += uint64(len(enc))
-	if r.sinceLog.blocks >= basStatsInterval {
+	if r.sinceLog.blocks >= balStatsInterval {
 		r.logStats(number)
 	}
 }
 
-func verifyBAS(bc *BlockChain, block *types.Block, parentRoot common.Hash, enc []byte) error {
-	set, err := bas.Decode(enc)
+func verifyBAL(bc *BlockChain, block *types.Block, parentRoot common.Hash, enc []byte) error {
+	list, err := bal.Decode(enc)
 	if err != nil {
 		return err
 	}
@@ -107,7 +107,7 @@ func verifyBAS(bc *BlockChain, block *types.Block, parentRoot common.Hash, enc [
 	if err != nil {
 		return err
 	}
-	if err := statedb.ApplyBlockAccessSet(set); err != nil {
+	if err := statedb.ApplyBlockAccessList(list); err != nil {
 		return err
 	}
 	if root := statedb.IntermediateRoot(true); root != block.Root() {
@@ -116,9 +116,9 @@ func verifyBAS(bc *BlockChain, block *types.Block, parentRoot common.Hash, enc [
 	return nil
 }
 
-func (r *basRecorder) logStats(number uint64) {
+func (r *balRecorder) logStats(number uint64) {
 	if err := r.freezer.Sync(); err != nil {
-		logger.Error("Failed to sync the BAS freezer", "err", err)
+		logger.Error("Failed to sync the BAL freezer", "err", err)
 	}
 	s := &r.sinceLog
 	r.stats.blocks += s.blocks
@@ -136,19 +136,19 @@ func (r *basRecorder) logStats(number uint64) {
 		perTx = s.bytes / s.txs
 	}
 	size, _ := r.freezer.Size()
-	logger.Info("Block access set stats", "number", number,
+	logger.Info("Block access list stats", "number", number,
 		"blocks", s.blocks, "txs", s.txs, "bytes", s.bytes, "bytesPerBlock", perBlock, "bytesPerTx", perTx,
 		"failures", s.failures, "gaps", s.gaps, "verify", common.PrettyDuration(s.verifyTime),
 		"totalBlocks", r.stats.blocks, "totalBytes", r.stats.bytes, "totalFailures", r.stats.failures,
 		"freezerSize", size)
-	*s = basStats{}
+	*s = balStats{}
 }
 
-func (r *basRecorder) close(number uint64) {
+func (r *balRecorder) close(number uint64) {
 	if r.sinceLog.blocks > 0 || r.sinceLog.failures > 0 || r.sinceLog.gaps > 0 {
 		r.logStats(number)
 	}
 	if err := r.freezer.Close(); err != nil {
-		logger.Error("Failed to close the BAS freezer", "err", err)
+		logger.Error("Failed to close the BAL freezer", "err", err)
 	}
 }

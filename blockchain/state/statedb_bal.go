@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/kaiachain/kaia/blockchain/bas"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
@@ -30,11 +30,11 @@ import (
 )
 
 var (
-	errBASMissingAccount = errors.New("recreated or new account has no whole account record")
-	errBASNoAccount      = errors.New("changed account does not exist and has no whole account record")
+	errBALMissingAccount = errors.New("recreated or new account has no whole account record")
+	errBALNoAccount      = errors.New("changed account does not exist and has no whole account record")
 )
 
-// accessRecorder records the block access set while a block is executed. It
+// accessRecorder records the block access list while a block is executed. It
 // only observes the StateDB and never changes state or gas.
 //
 // Reads are recorded when an account is loaded and when a slot is read through
@@ -44,7 +44,7 @@ var (
 // not finalised are not attributed to the first tx.
 type accessRecorder struct {
 	index   uint32
-	builder *bas.Builder
+	builder *bal.Builder
 
 	// seen holds, per account, the values as of the last recorded change, or
 	// as loaded from the parent state. A change is recorded only if the value
@@ -89,17 +89,17 @@ func kaiaFields(acc account.Account) []byte {
 	}
 	enc, err := rlp.EncodeToBytes(account.NewAccountSerializerWithAccount(c))
 	if err != nil {
-		logger.Error("Failed to encode account fields for the block access set", "err", err)
+		logger.Error("Failed to encode account fields for the block access list", "err", err)
 	}
 	return enc
 }
 
-// EnableBlockAccessRecorder starts recording the block access set. It must be
+// EnableBlockAccessRecorder starts recording the block access list. It must be
 // called on a StateDB freshly opened at the parent root, before the block is
 // executed. The phase index starts at 0 (InitializeState).
 func (s *StateDB) EnableBlockAccessRecorder() {
 	s.blockAccess = &accessRecorder{
-		builder: bas.NewBuilder(),
+		builder: bal.NewBuilder(),
 		seen:    make(map[common.Address]*accessView),
 	}
 }
@@ -117,10 +117,10 @@ func (s *StateDB) SetBlockAccessIndex(idx int) {
 	r.index = uint32(idx)
 }
 
-// BlockAccessSet returns the recorded block access set, or nil if the recorder
+// BlockAccessList returns the recorded block access list, or nil if the recorder
 // is not enabled. Changes are recorded at Finalise, so it is complete after
 // IntermediateRoot of the block.
-func (s *StateDB) BlockAccessSet() *bas.BlockAccessSet {
+func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	if s.blockAccess == nil {
 		return nil
 	}
@@ -204,7 +204,7 @@ func (r *accessRecorder) captureAccount(s *StateDB, addr common.Address, obj *st
 	if prev == nil || !prev.exists || recreated || !bytes.Equal(prev.fields, cur.fields) {
 		enc, err := rlp.EncodeToBytes(account.NewAccountSerializerWithAccount(obj.account))
 		if err != nil {
-			logger.Error("Failed to encode account for the block access set", "addr", addr, "err", err)
+			logger.Error("Failed to encode account for the block access list", "addr", addr, "err", err)
 		}
 		r.builder.SetAccount(addr, idx, enc)
 	}
@@ -231,7 +231,7 @@ func (r *accessRecorder) captureAccount(s *StateDB, addr common.Address, obj *st
 
 // SetAccount replaces the whole account at addr with acc. The storage root of
 // acc is not trusted: the current storage is kept, or dropped if clearStorage
-// is set. It is used to apply a block access set.
+// is set. It is used to apply a block access list.
 func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStorage bool) {
 	acc = acc.DeepCopy()
 	pa := account.GetProgramAccount(acc)
@@ -265,12 +265,12 @@ func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStor
 	}
 }
 
-// ApplyBlockAccessSet writes the final values of a block access set to the
+// ApplyBlockAccessList writes the final values of a block access list to the
 // state, which must be opened at the parent root of the block. The caller then
 // checks that IntermediateRoot(true) equals the state root of the header.
-func (s *StateDB) ApplyBlockAccessSet(set *bas.BlockAccessSet) error {
-	for i := range set.Accounts {
-		a := &set.Accounts[i]
+func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
 		if err := s.applyAccountAccess(a); err != nil {
 			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
 		}
@@ -278,7 +278,7 @@ func (s *StateDB) ApplyBlockAccessSet(set *bas.BlockAccessSet) error {
 	return nil
 }
 
-func (s *StateDB) applyAccountAccess(a *bas.AccountAccess) error {
+func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {
 	if !a.Changed() {
 		return nil
 	}
@@ -310,11 +310,11 @@ func (s *StateDB) applyAccountAccess(a *bas.AccountAccess) error {
 		}
 		s.SetAccount(addr, ser.GetAccount(), cleared)
 	} else if cleared {
-		return errBASMissingAccount
+		return errBALMissingAccount
 	}
 	obj := s.getStateObject(addr)
 	if obj == nil {
-		return errBASNoAccount
+		return errBALNoAccount
 	}
 
 	// Every change of a field is recorded, so the last one in range is the

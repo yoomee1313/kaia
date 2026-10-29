@@ -112,7 +112,7 @@ type StateDB struct {
 
 	prefetching bool
 
-	// Optional recorder of the block access set, nil unless enabled.
+	// Optional recorder of the block access list, nil unless enabled.
 	blockAccess *accessRecorder
 
 	// Measurements gathered during execution for debugging purposes

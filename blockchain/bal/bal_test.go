@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-package bas
+package bal
 
 import (
 	"math/big"
@@ -51,11 +51,11 @@ func TestBuilder(t *testing.T) {
 	builder.SetAccount(a, 2, []byte{0x01})
 	builder.WriteSlot(a, 2, slot2, common.Hash{0x23})
 
-	set := builder.Build()
-	require.NoError(t, set.Validate())
-	require.Len(t, set.Accounts, 2)
+	list := builder.Build()
+	require.NoError(t, list.Validate())
+	require.Len(t, list.Accounts, 2)
 
-	acc := set.Accounts[0]
+	acc := list.Accounts[0]
 	require.Equal(t, a, acc.Address)
 	require.Equal(t, []BalanceChange{{0, big.NewInt(1)}, {1, big.NewInt(3)}}, acc.BalanceChanges)
 	require.Empty(t, acc.NonceChanges)
@@ -70,11 +70,11 @@ func TestBuilder(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, uint32(2), last)
 
-	acc = set.Accounts[1]
+	acc = list.Accounts[1]
 	require.False(t, acc.Changed())
 	require.Equal(t, []common.Hash{slot1, slot2}, acc.StorageReads)
 
-	enc, err := set.Encode()
+	enc, err := list.Encode()
 	require.NoError(t, err)
 	dec, err := Decode(enc)
 	require.NoError(t, err)
@@ -84,13 +84,13 @@ func TestBuilder(t *testing.T) {
 }
 
 func TestDecodeRejectsNonCanonical(t *testing.T) {
-	for name, set := range map[string]*BlockAccessSet{
+	for name, list := range map[string]*BlockAccessList{
 		"accounts": {Accounts: []AccountAccess{{Address: common.Address{2}}, {Address: common.Address{1}}}},
 		"slots":    {Accounts: []AccountAccess{{StorageReads: []common.Hash{{2}, {1}}}}},
 		"indices":  {Accounts: []AccountAccess{{NonceChanges: []NonceChange{{1, 1}, {1, 2}}}}},
 		"empty":    {Accounts: []AccountAccess{{StorageWrites: []SlotWrites{{Slot: common.Hash{1}}}}}},
 	} {
-		enc, err := set.Encode()
+		enc, err := list.Encode()
 		require.NoError(t, err)
 		_, err = Decode(enc)
 		require.Error(t, err, name)
@@ -101,7 +101,7 @@ func TestFreezer(t *testing.T) {
 	dir := t.TempDir()
 	f, err := OpenFreezer(dir, false)
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), f.Next()) // the genesis set
+	require.Equal(t, uint64(1), f.Next()) // the genesis list
 
 	builder := NewBuilder()
 	builder.SetBalance(common.Address{1}, 1, big.NewInt(7))
@@ -116,9 +116,9 @@ func TestFreezer(t *testing.T) {
 	require.NoError(t, err)
 	defer f.Close()
 	require.Equal(t, uint64(2), f.Next())
-	set, err := f.Read(1)
+	list, err := f.Read(1)
 	require.NoError(t, err)
-	require.Equal(t, big.NewInt(7), set.Accounts[0].BalanceChanges[0].Balance)
+	require.Equal(t, big.NewInt(7), list.Accounts[0].BalanceChanges[0].Balance)
 	genesis, err := f.Read(0)
 	require.NoError(t, err)
 	require.Empty(t, genesis.Accounts)

@@ -524,10 +524,10 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
-	BASRecordDirFlag = &cli.StringFlag{
-		Name:     "bas.record-dir",
-		Usage:    "Appends the block access set of every inserted block to a BAS freezer in the given directory, after checking it reproduces the state root (experimental)",
-		EnvVars:  []string{"KAIA_BAS_RECORD_DIR"},
+	BALRecordDirFlag = &cli.StringFlag{
+		Name:     "bal.record-dir",
+		Usage:    "Appends the block access list of every inserted block to a BAL freezer in the given directory, after checking it reproduces the state root (experimental)",
+		EnvVars:  []string{"KAIA_BAL_RECORD_DIR"},
 		Category: "MISC",
 	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{

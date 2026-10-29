@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-package bas
+package bal
 
 import (
 	"errors"
@@ -25,22 +25,22 @@ import (
 
 const (
 	// FreezerTable is the freezer table holding RLP-encoded block access
-	// sets. Item N is the set of block N.
-	FreezerTable = "accesssets"
+	// lists. Item N is the list of block N.
+	FreezerTable = "accesslists"
 
-	freezerNamespace = "klay/db/bas/"
+	freezerNamespace = "klay/db/bal/"
 )
 
 var (
 	freezerTables = map[string]ancient.TableConfig{FreezerTable: {NoSnappy: false}}
 
-	// genesisSet is stored as item 0: the genesis block is not executed.
-	genesisSet = mustEncode(&BlockAccessSet{})
+	// genesisList is stored as item 0: the genesis block is not executed.
+	genesisList = mustEncode(&BlockAccessList{})
 
-	ErrFreezerGap = errors.New("block is not the next item of the BAS freezer")
+	ErrFreezerGap = errors.New("block is not the next item of the BAL freezer")
 )
 
-func mustEncode(s *BlockAccessSet) []byte {
+func mustEncode(s *BlockAccessList) []byte {
 	enc, err := s.Encode()
 	if err != nil {
 		panic(err)
@@ -48,15 +48,15 @@ func mustEncode(s *BlockAccessSet) []byte {
 	return enc
 }
 
-// Freezer stores block access sets in a freezer instance of their own, so
-// the files can later be served or moved as they are. Sets are appended in
+// Freezer stores block access lists in a freezer instance of their own, so
+// the files can later be served or moved as they are. Lists are appended in
 // block order without gaps, starting from the genesis block.
 type Freezer struct {
 	f *ancient.Freezer
 }
 
-// OpenFreezer opens the BAS freezer in dir. A writable freezer that is empty
-// gets an empty set for the genesis block, so the next item is block 1.
+// OpenFreezer opens the BAL freezer in dir. A writable freezer that is empty
+// gets an empty list for the genesis block, so the next item is block 1.
 func OpenFreezer(dir string, readonly bool) (*Freezer, error) {
 	f, err := ancient.NewFreezer(dir, freezerNamespace, readonly, ancient.DefaultTableSize, freezerTables)
 	if err != nil {
@@ -64,7 +64,7 @@ func OpenFreezer(dir string, readonly bool) (*Freezer, error) {
 	}
 	bf := &Freezer{f: f}
 	if !readonly && bf.Next() == 0 {
-		if err := bf.append(0, genesisSet); err != nil {
+		if err := bf.append(0, genesisList); err != nil {
 			f.Close()
 			return nil, err
 		}
@@ -73,13 +73,13 @@ func OpenFreezer(dir string, readonly bool) (*Freezer, error) {
 }
 
 // Next returns the number of the next block to append, which is also the
-// number of stored sets including the genesis one.
+// number of stored lists including the genesis one.
 func (bf *Freezer) Next() uint64 {
 	n, _ := bf.f.Ancients()
 	return n
 }
 
-// Append stores the RLP-encoded set of the given block, which must be Next().
+// Append stores the RLP-encoded list of the given block, which must be Next().
 func (bf *Freezer) Append(number uint64, enc []byte) error {
 	if next := bf.Next(); number != next {
 		return fmt.Errorf("%w: block %d, next %d", ErrFreezerGap, number, next)
@@ -94,19 +94,19 @@ func (bf *Freezer) append(number uint64, enc []byte) error {
 	return err
 }
 
-// ReadRaw returns the RLP-encoded set of the given block.
+// ReadRaw returns the RLP-encoded list of the given block.
 func (bf *Freezer) ReadRaw(number uint64) ([]byte, error) {
 	return bf.f.Ancient(FreezerTable, number)
 }
 
-// ReadRawRange returns the RLP-encoded sets of up to count blocks from start,
+// ReadRawRange returns the RLP-encoded lists of up to count blocks from start,
 // stopping early once maxBytes is reached (0 means no limit).
 func (bf *Freezer) ReadRawRange(start, count, maxBytes uint64) ([][]byte, error) {
 	return bf.f.AncientRange(FreezerTable, start, count, maxBytes)
 }
 
-// Read returns the decoded set of the given block.
-func (bf *Freezer) Read(number uint64) (*BlockAccessSet, error) {
+// Read returns the decoded list of the given block.
+func (bf *Freezer) Read(number uint64) (*BlockAccessList, error) {
 	enc, err := bf.ReadRaw(number)
 	if err != nil {
 		return nil, err
@@ -119,7 +119,7 @@ func (bf *Freezer) Size() (uint64, error) {
 	return bf.f.AncientSize(FreezerTable)
 }
 
-// Sync flushes appended sets to disk.
+// Sync flushes appended lists to disk.
 func (bf *Freezer) Sync() error {
 	return bf.f.SyncAncient()
 }
