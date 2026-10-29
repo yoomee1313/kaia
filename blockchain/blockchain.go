@@ -139,6 +139,7 @@ type CacheConfig struct {
 	TrieNodeCacheConfig  *statedb.TrieNodeCacheConfig // Configures trie node cache
 	SnapshotCacheSize    int                          // Memory allowance (MB) to use for caching snapshot entries in memory
 	SnapshotAsyncGen     bool                         // Enables snapshot data generation asynchronously
+	BALRecordDir         string                       // If set, block access lists of inserted blocks are recorded under this directory (experimental)
 }
 
 // gcBlock is used for priority queue for GC.
@@ -167,6 +168,7 @@ type BlockChain struct {
 
 	db      database.DBManager // Low level persistent database to store final content in
 	snaps   *snapshot.Tree     // Snapshot tree for fast trie leaf access
+	bal     *balRecorder       // Block access list recorder, nil unless enabled
 	triegc  *prque.Prque       // Priority queue mapping block numbers to tries to gc
 	chBlock chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
 	chPrune chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
@@ -366,6 +368,12 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 			recover = true
 		}
 		bc.snaps, _ = snapshot.New(bc.db, bc.stateCache.TrieDB(), bc.cacheConfig.SnapshotCacheSize, head.Root(), bc.cacheConfig.SnapshotAsyncGen, true, recover)
+	}
+
+	if cacheConfig.BALRecordDir != "" {
+		if bc.bal, err = newBALRecorder(cacheConfig.BALRecordDir); err != nil {
+			return nil, err
+		}
 	}
 
 	for i := 1; i <= bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker; i++ {
@@ -1151,6 +1159,10 @@ func (bc *BlockChain) Stop() {
 	atomic.StoreInt32(&bc.procInterrupt, 1)
 
 	bc.wg.Wait()
+
+	if bc.bal != nil {
+		bc.bal.close(bc.CurrentBlock().NumberU64())
+	}
 
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
@@ -2111,6 +2123,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		if err != nil {
 			return i, events, coalescedLogs, err
 		}
+		if bc.bal != nil {
+			stateDB.EnableBlockAccessRecorder()
+		}
 
 		// Process block using the parent state as reference point.
 		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processor.Process(block, stateDB, bc.vmConfig)
@@ -2128,6 +2143,10 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 		afterValidate := time.Now()
+
+		if bc.bal != nil {
+			bc.bal.record(bc, block, parent.Root(), stateDB)
+		}
 
 		// Write the block to the chain and get the writeResult.
 		writeResult, err := bc.writeBlockWithState(block, receipts, stateDB)

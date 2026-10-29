@@ -286,6 +286,7 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			SenderTxHashIndexing: config.SenderTxHashIndexing,
 			SnapshotCacheSize:    config.SnapshotCacheSize,
 			SnapshotAsyncGen:     config.SnapshotAsyncGen,
+			BALRecordDir:         config.BALRecordDir,
 		}
 	)
 

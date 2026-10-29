@@ -249,6 +249,7 @@ var CommonNodeFlags = []cli.Flag{
 	altsrc.NewBoolFlag(SnapshotFlag),
 	altsrc.NewIntFlag(SnapshotCacheSizeFlag),
 	altsrc.NewBoolFlag(SnapshotAsyncGen),
+	altsrc.NewStringFlag(BALRecordDirFlag),
 	altsrc.NewIntFlag(GpoBlocksFlag),
 	altsrc.NewIntFlag(GpoPercentileFlag),
 	altsrc.NewInt64Flag(GpoMaxGasPriceFlag),
