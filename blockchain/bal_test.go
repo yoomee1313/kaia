@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	"github.com/holiman/uint256"
-	"github.com/kaiachain/kaia/blockchain/bas"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/types/accountkey"
@@ -38,68 +38,68 @@ import (
 )
 
 var (
-	basSystemAddr = common.HexToAddress("0x000000000000000000000000000000000000ba50")
-	basFactory    = common.HexToAddress("0x000000000000000000000000000000000000fac7")
-	basReward     = big.NewInt(params.KAIA)
-	basGasPrice   = big.NewInt(25 * params.Gkei)
-	basFunds      = new(big.Int).Mul(big.NewInt(1000), big.NewInt(params.KAIA))
+	balSystemAddr = common.HexToAddress("0x000000000000000000000000000000000000ba50")
+	balFactory    = common.HexToAddress("0x000000000000000000000000000000000000fac7")
+	balReward     = big.NewInt(params.KAIA)
+	balGasPrice   = big.NewInt(25 * params.Gkei)
+	balFunds      = new(big.Int).Mul(big.NewInt(1000), big.NewInt(params.KAIA))
 )
 
-// basTestSealer is a faker that also changes state in InitializeState and
+// balTestSealer is a faker that also changes state in InitializeState and
 // FinalizeState, standing in for system tx calls and block rewards.
-type basTestSealer struct {
+type balTestSealer struct {
 	*faker.Faker
 	initAddr common.Address // gets 1 peb in InitializeState
 }
 
-func (s basTestSealer) InitializeState(header *types.Header, statedb *state.StateDB) error {
+func (s balTestSealer) InitializeState(header *types.Header, statedb *state.StateDB) error {
 	// Not finalised on purpose: the recorder must keep these changes out of tx 1.
-	statedb.SetState(basSystemAddr, common.BigToHash(header.Number), header.ParentHash)
+	statedb.SetState(balSystemAddr, common.BigToHash(header.Number), header.ParentHash)
 	statedb.AddBalance(s.initAddr, common.Big1)
 	return nil
 }
 
-func (s basTestSealer) FinalizeState(header *types.Header, statedb *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) error {
-	statedb.AddBalance(header.Rewardbase, basReward)
+func (s balTestSealer) FinalizeState(header *types.Header, statedb *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) error {
+	statedb.AddBalance(header.Rewardbase, balReward)
 	return nil
 }
 
-type basTestEnv struct {
+type balTestEnv struct {
 	t       *testing.T
 	config  *params.ChainConfig
 	signer  types.Signer
-	sealer  basTestSealer
+	sealer  balTestSealer
 	db      database.DBManager
 	genesis *types.Block
 	keys    []*ecdsa.PrivateKey
 	addrs   []common.Address
 }
 
-func newBASTestEnv(t *testing.T, hardfork string, numKeys int) *basTestEnv {
-	env := &basTestEnv{t: t, config: params.TestKaiaConfig(hardfork), db: database.NewMemoryDBManager()}
+func newBALTestEnv(t *testing.T, hardfork string, numKeys int) *balTestEnv {
+	env := &balTestEnv{t: t, config: params.TestKaiaConfig(hardfork), db: database.NewMemoryDBManager()}
 	env.signer = types.LatestSignerForChainID(env.config.ChainID)
 	alloc := GenesisAlloc{
-		basSystemAddr: {Code: []byte{byte(vm.STOP)}, Balance: common.Big0},
-		basFactory:    {Code: basFactoryCode(), Balance: common.Big0},
+		balSystemAddr: {Code: []byte{byte(vm.STOP)}, Balance: common.Big0},
+		balFactory:    {Code: balFactoryCode(), Balance: common.Big0},
 		// The store contract is the delegation target of EIP-7702 tests.
-		basStoreAddr: {Code: basStoreCode(), Balance: common.Big0},
+		balStoreAddr: {Code: balStoreCode(), Balance: common.Big0},
 	}
 	for range numKeys {
 		key, _ := crypto.GenerateKey()
 		addr := crypto.PubkeyToAddress(key.PublicKey)
 		env.keys = append(env.keys, key)
 		env.addrs = append(env.addrs, addr)
-		alloc[addr] = GenesisAccount{Balance: basFunds}
+		alloc[addr] = GenesisAccount{Balance: balFunds}
 	}
-	env.sealer = basTestSealer{Faker: faker.NewFaker(), initAddr: env.addrs[0]}
+	env.sealer = balTestSealer{Faker: faker.NewFaker(), initAddr: env.addrs[0]}
 	env.genesis = (&Genesis{Config: env.config, Alloc: alloc}).MustCommit(env.db)
 	return env
 }
 
-var basStoreAddr = common.HexToAddress("0x000000000000000000000000000000000000570e")
+var balStoreAddr = common.HexToAddress("0x000000000000000000000000000000000000570e")
 
-// basStoreCode stores calldata[32:64] at slot calldata[0:32].
-func basStoreCode() []byte {
+// balStoreCode stores calldata[32:64] at slot calldata[0:32].
+func balStoreCode() []byte {
 	return []byte{
 		byte(vm.PUSH1), 0x20, byte(vm.CALLDATALOAD),
 		byte(vm.PUSH1), 0x00, byte(vm.CALLDATALOAD),
@@ -108,8 +108,8 @@ func basStoreCode() []byte {
 	}
 }
 
-// basDestructibleCode works like basStoreCode, and self-destructs on empty calldata.
-func basDestructibleCode() []byte {
+// balDestructibleCode works like balStoreCode, and self-destructs on empty calldata.
+func balDestructibleCode() []byte {
 	return []byte{
 		byte(vm.CALLDATASIZE), byte(vm.ISZERO), byte(vm.PUSH1), 13, byte(vm.JUMPI),
 		byte(vm.PUSH1), 0x20, byte(vm.CALLDATALOAD),
@@ -120,8 +120,8 @@ func basDestructibleCode() []byte {
 	}
 }
 
-// basFactoryCode deploys calldata as init code with CREATE2 and salt 0.
-func basFactoryCode() []byte {
+// balFactoryCode deploys calldata as init code with CREATE2 and salt 0.
+func balFactoryCode() []byte {
 	return []byte{
 		byte(vm.CALLDATASIZE), byte(vm.PUSH1), 0x00, byte(vm.PUSH1), 0x00, byte(vm.CALLDATACOPY),
 		byte(vm.PUSH1), 0x00, byte(vm.CALLDATASIZE), byte(vm.PUSH1), 0x00, byte(vm.PUSH1), 0x00, byte(vm.CREATE2),
@@ -129,8 +129,8 @@ func basFactoryCode() []byte {
 	}
 }
 
-// basInitCode stores 0x11 at slot 1 and 0x22 at slot 2, then returns runtime.
-func basInitCode(runtime []byte) []byte {
+// balInitCode stores 0x11 at slot 1 and 0x22 at slot 2, then returns runtime.
+func balInitCode(runtime []byte) []byte {
 	ctor := []byte{
 		byte(vm.PUSH1), 0x11, byte(vm.PUSH1), 0x01, byte(vm.SSTORE),
 		byte(vm.PUSH1), 0x22, byte(vm.PUSH1), 0x02, byte(vm.SSTORE),
@@ -144,28 +144,28 @@ func basInitCode(runtime []byte) []byte {
 	return append(ctor, runtime...)
 }
 
-func basSlotData(slot, value byte) []byte {
+func balSlotData(slot, value byte) []byte {
 	data := make([]byte, 64)
 	data[31], data[63] = slot, value
 	return data
 }
 
-func (env *basTestEnv) legacyTx(b *BlockGen, from int, to *common.Address, amount *big.Int, data []byte) *types.Transaction {
+func (env *balTestEnv) legacyTx(b *BlockGen, from int, to *common.Address, amount *big.Int, data []byte) *types.Transaction {
 	nonce := b.TxNonce(env.addrs[from])
 	var tx *types.Transaction
 	if to == nil {
-		tx = types.NewContractCreation(nonce, amount, 1_000_000, basGasPrice, data)
+		tx = types.NewContractCreation(nonce, amount, 1_000_000, balGasPrice, data)
 	} else {
-		tx = types.NewTransaction(nonce, *to, amount, 1_000_000, basGasPrice, data)
+		tx = types.NewTransaction(nonce, *to, amount, 1_000_000, balGasPrice, data)
 	}
 	tx, err := types.SignTx(tx, env.signer, env.keys[from])
 	require.NoError(env.t, err)
 	return tx
 }
 
-func (env *basTestEnv) kaiaTx(txType types.TxType, values map[types.TxValueKeyType]interface{}, keys, feePayerKeys []*ecdsa.PrivateKey) *types.Transaction {
+func (env *balTestEnv) kaiaTx(txType types.TxType, values map[types.TxValueKeyType]interface{}, keys, feePayerKeys []*ecdsa.PrivateKey) *types.Transaction {
 	values[types.TxValueKeyGasLimit] = uint64(1_000_000)
-	values[types.TxValueKeyGasPrice] = basGasPrice
+	values[types.TxValueKeyGasPrice] = balGasPrice
 	tx, err := types.NewTransactionWithMap(txType, values)
 	require.NoError(env.t, err)
 	require.NoError(env.t, tx.SignWithKeys(env.signer, keys))
@@ -175,7 +175,7 @@ func (env *basTestEnv) kaiaTx(txType types.TxType, values map[types.TxValueKeyTy
 	return tx
 }
 
-func (env *basTestEnv) setCodeTx(b *BlockGen, from int, target common.Address, data []byte) *types.Transaction {
+func (env *balTestEnv) setCodeTx(b *BlockGen, from int, target common.Address, data []byte) *types.Transaction {
 	addr := env.addrs[from]
 	nonce := b.TxNonce(addr)
 	auth, err := types.SignSetCode(env.keys[from], types.SetCodeAuthorization{
@@ -187,18 +187,18 @@ func (env *basTestEnv) setCodeTx(b *BlockGen, from int, target common.Address, d
 	authList := []types.SetCodeAuthorization{auth}
 	intrinsicGas, err := types.IntrinsicGas(data, nil, authList, false, env.config.Rules(b.Number()))
 	require.NoError(env.t, err)
-	tx, err := types.SignTx(types.NewMessage(addr, &addr, nonce, nil, 1_000_000, nil, basGasPrice,
-		basGasPrice, nil, data, false, intrinsicGas, nil, nil, nil, nil, authList), env.signer, env.keys[from])
+	tx, err := types.SignTx(types.NewMessage(addr, &addr, nonce, nil, 1_000_000, nil, balGasPrice,
+		balGasPrice, nil, data, false, intrinsicGas, nil, nil, nil, nil, authList), env.signer, env.keys[from])
 	require.NoError(env.t, err)
 	return tx
 }
 
 // generate makes the blocks and inserts them into a new chain.
-func (env *basTestEnv) generate(n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
+func (env *balTestEnv) generate(n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
 	return env.generateWithCache(nil, n, gen)
 }
 
-func (env *basTestEnv) generateWithCache(cacheConfig *CacheConfig, n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
+func (env *balTestEnv) generateWithCache(cacheConfig *CacheConfig, n int, gen func(int, *BlockGen)) (*BlockChain, []*types.Block) {
 	blocks, _ := GenerateChain(env.config, env.genesis, env.sealer, env.db, n, gen)
 	chain, err := NewBlockChain(env.db, cacheConfig, env.config, env.sealer, vm.Config{})
 	require.NoError(env.t, err)
@@ -209,11 +209,11 @@ func (env *basTestEnv) generateWithCache(cacheConfig *CacheConfig, n int, gen fu
 	return chain, blocks
 }
 
-// checkBAS re-executes every block with and without the recorder, then checks
-// that the recorded set survives encoding and reproduces the state root when
+// checkBAL re-executes every block with and without the recorder, then checks
+// that the recorded list survives encoding and reproduces the state root when
 // applied to the parent state.
-func checkBAS(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bas.BlockAccessSet {
-	sets := make([]*bas.BlockAccessSet, len(blocks))
+func checkBAL(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bal.BlockAccessList {
+	lists := make([]*bal.BlockAccessList, len(blocks))
 	for i, block := range blocks {
 		parent := chain.GetHeaderByHash(block.ParentHash())
 		require.NotNil(t, parent)
@@ -230,7 +230,7 @@ func checkBAS(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bas.Blo
 		}
 		receiptsOff, gasOff, rootOff := func() (types.Receipts, uint64, common.Hash) {
 			r, g, root, statedb := process(false)
-			require.Nil(t, statedb.BlockAccessSet())
+			require.Nil(t, statedb.BlockAccessList())
 			return r, g, root
 		}()
 		receiptsOn, gasOn, rootOn, statedb := process(true)
@@ -244,10 +244,10 @@ func checkBAS(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bas.Blo
 		require.NoError(t, err)
 		require.Equal(t, encOff, encOn, "block %d: recording changed the receipts", block.NumberU64())
 
-		set := statedb.BlockAccessSet()
-		enc, err := set.Encode()
+		list := statedb.BlockAccessList()
+		enc, err := list.Encode()
 		require.NoError(t, err)
-		decoded, err := bas.Decode(enc)
+		decoded, err := bal.Decode(enc)
 		require.NoError(t, err)
 		reenc, err := decoded.Encode()
 		require.NoError(t, err)
@@ -255,24 +255,24 @@ func checkBAS(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bas.Blo
 
 		applied, err := chain.StateAt(parent.Root)
 		require.NoError(t, err)
-		require.NoError(t, applied.ApplyBlockAccessSet(decoded))
+		require.NoError(t, applied.ApplyBlockAccessList(decoded))
 		require.Equal(t, block.Root(), applied.IntermediateRoot(true), "block %d: applied root mismatch", block.NumberU64())
-		sets[i] = decoded
+		lists[i] = decoded
 	}
-	return sets
+	return lists
 }
 
-func findAccess(t *testing.T, set *bas.BlockAccessSet, addr common.Address) *bas.AccountAccess {
-	for i := range set.Accounts {
-		if set.Accounts[i].Address == addr {
-			return &set.Accounts[i]
+func findAccess(t *testing.T, list *bal.BlockAccessList, addr common.Address) *bal.AccountAccess {
+	for i := range list.Accounts {
+		if list.Accounts[i].Address == addr {
+			return &list.Accounts[i]
 		}
 	}
-	t.Fatalf("account %s is not in the access set", addr.Hex())
+	t.Fatalf("account %s is not in the access list", addr.Hex())
 	return nil
 }
 
-func balanceIndices(a *bas.AccountAccess) []uint32 {
+func balanceIndices(a *bal.AccountAccess) []uint32 {
 	var idx []uint32
 	for _, c := range a.BalanceChanges {
 		idx = append(idx, c.Index)
@@ -280,13 +280,13 @@ func balanceIndices(a *bas.AccountAccess) []uint32 {
 	return idx
 }
 
-func TestBlockAccessSet(t *testing.T) {
-	env := newBASTestEnv(t, "prague", 8)
+func TestBlockAccessList(t *testing.T) {
+	env := newBALTestEnv(t, "prague", 8)
 	var (
 		addrs     = env.addrs
 		newEOA    = common.HexToAddress("0x00000000000000000000000000000000000e0a01")
 		contract  = crypto.CreateAddress(addrs[0], 1) // second tx of addrs[0]
-		ephemeral = crypto.CreateAddress2(basFactory, [32]byte{}, crypto.Keccak256([]byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
+		ephemeral = crypto.CreateAddress2(balFactory, [32]byte{}, crypto.Keccak256([]byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
 
 		roleKeys     = []*ecdsa.PrivateKey{mustKey(t), mustKey(t), mustKey(t)}
 		multisigKeys = []*ecdsa.PrivateKey{mustKey(t), mustKey(t), mustKey(t)}
@@ -308,7 +308,7 @@ func TestBlockAccessSet(t *testing.T) {
 		case 0:
 			// Value transfer creating a new EOA, contract creation, fee delegation.
 			b.AddTx(env.legacyTx(b, 0, &newEOA, big.NewInt(params.KAIA), nil))
-			b.AddTx(env.legacyTx(b, 0, nil, common.Big0, basInitCode(basStoreCode())))
+			b.AddTx(env.legacyTx(b, 0, nil, common.Big0, balInitCode(balStoreCode())))
 			b.AddTx(env.kaiaTx(types.TxTypeFeeDelegatedValueTransfer, map[types.TxValueKeyType]interface{}{
 				types.TxValueKeyNonce:    b.TxNonce(addrs[1]),
 				types.TxValueKeyFrom:     addrs[1],
@@ -318,9 +318,9 @@ func TestBlockAccessSet(t *testing.T) {
 			}, env.keys[1:2], env.keys[3:4]))
 		case 1:
 			// Storage update, delete and no-op write.
-			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, basSlotData(1, 0)))
-			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, basSlotData(2, 0x22)))
-			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, basSlotData(3, 0x33)))
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(1, 0)))
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(2, 0x22)))
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(3, 0x33)))
 			// Key updates.
 			b.AddTx(env.kaiaTx(types.TxTypeAccountUpdate, map[types.TxValueKeyType]interface{}{
 				types.TxValueKeyNonce:      b.TxNonce(addrs[4]),
@@ -334,9 +334,9 @@ func TestBlockAccessSet(t *testing.T) {
 				types.TxValueKeyFeePayer:   addrs[3],
 			}, env.keys[5:6], env.keys[3:4]))
 			// EIP-7702 delegation that writes the storage of the EOA.
-			b.AddTx(env.setCodeTx(b, 6, basStoreAddr, basSlotData(5, 0x55)))
+			b.AddTx(env.setCodeTx(b, 6, balStoreAddr, balSlotData(5, 0x55)))
 			// EIP-6780: created and self-destructed in the same tx.
-			b.AddTx(env.legacyTx(b, 7, &basFactory, common.Big0, []byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
+			b.AddTx(env.legacyTx(b, 7, &balFactory, common.Big0, []byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
 		case 2:
 			// Reward-only empty block.
 		case 3:
@@ -356,81 +356,81 @@ func TestBlockAccessSet(t *testing.T) {
 			b.AddTx(env.setCodeTx(b, 6, common.Address{}, nil))
 		}
 	})
-	sets := checkBAS(t, chain, blocks)
+	lists := checkBAL(t, chain, blocks)
 
 	// Changes of InitializeState have index 0 and do not leak into tx 1.
-	a := findAccess(t, sets[0], addrs[0])
+	a := findAccess(t, lists[0], addrs[0])
 	require.Equal(t, []uint32{0, 1, 2}, balanceIndices(a))
-	require.Equal(t, uint32(0), findAccess(t, sets[0], basSystemAddr).StorageWrites[0].Changes[0].Index)
+	require.Equal(t, uint32(0), findAccess(t, lists[0], balSystemAddr).StorageWrites[0].Changes[0].Index)
 
 	// A new EOA and a new contract carry the whole account.
-	require.Len(t, findAccess(t, sets[0], newEOA).AccountChanges, 1)
-	c := findAccess(t, sets[0], contract)
+	require.Len(t, findAccess(t, lists[0], newEOA).AccountChanges, 1)
+	c := findAccess(t, lists[0], contract)
 	require.Len(t, c.AccountChanges, 1)
 	require.Len(t, c.CodeChanges, 1)
 	require.Len(t, c.StorageWrites, 2)
 
 	// Slot 1 cleared, slot 2 unchanged (read only), slot 3 set.
-	c = findAccess(t, sets[1], contract)
+	c = findAccess(t, lists[1], contract)
 	require.Empty(t, c.AccountChanges)
 	require.Len(t, c.StorageWrites, 2)
 	require.Equal(t, common.Hash{}, c.StorageWrites[0].Changes[0].Value)
 	require.Equal(t, []common.Hash{common.BigToHash(common.Big2)}, c.StorageReads)
 
 	// Key updates store the whole account, fee payer balances are recorded.
-	require.Equal(t, uint32(4), findAccess(t, sets[1], addrs[4]).AccountChanges[0].Index)
-	require.Equal(t, uint32(5), findAccess(t, sets[1], addrs[5]).AccountChanges[0].Index)
-	require.Equal(t, []uint32{3}, balanceIndices(findAccess(t, sets[0], addrs[3])))
-	require.Equal(t, []uint32{5}, balanceIndices(findAccess(t, sets[1], addrs[3])))
+	require.Equal(t, uint32(4), findAccess(t, lists[1], addrs[4]).AccountChanges[0].Index)
+	require.Equal(t, uint32(5), findAccess(t, lists[1], addrs[5]).AccountChanges[0].Index)
+	require.Equal(t, []uint32{3}, balanceIndices(findAccess(t, lists[0], addrs[3])))
+	require.Equal(t, []uint32{5}, balanceIndices(findAccess(t, lists[1], addrs[3])))
 
 	// Delegation changes code and code info, and writes EOA storage.
-	d := findAccess(t, sets[1], addrs[6])
+	d := findAccess(t, lists[1], addrs[6])
 	require.Len(t, d.CodeChanges, 1)
 	require.Len(t, d.AccountChanges, 1)
 	require.Len(t, d.StorageWrites, 1)
-	d = findAccess(t, sets[3], addrs[6])
+	d = findAccess(t, lists[3], addrs[6])
 	require.Empty(t, d.CodeChanges[0].Code)
 	require.Len(t, d.AccountChanges, 1)
 
 	// An account created and destroyed in the same tx is only accessed.
-	require.False(t, findAccess(t, sets[1], ephemeral).Changed())
+	require.False(t, findAccess(t, lists[1], ephemeral).Changed())
 
 	// Reward-only block: the reward is in FinalizeState, index len(txs)+1 = 1.
-	r := findAccess(t, sets[2], common.Address{0xbe, 2})
+	r := findAccess(t, lists[2], common.Address{0xbe, 2})
 	require.Equal(t, []uint32{1}, balanceIndices(r))
 }
 
-// TestBlockAccessSetSelfDestruct uses pre-Cancun SELFDESTRUCT to delete and
+// TestBlockAccessListSelfDestruct uses pre-Cancun SELFDESTRUCT to delete and
 // recreate a contract at the same address with CREATE2.
-func TestBlockAccessSetSelfDestruct(t *testing.T) {
-	env := newBASTestEnv(t, "shanghai", 2)
-	initCode := basInitCode(basDestructibleCode())
-	child := crypto.CreateAddress2(basFactory, [32]byte{}, crypto.Keccak256(initCode))
+func TestBlockAccessListSelfDestruct(t *testing.T) {
+	env := newBALTestEnv(t, "shanghai", 2)
+	initCode := balInitCode(balDestructibleCode())
+	child := crypto.CreateAddress2(balFactory, [32]byte{}, crypto.Keccak256(initCode))
 
 	chain, blocks := env.generate(4, func(i int, b *BlockGen) {
 		b.SetRewardbase(common.Address{0xbe, byte(i)})
 		switch i {
 		case 0:
-			b.AddTx(env.legacyTx(b, 1, &basFactory, common.Big0, initCode))
-			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, basSlotData(3, 0x33)))
+			b.AddTx(env.legacyTx(b, 1, &balFactory, common.Big0, initCode))
+			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, balSlotData(3, 0x33)))
 		case 1:
 			// Destroy, recreate with fresh storage, write again.
 			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, nil))
-			b.AddTx(env.legacyTx(b, 1, &basFactory, common.Big0, initCode))
-			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, basSlotData(4, 0x44)))
+			b.AddTx(env.legacyTx(b, 1, &balFactory, common.Big0, initCode))
+			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, balSlotData(4, 0x44)))
 		case 2:
 			// Destroy and leave it deleted.
 			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, nil))
 		}
 	})
-	sets := checkBAS(t, chain, blocks)
+	lists := checkBAL(t, chain, blocks)
 
-	c := findAccess(t, sets[1], child)
+	c := findAccess(t, lists[1], child)
 	require.Equal(t, []uint32{1}, c.Deleted)
 	require.Equal(t, []uint32{2}, c.StorageCleared)
 	require.Equal(t, uint32(2), c.AccountChanges[0].Index)
 
-	c = findAccess(t, sets[2], child)
+	c = findAccess(t, lists[2], child)
 	require.Equal(t, []uint32{1}, c.Deleted)
 	require.False(t, func() bool { _, ok := c.LastWriteIndex(); return ok }())
 
@@ -439,45 +439,45 @@ func TestBlockAccessSetSelfDestruct(t *testing.T) {
 	require.False(t, state.Exist(child))
 }
 
-// TestBlockAccessSetTampered checks that a modified set fails the root check.
-func TestBlockAccessSetTampered(t *testing.T) {
-	env := newBASTestEnv(t, "prague", 2)
+// TestBlockAccessListTampered checks that a modified list fails the root check.
+func TestBlockAccessListTampered(t *testing.T) {
+	env := newBALTestEnv(t, "prague", 2)
 	chain, blocks := env.generate(1, func(i int, b *BlockGen) {
 		b.AddTx(env.legacyTx(b, 0, &env.addrs[1], big.NewInt(params.KAIA), nil))
 	})
-	set := checkBAS(t, chain, blocks)[0]
+	list := checkBAL(t, chain, blocks)[0]
 
-	a := findAccess(t, set, env.addrs[1])
+	a := findAccess(t, list, env.addrs[1])
 	last := &a.BalanceChanges[len(a.BalanceChanges)-1]
 	last.Balance = new(big.Int).Add(last.Balance, common.Big1)
 
 	statedb, err := chain.StateAt(env.genesis.Root())
 	require.NoError(t, err)
-	require.NoError(t, statedb.ApplyBlockAccessSet(set))
+	require.NoError(t, statedb.ApplyBlockAccessList(list))
 	require.NotEqual(t, blocks[0].Root(), statedb.IntermediateRoot(true))
 }
 
-// TestBASRecorder records the sets while blocks are inserted and reads them back.
-func TestBASRecorder(t *testing.T) {
-	env := newBASTestEnv(t, "prague", 2)
+// TestBALRecorder records the lists while blocks are inserted and reads them back.
+func TestBALRecorder(t *testing.T) {
+	env := newBALTestEnv(t, "prague", 2)
 	dir := t.TempDir()
 	cacheConfig := &CacheConfig{
 		CacheSize:           512,
 		BlockInterval:       DefaultBlockInterval,
 		TriesInMemory:       DefaultTriesInMemory,
 		TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
-		BASRecordDir:        dir,
+		BALRecordDir:        dir,
 	}
 	chain, blocks := env.generateWithCache(cacheConfig, 5, func(i int, b *BlockGen) {
 		if i%2 == 0 {
 			b.AddTx(env.legacyTx(b, 1, &env.addrs[0], big.NewInt(params.KAIA), nil))
-			b.AddTx(env.legacyTx(b, 1, nil, common.Big0, basInitCode(basStoreCode())))
+			b.AddTx(env.legacyTx(b, 1, nil, common.Big0, balInitCode(balStoreCode())))
 		}
 	})
-	require.Zero(t, chain.bas.sinceLog.failures+chain.bas.stats.failures)
+	require.Zero(t, chain.bal.sinceLog.failures+chain.bal.stats.failures)
 	chain.Stop()
 
-	freezer, err := bas.OpenFreezer(dir, true)
+	freezer, err := bal.OpenFreezer(dir, true)
 	require.NoError(t, err)
 	defer freezer.Close()
 	require.Equal(t, uint64(len(blocks)+1), freezer.Next()) // genesis + blocks
@@ -487,14 +487,14 @@ func TestBASRecorder(t *testing.T) {
 	for _, block := range blocks {
 		enc, err := freezer.ReadRaw(block.NumberU64())
 		require.NoError(t, err)
-		require.NoError(t, verifyBAS(chain, block, chain.GetHeaderByHash(block.ParentHash()).Root, enc))
+		require.NoError(t, verifyBAL(chain, block, chain.GetHeaderByHash(block.ParentHash()).Root, enc))
 	}
 }
 
-// TestBASRecorderGap checks that a block after a gap is not recorded, and that
+// TestBALRecorderGap checks that a block after a gap is not recorded, and that
 // a block already stored is skipped.
-func TestBASRecorderGap(t *testing.T) {
-	r, err := newBASRecorder(t.TempDir())
+func TestBALRecorderGap(t *testing.T) {
+	r, err := newBALRecorder(t.TempDir())
 	require.NoError(t, err)
 	defer r.close(0)
 

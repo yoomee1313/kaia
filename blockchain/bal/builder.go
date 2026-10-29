@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-package bas
+package bal
 
 import (
 	"bytes"
@@ -25,7 +25,7 @@ import (
 )
 
 // Builder collects accesses during block execution and produces the canonical
-// BlockAccessSet. Changes must be added in non-decreasing index order; a change
+// BlockAccessList. Changes must be added in non-decreasing index order; a change
 // with the same index as the previous one of the same field replaces it, so
 // only the post value of each phase is kept.
 type Builder struct {
@@ -130,15 +130,15 @@ func (a *accountBuilder) trimSlots(idx uint32) {
 	}
 }
 
-// Build returns the set in canonical order.
-func (b *Builder) Build() *BlockAccessSet {
+// Build returns the list in canonical order.
+func (b *Builder) Build() *BlockAccessList {
 	addrs := make([]common.Address, 0, len(b.accounts))
 	for addr := range b.accounts {
 		addrs = append(addrs, addr)
 	}
 	slices.SortFunc(addrs, func(x, y common.Address) int { return bytes.Compare(x[:], y[:]) })
 
-	set := &BlockAccessSet{Accounts: make([]AccountAccess, 0, len(addrs))}
+	list := &BlockAccessList{Accounts: make([]AccountAccess, 0, len(addrs))}
 	for _, addr := range addrs {
 		a := b.accounts[addr]
 		acc := AccountAccess{
@@ -160,9 +160,9 @@ func (b *Builder) Build() *BlockAccessSet {
 			}
 		}
 		slices.SortFunc(acc.StorageReads, func(x, y common.Hash) int { return bytes.Compare(x[:], y[:]) })
-		set.Accounts = append(set.Accounts, acc)
+		list.Accounts = append(list.Accounts, acc)
 	}
-	return set
+	return list
 }
 
 type indexed interface {

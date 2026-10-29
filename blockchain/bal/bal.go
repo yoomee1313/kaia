@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package bas defines the block access set (BAS): the accounts and storage
+// Package bal defines the block access list (BAL): the accounts and storage
 // slots a block touched, with the post value of every change, in the style of
 // EIP-7928 block-level access lists.
 //
@@ -23,9 +23,9 @@
 //   - 1..n are the transactions of the block,
 //   - n+1 is FinalizeState (rewards).
 //
-// A BAS is not trusted: applying it to the parent state must reproduce the
-// state root of the block header, so a wrong set cannot pass that check.
-package bas
+// A BAL is not trusted: applying it to the parent state must reproduce the
+// state root of the block header, so a wrong list cannot pass that check.
+package bal
 
 import (
 	"bytes"
@@ -44,8 +44,8 @@ var (
 	errEmptySlotWrites  = errors.New("slot has no write")
 )
 
-// BlockAccessSet is the access set of one block. Accounts are sorted by address.
-type BlockAccessSet struct {
+// BlockAccessList is the access list of one block. Accounts are sorted by address.
+type BlockAccessList struct {
 	Accounts []AccountAccess
 }
 
@@ -100,14 +100,14 @@ type AccountChange struct {
 	Account []byte
 }
 
-// Encode returns the RLP encoding of the set.
-func (s *BlockAccessSet) Encode() ([]byte, error) {
+// Encode returns the RLP encoding of the list.
+func (s *BlockAccessList) Encode() ([]byte, error) {
 	return rlp.EncodeToBytes(s)
 }
 
-// Decode parses an RLP-encoded set and checks that it is in canonical order.
-func Decode(b []byte) (*BlockAccessSet, error) {
-	s := new(BlockAccessSet)
+// Decode parses an RLP-encoded list and checks that it is in canonical order.
+func Decode(b []byte) (*BlockAccessList, error) {
+	s := new(BlockAccessList)
 	if err := rlp.DecodeBytes(b, s); err != nil {
 		return nil, err
 	}
@@ -117,9 +117,9 @@ func Decode(b []byte) (*BlockAccessSet, error) {
 	return s, nil
 }
 
-// Validate checks that the set is in the canonical order the Builder produces,
+// Validate checks that the list is in the canonical order the Builder produces,
 // so that one block has exactly one encoding.
-func (s *BlockAccessSet) Validate() error {
+func (s *BlockAccessList) Validate() error {
 	for i := range s.Accounts {
 		a := &s.Accounts[i]
 		if i > 0 && bytes.Compare(s.Accounts[i-1].Address[:], a.Address[:]) >= 0 {

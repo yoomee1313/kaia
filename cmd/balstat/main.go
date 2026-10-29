@@ -14,12 +14,12 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-// basstat summarizes the BAS freezer written by --bas.record-dir: sizes (raw
+// balstat summarizes the BAL freezer written by --bal.record-dir: sizes (raw
 // and zstd) and per-block counts of accounts, slots and changes. It is an
 // experimental tool. The freezer is locked while a node writes to it, so run
 // it on a stopped node or on a copy.
 //
-//	basstat [-from N] [-to M] <bas-record-dir>
+//	balstat [-from N] [-to M] <bal-record-dir>
 package main
 
 import (
@@ -29,7 +29,7 @@ import (
 	"os"
 	"sort"
 
-	"github.com/kaiachain/kaia/blockchain/bas"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -46,10 +46,10 @@ func main() {
 	to := flag.Uint64("to", ^uint64(0), "end block (exclusive)")
 	flag.Parse()
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: basstat [-from N] [-to M] <bas-record-dir>")
+		fmt.Fprintln(os.Stderr, "usage: balstat [-from N] [-to M] <bal-record-dir>")
 		os.Exit(2)
 	}
-	freezer, err := bas.OpenFreezer(flag.Arg(0), true)
+	freezer, err := bal.OpenFreezer(flag.Arg(0), true)
 	if err != nil {
 		fatal(err)
 	}
@@ -63,11 +63,11 @@ func main() {
 			fatal(err)
 		}
 		for _, enc := range encs {
-			set, err := bas.Decode(enc)
+			list, err := bal.Decode(enc)
 			if err != nil {
 				fatal(fmt.Errorf("block %d: %w", number, err))
 			}
-			s.add(enc, set)
+			s.add(enc, list)
 			number++
 		}
 	}
@@ -77,14 +77,14 @@ func main() {
 	s.print()
 }
 
-func (s *stats) add(enc []byte, set *bas.BlockAccessSet) {
+func (s *stats) add(enc []byte, list *bal.BlockAccessList) {
 	s.blocks++
 	s.raw += uint64(len(enc))
 	s.sizes = append(s.sizes, len(enc))
 	s.all.Write(enc)
 
 	nonceChanged := false
-	for _, a := range set.Accounts {
+	for _, a := range list.Accounts {
 		s.accounts++
 		if a.Changed() {
 			s.changed++
