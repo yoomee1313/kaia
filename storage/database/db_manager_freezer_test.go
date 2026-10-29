@@ -400,6 +400,46 @@ func copyFreezerTestDir(t *testing.T, src, dst string) {
 	}
 }
 
+// TestFreezer_InterruptedRewind checks that frozen blocks above the head
+// header, left behind by a rewind that stopped before it truncated the
+// freezer, are removed when the database is opened, but not in read-only mode.
+func TestFreezer_InterruptedRewind(t *testing.T) {
+	const (
+		numBlocks = 20
+		threshold = 5
+		frozen    = numBlocks - threshold // blocks [0, head-threshold] are frozen
+		head      = 8
+	)
+	dir := t.TempDir()
+	dbc := newFreezerTestConfig(dir, true, threshold)
+	dbm := openFreezerTestDBM(t, dbc)
+	blocks := writeFreezerTestChain(t, dbm, numBlocks)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(frozen), dbm.FrozenBlocks())
+
+	// The rewind moved the head markers and stopped.
+	dbm.WriteHeadHeaderHash(blocks[head].hash())
+	dbm.WriteHeadBlockHash(blocks[head].hash())
+	dbm.Close()
+
+	readOnly := newFreezerTestConfig(dir, false, threshold)
+	readOnly.FreezerReadOnly = true
+	dbm = openFreezerTestDBM(t, readOnly)
+	assert.Equal(t, uint64(frozen), dbm.FrozenBlocks())
+	dbm.Close()
+
+	dbm = openFreezerTestDBM(t, dbc)
+	defer dbm.Close()
+	assert.Equal(t, uint64(head+1), dbm.FrozenBlocks())
+	for _, b := range blocks[:head+1] {
+		assertBlockReadable(t, dbm, b)
+	}
+	for _, b := range blocks[head+1 : frozen] {
+		assert.Empty(t, dbm.ReadCanonicalHash(b.header.Number.Uint64()), "block %d", b.header.Number)
+		assert.Nil(t, dbm.ReadHeader(b.hash(), b.header.Number.Uint64()), "block %d", b.header.Number)
+	}
+}
+
 // TestFreezer_RequiredAfterFreezing checks that a database whose blocks were
 // frozen cannot be opened without the freezer or with an empty freezer.
 func TestFreezer_RequiredAfterFreezing(t *testing.T) {

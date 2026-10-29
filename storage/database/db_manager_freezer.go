@@ -164,6 +164,16 @@ func (dbm *databaseManager) checkFreezer(readonly bool) error {
 		}
 	}
 
+	// A rewind moves the head markers before it truncates the freezer. If it was
+	// interrupted in between, the frozen blocks above the head header are left
+	// behind; remove them.
+	if hh := dbm.ReadHeaderNumber(dbm.ReadHeadHeaderHash()); !readonly && hh != nil && *hh+1 < frozen {
+		if err := dbm.TruncateFrozen(*hh + 1); err != nil {
+			return err
+		}
+		frozen = *hh + 1
+	}
+
 	// The key-value store must continue where the freezer ends. Otherwise the
 	// freezer is an older copy and the blocks in between are gone.
 	if head := dbm.ReadHeaderNumber(dbm.ReadHeadBlockHash()); head != nil && *head >= frozen {
@@ -246,6 +256,26 @@ func (dbm *databaseManager) FrozenBlocks() uint64 {
 func (dbm *databaseManager) PauseFreezer() (frozen uint64, resume func()) {
 	dbm.freezeLock.Lock()
 	return dbm.FrozenBlocks(), dbm.freezeLock.Unlock
+}
+
+// TruncateFrozen removes the frozen blocks [items, FrozenBlocks()) from the
+// freezer, so that a rewind can go below the freezer head. The caller must hold
+// PauseFreezer, so that no batch is frozen meanwhile. It does nothing if the
+// freezer is disabled or holds no block from items on.
+func (dbm *databaseManager) TruncateFrozen(items uint64) error {
+	frozen := dbm.FrozenBlocks()
+	if dbm.freezer == nil || items >= frozen {
+		return nil
+	}
+	if _, err := dbm.freezer.TruncateHead(items); err != nil {
+		return err
+	}
+	if err := dbm.freezer.SyncAncient(); err != nil {
+		return err
+	}
+	frozenBlocksGauge.Update(int64(items))
+	logger.Warn("Truncated block freezer", "from", frozen, "to", items)
+	return nil
 }
 
 // readAncientHash returns the frozen canonical hash of the given block number,

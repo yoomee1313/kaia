@@ -318,19 +318,28 @@ func testSetHeadEarlyExit(t *testing.T, tt *rewindTest) {
 	assert.Nil(t, chain.SetHead(tt.setheadBlock))
 }
 
-// frozenTestDB reports a fixed number of frozen blocks.
+// frozenTestDB reports a fixed number of frozen blocks and records the
+// truncation of the freezer.
 type frozenTestDB struct {
 	database.DBManager
-	frozen uint64
+	frozen      uint64
+	truncatedTo uint64
 }
 
 func (db *frozenTestDB) FrozenBlocks() uint64 { return db.frozen }
 
 func (db *frozenTestDB) PauseFreezer() (uint64, func()) { return db.frozen, func() {} }
 
-// TestSetHeadBelowFreezerToFindState checks that SetHead refuses a rewind that
-// has to go below the frozen blocks to find a block with state, and leaves the
-// chain untouched.
+func (db *frozenTestDB) TruncateFrozen(items uint64) error {
+	if items < db.frozen {
+		db.frozen, db.truncatedTo = items, items
+	}
+	return nil
+}
+
+// TestSetHeadBelowFreezerToFindState checks that a rewind that has to go below
+// the frozen blocks to find a block with state truncates the freezer down to
+// the block with state.
 func TestSetHeadBelowFreezerToFindState(t *testing.T) {
 	var (
 		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
@@ -359,19 +368,14 @@ func TestSetHeadBelowFreezerToFindState(t *testing.T) {
 	}
 
 	db.frozen = 5 // blocks [0, 4] are frozen
-	assert.ErrorContains(t, chain.SetHead(5), "frozen")
-	assert.Equal(t, uint64(8), chain.CurrentBlock().NumberU64())
-	for _, b := range blocks {
-		assert.NotNil(t, chain.GetTd(b.Hash(), b.NumberU64()), "td %d", b.NumberU64())
-		assert.Equal(t, b.Hash(), chain.GetBlockByNumber(b.NumberU64()).Hash())
-	}
-
-	db.frozen = 0
-	assert.NoError(t, chain.SetHead(5))
+	require.NoError(t, chain.SetHead(5))
 	assert.Equal(t, uint64(2), chain.CurrentBlock().NumberU64())
+	assert.Equal(t, uint64(2), chain.CurrentHeader().Number.Uint64())
+	assert.Equal(t, uint64(3), db.truncatedTo)
 }
 
-// TestSetHeadBelowFreezer checks that SetHead refuses to delete frozen blocks.
+// TestSetHeadBelowFreezer checks that SetHead truncates the freezer when it
+// rewinds below the frozen blocks, and leaves it alone otherwise.
 func TestSetHeadBelowFreezer(t *testing.T) {
 	db := &frozenTestDB{DBManager: database.NewMemoryDBManager()}
 	genesis := new(Genesis).MustCommit(db)
@@ -385,7 +389,11 @@ func TestSetHeadBelowFreezer(t *testing.T) {
 	require.NoError(t, err)
 
 	db.frozen = 5 // blocks [0, 4] are frozen
-	assert.ErrorContains(t, chain.SetHead(3), "frozen")
-	assert.NoError(t, chain.SetHead(4))
-	assert.Equal(t, uint64(4), chain.CurrentBlock().NumberU64())
+	require.NoError(t, chain.SetHead(6))
+	assert.Equal(t, uint64(5), db.frozen)
+	assert.Zero(t, db.truncatedTo)
+
+	require.NoError(t, chain.SetHead(3))
+	assert.Equal(t, uint64(3), chain.CurrentBlock().NumberU64())
+	assert.Equal(t, uint64(4), db.truncatedTo)
 }
