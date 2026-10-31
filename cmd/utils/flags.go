@@ -585,6 +585,13 @@ var (
 		EnvVars:  []string{"KLAYTN_STATE_LIVE_PRUNING_RETENTION", "KAIA_STATE_LIVE_PRUNING_RETENTION"},
 		Category: "STATE",
 	}
+	StateArchiveFlag = &cli.BoolFlag{
+		Name:     "state.archive",
+		Usage:    "(experimental) Also append every committed trie node to the state archive under datadir.ancient, so that the state pruned by live pruning stays readable. Requires state.live-pruning and must be enabled before the genesis block is written",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_STATE_ARCHIVE", "KAIA_STATE_ARCHIVE"},
+		Category: "STATE",
+	}
 	FlatTrieFlag = &cli.BoolFlag{
 		Name:     "state.experimental-flat-trie",
 		Usage:    "(experimental) Enable flat trie scheme",

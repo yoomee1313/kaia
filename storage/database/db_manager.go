@@ -321,6 +321,14 @@ type DBManager interface {
 	// TruncateFrozen removes the frozen blocks from number items on. The caller
 	// must hold PauseFreezer.
 	TruncateFrozen(items uint64) error
+
+	// StateArchiveEnabled reports whether the state archive is open, so that
+	// trie nodes deleted by live pruning can still be read.
+	StateArchiveEnabled() bool
+	// AppendStateArchive archives the trie nodes that the commit of the given
+	// block is about to write. It must return before the nodes are written to
+	// the key-value store.
+	AppendStateArchive(block uint64, nodes []ArchiveNode) error
 }
 
 type DBEntryType uint8
@@ -458,6 +466,10 @@ type databaseManager struct {
 	freezerWg        sync.WaitGroup
 	freezerCloseOnce sync.Once
 	freezeLock       sync.Mutex // Held by a freeze round and by PauseFreezer
+
+	// State archive (trie node freezer). nil if disabled.
+	stateArchive          *stateArchive
+	stateArchiveCloseOnce sync.Once
 }
 
 func NewMemoryDBManager() DBManager {
@@ -505,7 +517,10 @@ type DBConfig struct {
 	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer
 	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
 	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
-	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer is opened for reads only
+	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer (and state archive) is opened for reads only
+
+	// State archive related configurations
+	EnableStateArchive bool // If true, every committed trie node is also appended to the state archive under AncientDir
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -633,6 +648,9 @@ func NewDBManager(dbc *DBConfig) DBManager {
 		if dbc.EnableFreezer {
 			logger.Warn("Freezer is not supported with a single database yet, disabling it")
 		}
+		if dbc.EnableStateArchive {
+			logger.Warn("State archive is not supported with a single database yet, disabling it")
+		}
 		if dbm, err := singleDatabaseDBManager(dbc); err != nil {
 			logger.Crit("Failed to create a single database", "DBType", dbc.DBType, "err", err)
 		} else {
@@ -657,6 +675,9 @@ func NewDBManager(dbc *DBConfig) DBManager {
 		dbm.migrationOldDBPath = dbm.getMigrationOldDBPath()
 		if err := dbm.openFreezer(); err != nil {
 			logger.Crit("Failed to open block freezer", "err", err)
+		}
+		if err := dbm.openStateArchive(); err != nil {
+			logger.Crit("Failed to open state archive", "err", err)
 		}
 		return dbm
 	}
@@ -1075,6 +1096,7 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 func (dbm *databaseManager) Close() {
 	// Stop the freeze loop before the key-value stores are closed.
 	dbm.closeFreezer()
+	dbm.closeStateArchive()
 
 	dbm.lockClose.Lock()
 	defer dbm.lockClose.Unlock()
@@ -2050,7 +2072,16 @@ func (dbm *databaseManager) ReadPreimageFromNew(hash common.Hash) []byte {
 
 func (dbm *databaseManager) ReadTrieNodeFromOld(hash common.ExtHash) ([]byte, error) {
 	db := dbm.getDatabase(StateTrieDB)
-	return db.Get(TrieNodeKey(hash))
+	val, err := db.Get(TrieNodeKey(hash))
+	if err == nil || dbm.stateArchive == nil {
+		return val, err
+	}
+	// The node may have been deleted by live pruning. Every committed node is
+	// in the state archive.
+	if node := dbm.stateArchive.lookup(hash); node != nil {
+		return node, nil
+	}
+	return val, err
 }
 
 func (dbm *databaseManager) HasTrieNodeFromOld(hash common.ExtHash) (bool, error) {

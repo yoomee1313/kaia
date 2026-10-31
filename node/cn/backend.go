@@ -322,6 +322,11 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 		chainDB.WritePruningEnabled()
 	}
 
+	// The state archive relies on the unique node keys of live pruning.
+	if chainDB.StateArchiveEnabled() && !chainDB.ReadPruningEnabled() {
+		return nil, errors.New("the state archive requires live pruning (--state.live-pruning)")
+	}
+
 	// Live pruning is enabled according to the flag in database
 	// regardless of the command line flag --state.live-pruning
 	// But live pruning is disabled when --state.live-pruning-retention=0
@@ -699,6 +704,7 @@ func CreateDB(ctx *node.ServiceContext, config *Config, name string) database.DB
 		LevelDBBufferPool: config.LevelDBBufferPool, EnableDBPerfMetrics: config.EnableDBPerfMetrics, RocksDBConfig: &config.RocksDBConfig, DynamoDBConfig: &config.DynamoDBConfig,
 		UseFlatTrie:   config.UseFlatTrie,
 		EnableFreezer: config.EnableFreezer, AncientDir: config.AncientDir, FreezerThreshold: config.FreezerThreshold,
+		EnableStateArchive: config.StateArchive,
 	}
 	return ctx.OpenDatabase(dbc)
 }

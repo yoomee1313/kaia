@@ -208,6 +208,7 @@ var FlagGroups = []FlagGroup{
 			TriesInMemoryFlag,
 			LivePruningFlag,
 			LivePruningRetentionFlag,
+			StateArchiveFlag,
 		},
 	},
 	{

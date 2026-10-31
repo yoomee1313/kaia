@@ -137,6 +137,7 @@ type Config struct {
 	TriesInMemory        uint64
 	LivePruning          bool
 	LivePruningRetention uint64
+	StateArchive         bool
 	SenderTxHashIndexing bool
 	ParallelDBWrite      bool
 	TrieNodeCacheConfig  statedb.TrieNodeCacheConfig
