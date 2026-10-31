@@ -495,7 +495,8 @@ func (bc *BlockChain) SetHead(head uint64) error {
 	// With the live pruning enabled, an attempt to SetHead into a state-pruned block number
 	// may result in an infinite loop, trying to find the existing block (probably the genesis block).
 	// If the target `head` is below the surviving block numbers, SetHead early exits with an error.
-	if lastPruned, err := bc.db.ReadLastPrunedBlockNumber(); err == nil {
+	// With the state archive, pruned trie nodes are read from the archive, so the state survives.
+	if lastPruned, err := bc.db.ReadLastPrunedBlockNumber(); err == nil && !bc.db.StateArchiveEnabled() {
 		if head <= lastPruned {
 			return fmt.Errorf("[SetHead] Cannot rewind to a state-pruned block number. lastPrunedBlock=%d targetHead=%d",
 				lastPruned, head)

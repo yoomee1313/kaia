@@ -5,8 +5,9 @@ key-value state DB on SSD holds only the live state and a recent window, as a
 live-pruning node does today. Old trie nodes go to append-only freezer files on
 HDD. Consensus is not affected.
 
-Status: design only, no code yet. Numbers marked *(estimate)* must be measured
-first (see "Phase 0").
+Status: Phase 1 PoC implemented (section 7 lists where the code differs from
+this design). Numbers marked *(estimate)* must still be measured (see
+"Phase 0").
 
 ## 1. What live pruning already gives us
 
@@ -126,12 +127,15 @@ re-execution as today, or later from BAL.
 the block freezer does for blocks:
 
 1. KV `Get` (unchanged). A hit returns.
-2. Zero counter → exception index only.
-3. Exception index `Get` (bloom filter makes a miss cheap).
-4. Find the chunk: binary search on an in-memory sample of `first` (every
-   1024th chunk *(to tune)*), then on the matching 8 KB slice of the `first`
-   table.
-5. Read the chunk, find the counter, check the 32-byte hash, return the RLP.
+2. Unless the counter is zero, find the chunk: binary search on an in-memory
+   sample of `first` (every 1024th chunk *(to tune)*), then on the matching
+   8 KB slice of the `first` table. Read the chunk, find the counter, check the
+   32-byte hash, return the RLP.
+3. Otherwise (zero counter, or not in that chunk), exception index `Get`, then
+   the same chunk read.
+
+The chunk search comes first because exceptions are rare, so the common read
+needs no extra KV lookup.
 
 Expected cost on HDD *(estimate)*: 2–3 seeks per node, about 10 nodes per
 account lookup, so ~0.2–0.3 s for a cold historical `getBalance`. Putting the
@@ -154,17 +158,32 @@ a dedicated small DB. It holds:
 - nodes that arrive out of counter order. Within one commit there are none,
   because the batch is sorted. Across commits there should be none when blocks
   are committed one after another. A clock going backwards between restarts
-  could cause some. Phase 0 measures the rate.
+  could cause some, and so can `Cap`, which flushes nodes in insertion order
+  rather than counter order. Phase 0 measures the rate
+  (`statearchive/exception`).
+
+Exceptions are stored in the same chunks as the in-order nodes of their
+append; they sort first because their counters are lower. The `first` value
+of a chunk is the counter of its first in-order node. A chunk that holds
+exceptions only gets the highest archived counter plus one. So `first` never
+decreases, and an in-order node is always in the last chunk whose `first` is
+not above its counter. An exception that is already indexed (e.g. the root of
+a block that changed no state) is not stored again.
 
 ### 3.5 Metadata and checks (MiscDB)
 
-- `StateArchiveDir`: the directory, recorded on the first append. Opening a DB
-  that has one without the archive fails, the same rule as the block freezer.
-- `StateArchiveStart`: the first block whose state is fully archived. States
-  older than `StateArchiveStart - retention` were pruned before the archive was
-  turned on. Reads of those states fail as they do today.
-- `StateArchiveLastCounter`: rebuilt from the last chunk on open. It is not
-  stored separately.
+- `StateArchiveDir`: the directory, recorded when the archive is first opened.
+  Opening a DB that has one without the archive fails, the same rule as the
+  block freezer. Offline tools (`FreezerReadOnly`) open it read-only.
+- The archive can only be turned on before the genesis block is written
+  (`ken init --state.archive`, or the first start). A node that was committed
+  before would never be archived, and a later state that still uses it would
+  lose it to pruning. So there is no `StateArchiveStart`: the archive holds
+  every state from the genesis.
+- `StateArchiveChunks`: the chunk count, written with the exception index
+  after each append. An archive with fewer chunks (an older copy, or an empty
+  directory) is refused. More chunks are fine (a crash after the fsync).
+- The last counter and the samples are rebuilt from the freezer on open.
 - On open, the freezer repairs torn appends itself. Nothing else has to be
   repaired, because KV writes come after the archive append.
 
@@ -251,3 +270,50 @@ The two do not exclude each other: the node archive at a checkpoint interval
 
 **Phase 2**: background fsync with repair walk, freezer index files on SSD,
 an archive read cache, and the `ken import` trial on Kairos.
+
+## 7. Phase 1 PoC
+
+Code: `storage/database/state_archive.go` (chunks, append, lookup),
+`storage/database/db_manager_state_archive.go` (open, checks, DBManager
+methods), the hook in `storage/statedb/database.go` (`writeArchivedNodes`,
+used by `writeBatchNodes` and `Cap`), and the `--state.archive` flag
+(`ken` and `ken init`). The node refuses to start with the archive on a
+database without live pruning. State migration already refuses live pruning.
+
+Where it differs from the design above:
+
+- Read order and exception storage: see 3.3 and 3.4.
+- `block` holds the block of the `Commit`, or, for a `Cap` flush, the block of
+  the last `Commit` before it.
+- SetHead below the prune window is allowed when the archive is open
+  (`BlockChain.SetHead`). Pruning marks of the abandoned blocks may later
+  delete nodes the new chain still uses from KV; the archive still has them.
+
+Tests: `storage/database/state_archive_test.go` (chunk format, in-order and
+out-of-order appends over many chunks and sample groups, reopen, a crash
+between the archive append and the KV write, misuse checks) and
+`blockchain/blockchain_state_archive_test.go` (live pruning with retention 3
+over 20 blocks; every state, account and storage trie, is read back after
+its roots were deleted from KV; a merkle proof at a pruned block; a counter
+reset backwards in the middle of the chain; SetHead below the prune window
+and new blocks on top).
+
+Not handled yet:
+
+- The exception index and the chunk count are written without fsync. After an
+  OS crash (not a process crash), KV may keep a node whose exception entry was
+  lost. This needs a synced MiscDB write, or a repair walk on open.
+- One fsync per append is on the commit path (every block in archive mode).
+- On open, the samples are rebuilt by reading one `first` item per sample
+  (about 500,000 reads for a 35 TB archive). They should be persisted.
+- No read cache for chunks, and no placement of `first` on SSD.
+- `db-migration` does not copy the archive. The copied MiscDB keeps the
+  `StateArchiveDir` marker, so the destination refuses to open instead of
+  losing history.
+- Other node writers (`WriteTrieNode`, the stack trie used by sync) bypass the
+  archive. Snap sync is disabled; fast sync with the archive is untested.
+- Found on the way, not caused by the archive: with live pruning,
+  `Trie.Prove` writes the nodes below the root under their ExtHash, so
+  `VerifyProof` with that proof DB fails (eth_getProof only returns the node
+  list, so RPC is not affected). `doGetProof` opens the storage trie with the
+  unextended storage root, which looks wrong for a live-pruning DB.
