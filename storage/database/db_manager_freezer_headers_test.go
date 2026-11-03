@@ -116,3 +116,70 @@ func TestFreezer_DerivedTd(t *testing.T) {
 	// Not for another hash at a frozen height.
 	assert.Nil(t, dbm.ReadTd(common.HexToHash("0x01"), 4))
 }
+
+func readTxLookupRaw(t *testing.T, dbm *databaseManager, txHash common.Hash) (full bool, slim bool) {
+	data, _ := dbm.getDatabase(TxLookUpEntryDB).Get(TxLookupKey(txHash))
+	require.NotEmpty(t, data)
+	var entry TxLookupEntry
+	if rlp.DecodeBytes(data, &entry) == nil {
+		return true, false
+	}
+	var s slimTxLookupEntry
+	require.NoError(t, rlp.DecodeBytes(data, &s))
+	return false, true
+}
+
+// TestFreezer_SlimTxLookups checks that a node with the freezer writes tx
+// lookup entries without the block hash, that the freezer rewrites the full
+// entries of the blocks it freezes, and that both kinds resolve.
+func TestFreezer_SlimTxLookups(t *testing.T) {
+	dir := t.TempDir()
+	// Without the freezer: full entries.
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(dir, false, 0))
+	blocks := writeFreezerTestChain(t, dbm, 8)
+	for _, b := range blocks {
+		dbm.WriteTxLookupEntries(types.NewBlockWithHeader(b.header).WithBody(b.body.Transactions))
+		full, _ := readTxLookupRaw(t, dbm, b.body.Transactions[0].Hash())
+		require.True(t, full)
+	}
+	dbm.Close()
+
+	// With the freezer: new entries are slim, frozen blocks' entries are rewritten.
+	dbm = openFreezerTestDBM(t, newFreezerTestConfig(dir, true, 2))
+	defer dbm.Close()
+	parent := blocks[len(blocks)-1].hash()
+	for i := 8; i < 10; i++ {
+		b := genFreezerTestBlock(t, uint64(i), parent, "canonical")
+		writeFreezerTestBlock(dbm, b, true)
+		dbm.WriteTxLookupEntries(types.NewBlockWithHeader(b.header).WithBody(b.body.Transactions))
+		blocks = append(blocks, b)
+		parent = b.hash()
+	}
+	dbm.WriteHeadBlockHash(parent)
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(8), dbm.FrozenBlocks())
+
+	for _, b := range blocks[1:] {
+		hash, number := b.hash(), b.header.Number.Uint64()
+		txHash := b.body.Transactions[0].Hash()
+		_, slim := readTxLookupRaw(t, dbm, txHash)
+		// Blocks 1-7 were frozen and rewritten; 8 and 9 were written slim.
+		assert.True(t, slim, "slim entry %d", number)
+
+		gotHash, gotNumber, index := dbm.ReadTxLookupEntry(txHash)
+		assert.Equal(t, hash, gotHash, "block hash %d", number)
+		assert.Equal(t, number, gotNumber)
+		assert.Equal(t, uint64(0), index)
+		tx, _, _, _ := dbm.ReadTxAndLookupInfo(txHash)
+		if assert.NotNil(t, tx, "tx %d", number) {
+			assert.Equal(t, txHash, tx.Hash())
+		}
+	}
+
+	// A slim entry whose block does not hold the transaction resolves to nothing.
+	stale := common.HexToHash("0x5a1e")
+	data, _ := rlp.EncodeToBytes(slimTxLookupEntry{BlockIndex: 3, Index: 0})
+	require.NoError(t, dbm.getDatabase(TxLookUpEntryDB).Put(TxLookupKey(stale), data))
+	gotHash, _, _ := dbm.ReadTxLookupEntry(stale)
+	assert.Equal(t, common.Hash{}, gotHash)
+}

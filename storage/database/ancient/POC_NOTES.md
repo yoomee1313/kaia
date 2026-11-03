@@ -18,8 +18,13 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   left out because Kaia has no BAL tables and no memory freezer.
 - The chain freezer has four tables, all keyed by block number:
   `hashes` (raw, no compression), `headers`, `bodies` and `receipts` (snappy).
-  Headers and bodies are stored exactly as they are in the key-value store
-  (header RLP, body RLP). Receipts leave out what can be derived
+  Bodies are stored exactly as they are in the key-value store. Headers leave
+  out the parent hash and the number (`db_manager_freezer_headers.go`): a
+  frozen header is `0x02` followed by the RLP list of the other fields, and on
+  read the frozen hash of the previous block and the item number are put back,
+  which gives the key-value RLP byte for byte (checked at freeze time; the
+  genesis and any header that does not round-trip are stored unchanged). That
+  saves about 37 bytes per header. Receipts leave out what can be derived
   (`db_manager_freezer_receipts.go`). The key-value form repeats the block and
   transaction data: every receipt holds its tx hash and bloom, and every log
   holds the block number, block hash, tx hash, tx index and log index. A frozen
@@ -37,7 +42,10 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   Deriving a bloom costs about 4 µs for a receipt with one log and three topics
   and 34 µs with eight logs (keccak dominates), so a block of 300 receipts adds
   1–3 ms to a frozen read, less than one HDD seek.
-  Total difficulty is not frozen.
+  Total difficulty is not frozen. A frozen block's total blockscore is deleted
+  from the key-value store if it is number+1 (every block up to it has
+  blockscore 1, as with Kaia's BFT), and `ReadTd` returns number+1 for a frozen
+  canonical block without one. Other values stay in the key-value store.
 
 **DBManager integration** (`storage/database/db_manager_freezer.go`)
 - `NewDBManager` opens the freezer when `DBConfig.EnableFreezer` is set, at
@@ -55,8 +63,17 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   counted in `ancient/readerror`, and the item is reported as missing.
 - Writes are unchanged; new blocks still go to the key-value store.
 - Kept in the key-value store: the genesis block, the `H`+hash to number
-  mapping (needed by `ReadHeaderNumber`), total difficulty, and tx lookup
-  entries.
+  mapping (needed by `ReadHeaderNumber`), total difficulty unless it is
+  number+1, and tx lookup entries.
+- Tx lookup entries leave out the block hash on a node with the freezer:
+  `[number, index]` instead of `[hash, number, index]`, about 33 bytes less per
+  transaction on the SSD. The hash is the canonical hash of the number, and the
+  canonical block must hold the transaction at that index (an entry that
+  outlived a reorg resolves to nothing). The freeze loop rewrites the full
+  entries of the blocks it freezes, so a chain synced before the freezer was
+  enabled saves the space too. Both forms are read; older versions cannot read
+  the slim form, which does not matter since they cannot open a database with
+  frozen blocks either.
 - Read-only mode (`DBConfig.FreezerReadOnly`) is for offline tools: if blocks
   were frozen, the freezer is opened read-only from `--datadir.ancient` or the
   directory recorded in MiscDB, without `--db.freezer` and without a freeze
