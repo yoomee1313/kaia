@@ -90,3 +90,29 @@ func TestFreezer_DerivedHeaders(t *testing.T) {
 		assert.Equal(t, b.hash(), dbm.ReadHeader(b.hash(), number).Hash(), "header %d", number)
 	}
 }
+
+// TestFreezer_DerivedTd checks that the total blockscore of a frozen block is
+// deleted from the key-value store only if it is number+1.
+func TestFreezer_DerivedTd(t *testing.T) {
+	dbm := openFreezerTestDBM(t, newFreezerTestConfig(t.TempDir(), true, 2))
+	defer dbm.Close()
+	blocks := writeFreezerTestChain(t, dbm, 8)
+	// Block 3 has another total blockscore.
+	odd := blocks[3]
+	dbm.WriteTd(odd.hash(), 3, big.NewInt(100))
+	triggerFreeze(t, dbm)
+	require.Equal(t, uint64(6), dbm.FrozenBlocks())
+
+	for _, b := range blocks[1:6] {
+		hash, number := b.hash(), b.header.Number.Uint64()
+		want := new(big.Int).SetUint64(number + 1)
+		if number == 3 {
+			want = big.NewInt(100)
+		}
+		assert.Equal(t, number == 3, hasKV(dbm, MiscDB, headerTDKey(number, hash)), "kv td %d", number)
+		dbm.cm.deleteTdCache(hash)
+		assert.Equal(t, want, dbm.ReadTd(hash, number), "td %d", number)
+	}
+	// Not for another hash at a frozen height.
+	assert.Nil(t, dbm.ReadTd(common.HexToHash("0x01"), 4))
+}
