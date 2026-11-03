@@ -18,8 +18,15 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   left out because Kaia has no BAL tables and no memory freezer.
 - The chain freezer has four tables, all keyed by block number:
   `hashes` (raw, no compression), `headers`, `bodies` and `receipts` (snappy).
-  Items are stored exactly as they are in the key-value store (header RLP, body
-  RLP, `[]*ReceiptForStorage` RLP), so moving them needs no re-encoding.
+  Headers and bodies are stored exactly as they are in the key-value store
+  (header RLP, body RLP). Receipts are stored without their bloom filters
+  (`db_manager_freezer_receipts.go`): a slim item is `0x01` followed by the RLP
+  of the storage receipts minus the bloom, and the blooms are derived from the
+  logs on read. That saves 259 bytes per receipt. If a stored bloom does not
+  match its logs, the item is frozen unchanged; both formats are read.
+  Deriving a bloom costs about 4 µs for a receipt with one log and three topics
+  and 34 µs with eight logs (keccak dominates), so a block of 300 receipts adds
+  1–3 ms to a frozen read, less than one HDD seek.
   Total difficulty is not frozen.
 
 **DBManager integration** (`storage/database/db_manager_freezer.go`)
@@ -189,6 +196,5 @@ between the fsync and the delete.
   ported but unused.
 - **Per-type disk placement**: `--datadir.ancient` is a stop-gap until the
   shared tiered-storage module provides placement.
-- **Observed, unrelated to the freezer**: `ReadBodyRLP` and `ReadBodyRLPByHash`
-  have an inverted `err != nil` check when re-encoding a cached body, and the
-  header cache ignores the block number.
+- **Observed, unrelated to the freezer**: the header cache ignores the block
+  number.

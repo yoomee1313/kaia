@@ -487,7 +487,7 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
 				return fmt.Errorf("can't write body to freezer: %v", err)
 			}
-			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, receipts); err != nil {
+			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(number, receipts)); err != nil {
 				return fmt.Errorf("can't write receipts to freezer: %v", err)
 			}
 			hashes = append(hashes, hash)

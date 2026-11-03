@@ -1587,14 +1587,10 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 		return nil
 	}
 	// Convert the revceipts from their database form to their internal representation
-	storageReceipts := []*types.ReceiptForStorage{}
-	if err := rlp.DecodeBytes(data, &storageReceipts); err != nil {
+	receipts, err := decodeReceipts(data)
+	if err != nil {
 		logger.Error("Invalid receipt array RLP", "blockHash", blockHash, "err", err)
 		return nil
-	}
-	receipts := make(types.Receipts, len(storageReceipts))
-	for i, receipt := range storageReceipts {
-		receipts[i] = (*types.Receipt)(receipt)
 	}
 	return receipts
 }
