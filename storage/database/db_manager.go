@@ -1591,7 +1591,7 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 		return nil
 	}
 	// Convert the revceipts from their database form to their internal representation
-	receipts, err := decodeReceipts(data)
+	receipts, err := decodeReceipts(data, blockHash, number, func() *types.Body { return dbm.ReadBody(blockHash, number) })
 	if err != nil {
 		logger.Error("Invalid receipt array RLP", "blockHash", blockHash, "err", err)
 		return nil
