@@ -1307,7 +1307,7 @@ func (dbm *databaseManager) ReadHeaderRLP(hash common.Hash, number uint64) rlp.R
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerKey(number, hash))
 	if len(data) == 0 {
-		data = dbm.readAncient(ancient.ChainFreezerHeaderTable, hash, number)
+		data = dbm.readFrozenHeader(hash, number)
 	}
 	return data
 }
