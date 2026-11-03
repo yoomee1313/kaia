@@ -61,7 +61,7 @@ func genSlimTestReceipts() types.Receipts {
 	return receipts
 }
 
-func encodeStorageReceipts(t *testing.T, receipts types.Receipts) []byte {
+func storageReceiptsRLP(t *testing.T, receipts types.Receipts) []byte {
 	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
 	for i, r := range receipts {
 		storageReceipts[i] = (*types.ReceiptForStorage)(r)
@@ -75,7 +75,7 @@ func encodeStorageReceipts(t *testing.T, receipts types.Receipts) []byte {
 // restores the receipts exactly.
 func TestFrozenReceipts_Slim(t *testing.T) {
 	receipts := genSlimTestReceipts()
-	data := encodeStorageReceipts(t, receipts)
+	data := storageReceiptsRLP(t, receipts)
 
 	slim, err := encodeFrozenReceipts(data)
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestFrozenReceipts_Slim(t *testing.T) {
 	assert.Equal(t, receipts, decoded)
 
 	// A block without transactions.
-	empty := encodeStorageReceipts(t, types.Receipts{})
+	empty := storageReceiptsRLP(t, types.Receipts{})
 	slim, err = encodeFrozenReceipts(empty)
 	require.NoError(t, err)
 	decoded, err = decodeReceipts(slim)
@@ -106,7 +106,7 @@ func TestFrozenReceipts_Slim(t *testing.T) {
 func TestFrozenReceipts_BloomMismatch(t *testing.T) {
 	receipts := genSlimTestReceipts()
 	receipts[2].Bloom[0] ^= 0x80
-	data := encodeStorageReceipts(t, receipts)
+	data := storageReceiptsRLP(t, receipts)
 
 	_, err := encodeFrozenReceipts(data)
 	assert.ErrorIs(t, err, errSlimReceiptsBloom)

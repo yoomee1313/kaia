@@ -497,6 +497,13 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 	if err != nil {
 		return err
 	}
+	dbm.finishFreeze(first, hashes)
+	return nil
+}
+
+// finishFreeze flushes the blocks just appended to the freezer, starting at
+// first, and then deletes them from the key-value store.
+func (dbm *databaseManager) finishFreeze(first uint64, hashes []common.Hash) {
 	// Batch of blocks have been frozen, flush them before wiping from key-value store
 	if err := dbm.freezer.SyncAncient(); err != nil {
 		logger.Crit("Failed to flush frozen tables", "err", err)
@@ -508,7 +515,97 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 	if err := dbm.deleteFrozenBlocks(first, hashes); err != nil {
 		logger.Crit("Failed to delete frozen blocks", "err", err)
 	}
-	return nil
+}
+
+// FreezeSyncedBlocks writes blocks of a fast sync straight into the freezer, so
+// that they are not written to the key-value store and moved there later, as
+// geth does below its ancient limit. It takes the leading blocks that continue
+// the freezer, are canonical, and are more than FreezerThreshold blocks below
+// headHeader, and returns how many it took. Header chain rollbacks during a
+// sync stay far closer to the head header than the threshold. Blocks in the
+// key-value store between the freezer head and the first given block are
+// frozen first. The freezer takes nothing if it is disabled or read-only, or if
+// the blocks do not continue it; the caller then writes them to the key-value
+// store as before.
+func (dbm *databaseManager) FreezeSyncedBlocks(blocks types.Blocks, receipts []types.Receipts, headHeader uint64) (int, error) {
+	if dbm.freezer == nil || dbm.config.FreezerReadOnly || len(blocks) == 0 || headHeader <= dbm.config.FreezerThreshold {
+		return 0, nil
+	}
+	limit := headHeader - dbm.config.FreezerThreshold
+	first := blocks[0].NumberU64()
+	if first == 0 || first > limit {
+		return 0, nil
+	}
+
+	dbm.freezeLock.Lock()
+	defer dbm.freezeLock.Unlock()
+
+	// Catch up with the blocks synced to the key-value store before the head
+	// header was far enough ahead.
+	for frozen := dbm.FrozenBlocks(); frozen < first; frozen = dbm.FrozenBlocks() {
+		last := min(first-1, frozen+freezerBatchLimit-1)
+		if err := dbm.freezeRange(frozen, last); err != nil {
+			logger.Warn("Cannot freeze synced blocks", "from", frozen, "to", last, "err", err)
+			return 0, nil
+		}
+		frozenBlocksGauge.Update(int64(last + 1))
+		logger.Info("Froze chain segment", "from", frozen, "to", last)
+	}
+	if dbm.FrozenBlocks() != first {
+		return 0, nil
+	}
+
+	hdb := dbm.getDatabase(headerDB)
+	n := 0
+	for n < len(blocks) {
+		block := blocks[n]
+		number := block.NumberU64()
+		if number != first+uint64(n) || number > limit {
+			break
+		}
+		if canon, _ := hdb.Get(headerHashKey(number)); !bytes.Equal(canon, block.Hash().Bytes()) {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	hashes := make([]common.Hash, n)
+	_, err := dbm.freezer.ModifyAncients(func(op ancient.AncientWriteOp) error {
+		for i, block := range blocks[:n] {
+			number, hash := block.NumberU64(), block.Hash()
+			header, err := rlp.EncodeToBytes(block.Header())
+			if err != nil {
+				return err
+			}
+			body, err := rlp.EncodeToBytes(block.Body())
+			if err != nil {
+				return err
+			}
+			if err := op.AppendRaw(ancient.ChainFreezerHashTable, number, hash[:]); err != nil {
+				return fmt.Errorf("can't write hash to freezer: %v", err)
+			}
+			if err := op.AppendRaw(ancient.ChainFreezerHeaderTable, number, header); err != nil {
+				return fmt.Errorf("can't write header to freezer: %v", err)
+			}
+			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
+				return fmt.Errorf("can't write body to freezer: %v", err)
+			}
+			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(number, encodeStorageReceipts(receipts[i]))); err != nil {
+				return fmt.Errorf("can't write receipts to freezer: %v", err)
+			}
+			hashes[i] = hash
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	// The headers of the header chain are deleted from the key-value store.
+	dbm.finishFreeze(first, hashes)
+	frozenBlocksGauge.Update(int64(first) + int64(n))
+	return n, nil
 }
 
 // deleteFrozenBlocks deletes the frozen canonical blocks starting at first,

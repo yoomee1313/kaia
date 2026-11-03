@@ -1345,6 +1345,10 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 	defer receiptsBatch.Release()
 	defer txLookupEntriesBatch.Release()
 
+	var (
+		newBlocks   types.Blocks
+		newReceipts []types.Receipts
+	)
 	for i, block := range blockChain {
 		receipts := receiptChain[i]
 		// Short circuit insertion if shutting down or processing failed
@@ -1364,27 +1368,52 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		if err := SetReceiptsData(bc.chainConfig, block, receipts); err != nil {
 			return i, fmt.Errorf("failed to set receipts data: %v", err)
 		}
-		// Write all the data out into the database
-		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
-		bc.db.PutReceiptsToBatch(receiptsBatch, block.Hash(), block.NumberU64(), receipts)
+		newBlocks = append(newBlocks, block)
+		newReceipts = append(newReceipts, receipts)
+	}
+
+	// The tx lookup entries go first: a block written to the freezer counts as
+	// known if the sync restarts, so its entries would not be written again.
+	for _, block := range newBlocks {
 		bc.db.PutTxLookupEntriesToBatch(txLookupEntriesBatch, block)
+		totalBytes, err := database.WriteBatchesOverThreshold(txLookupEntriesBatch)
+		if err != nil {
+			return 0, err
+		}
+		bytes += totalBytes
+	}
+	totalBytes, err := database.WriteBatches(txLookupEntriesBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
+
+	// Blocks far below the head header go straight into the freezer.
+	frozen, err := bc.db.FreezeSyncedBlocks(newBlocks, newReceipts, bc.CurrentHeader().Number.Uint64())
+	if err != nil {
+		return 0, err
+	}
+	stats.processed += int32(frozen)
+
+	// Write the rest out into the key-value store
+	for i, block := range newBlocks[frozen:] {
+		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
+		bc.db.PutReceiptsToBatch(receiptsBatch, block.Hash(), block.NumberU64(), newReceipts[frozen+i])
 
 		stats.processed++
 
-		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch, txLookupEntriesBatch)
+		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch)
 		if err != nil {
 			return 0, err
-		} else {
-			bytes += totalBytes
 		}
-	}
-
-	totalBytes, err := database.WriteBatches(bodyBatch, receiptsBatch, txLookupEntriesBatch)
-	if err != nil {
-		return 0, err
-	} else {
 		bytes += totalBytes
 	}
+
+	totalBytes, err = database.WriteBatches(bodyBatch, receiptsBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
 
 	// Update the head fast sync block if better
 	bc.mu.Lock()
@@ -1404,7 +1433,8 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		"number", head.Number(),
 		"hash", head.Hash(),
 		"size", common.StorageSize(bytes),
-		"ignored", stats.ignored)
+		"ignored", stats.ignored,
+		"frozen", frozen)
 	return 0, nil
 }
 
