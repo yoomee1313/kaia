@@ -58,6 +58,7 @@ func genFreezerTestBlock(t *testing.T, number uint64, parent common.Hash, extra 
 	require.NoError(t, err)
 	receipt := genReceipt(int(number) + 1)
 	receipt.TxHash = tx.Hash()
+	receipt.Bloom = types.CreateBloom(types.Receipts{receipt})
 	return &freezerTestBlock{
 		header: &types.Header{
 			ParentHash: parent,
