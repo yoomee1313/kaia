@@ -321,6 +321,10 @@ type DBManager interface {
 	// TruncateFrozen removes the frozen blocks from number items on. The caller
 	// must hold PauseFreezer.
 	TruncateFrozen(items uint64) error
+	// FreezeSyncedBlocks writes the leading synced blocks that are far enough
+	// below the head header straight into the freezer, and returns how many it
+	// took. The caller writes the rest to the key-value store.
+	FreezeSyncedBlocks(blocks types.Blocks, receipts []types.Receipts, headHeader uint64) (int, error)
 
 	// StateArchiveEnabled reports whether the state archive is open, so that
 	// trie nodes deleted by live pruning can still be read.
@@ -1622,23 +1626,29 @@ func (dbm *databaseManager) PutReceiptsToBatch(batch Batch, hash common.Hash, nu
 }
 
 func (dbm *databaseManager) putReceiptsToPutter(putter KeyValueWriter, hash common.Hash, number uint64, receipts types.Receipts, addToCache bool) {
-	// Convert the receipts into their database form and serialize them
+	if addToCache {
+		for _, receipt := range receipts {
+			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
+		}
+	}
+	bytes := encodeStorageReceipts(receipts)
+	// Store the flattened receipt slice
+	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
+		logger.Crit("Failed to store block receipts", "err", err)
+	}
+}
+
+// encodeStorageReceipts serializes the receipts in their database form.
+func encodeStorageReceipts(receipts types.Receipts) []byte {
 	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
 	for i, receipt := range receipts {
 		storageReceipts[i] = (*types.ReceiptForStorage)(receipt)
-
-		if addToCache {
-			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
-		}
 	}
 	bytes, err := rlp.EncodeToBytes(storageReceipts)
 	if err != nil {
 		logger.Crit("Failed to encode block receipts", "err", err)
 	}
-	// Store the flattened receipt slice
-	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
-		logger.Crit("Failed to store block receipts", "err", err)
-	}
+	return bytes
 }
 
 // DeleteReceipts removes all receipt data associated with a block hash.

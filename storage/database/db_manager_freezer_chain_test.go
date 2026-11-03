@@ -19,12 +19,15 @@ package database_test
 import (
 	"bytes"
 	"io"
+	"math/big"
 	"testing"
 
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/faker"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
@@ -164,4 +167,82 @@ func TestFreezer_SetHead(t *testing.T) {
 	for _, b := range append(blocks[:head], fork...) {
 		assert.Equal(t, b.Hash(), dbm.ReadCanonicalHash(b.NumberU64()), "block %d", b.NumberU64())
 	}
+}
+
+// TestFreezer_FastSync checks that a fast sync writes the blocks that are more
+// than the threshold below the head header straight into the freezer. The
+// blocks it wrote to the key-value store while the header chain was not far
+// enough ahead are frozen first.
+func TestFreezer_FastSync(t *testing.T) {
+	const numBlocks = 40 // threshold 5
+
+	var (
+		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		address = crypto.PubkeyToAddress(key.PublicKey)
+		gspec   = &blockchain.Genesis{
+			Config: params.TestChainConfig,
+			Alloc:  blockchain.GenesisAlloc{address: {Balance: big.NewInt(1000000000)}},
+		}
+		gendb   = database.NewMemoryDBManager()
+		genesis = gspec.MustCommit(gendb)
+		signer  = types.LatestSignerForChainID(gspec.Config.ChainID)
+	)
+	blocks, receipts := blockchain.GenerateChain(gspec.Config, genesis, faker.NewFaker(), gendb, numBlocks, func(i int, block *blockchain.BlockGen) {
+		tx, err := types.SignTx(types.NewTransaction(block.TxNonce(address), common.Address{0x01}, big.NewInt(1000), params.TxGas, nil, nil), signer, key)
+		require.NoError(t, err)
+		block.AddTx(tx)
+	})
+	headers := make([]*types.Header, len(blocks))
+	for i, block := range blocks {
+		headers[i] = block.Header()
+	}
+
+	dir := t.TempDir()
+	dbm := openFreezerDB(dir)
+	gspec.MustCommit(dbm)
+	chain, err := blockchain.NewBlockChain(dbm, nil, gspec.Config, faker.NewFaker(), vm.Config{})
+	require.NoError(t, err)
+
+	// Head header 20: blocks [1, 15] go to the freezer, [16, 20] to the
+	// key-value store.
+	_, err = chain.InsertHeaderChain(headers[:20], 1)
+	require.NoError(t, err)
+	_, err = chain.InsertReceiptChain(blocks[:20], receipts[:20])
+	require.NoError(t, err)
+	assert.Equal(t, uint64(16), dbm.FrozenBlocks())
+
+	// Head header 40: [16, 20] are moved from the key-value store, [21, 35]
+	// go to the freezer, [36, 40] to the key-value store.
+	_, err = chain.InsertHeaderChain(headers[20:], 1)
+	require.NoError(t, err)
+	_, err = chain.InsertReceiptChain(blocks[20:], receipts[20:])
+	require.NoError(t, err)
+	assert.Equal(t, uint64(36), dbm.FrozenBlocks())
+	assert.Equal(t, uint64(numBlocks), chain.CurrentFastBlock().NumberU64())
+
+	check := func(dbm database.DBManager) {
+		for i, block := range blocks {
+			hash, number := block.Hash(), block.NumberU64()
+			assert.Equal(t, hash, dbm.ReadCanonicalHash(number), "canonical hash %d", number)
+			if b := dbm.ReadBlock(hash, number); assert.NotNil(t, b, "block %d", number) {
+				assert.Equal(t, hash, b.Hash(), "block %d", number)
+			}
+			got := dbm.ReadReceipts(hash, number)
+			assert.Equal(t, types.DeriveReceiptsRoot(receipts[i], block.Number()), types.DeriveReceiptsRoot(got, block.Number()), "receipts %d", number)
+			txHash := block.Transactions()[0].Hash()
+			receipt, blockHash, _, _ := dbm.ReadReceipt(txHash)
+			if assert.NotNil(t, receipt, "receipt of block %d", number) {
+				assert.Equal(t, hash, blockHash)
+				assert.Equal(t, txHash, receipt.TxHash)
+			}
+		}
+	}
+	check(dbm)
+	chain.Stop()
+	dbm.Close()
+
+	dbm = openFreezerDB(dir)
+	defer dbm.Close()
+	assert.Equal(t, uint64(36), dbm.FrozenBlocks())
+	check(dbm)
 }

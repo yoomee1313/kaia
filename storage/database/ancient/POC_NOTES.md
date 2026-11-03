@@ -62,6 +62,17 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
   freezer (`TestFreezer_ExportImport`).
 - `DBManager.FrozenBlocks()` returns how many blocks are frozen (0 when the
   freezer is disabled).
+- Fast sync writes old blocks straight into the freezer
+  (`DBManager.FreezeSyncedBlocks`, called from `InsertReceiptChain`), as geth
+  does below its ancient limit. The blocks that continue the freezer, are
+  canonical, and are more than the threshold below the head header are
+  appended with their header, body and slim receipts, and the header chain's
+  key-value headers are deleted after the fsync. The freeze loop cannot do this,
+  because the head block stays at the genesis until the sync ends. Blocks synced
+  to the key-value store while the header chain was not far enough ahead are
+  frozen first. The tx lookup entries are written before the freezer append,
+  because a frozen block counts as known when the sync restarts. Header chain
+  rollbacks (2,048 blocks at most) stay far above the threshold.
 
 **Freeze loop** (a goroutine started by `NewDBManager`, stopped first in `Close`)
 - Every minute it freezes canonical blocks up to `head - threshold`, at most
