@@ -70,6 +70,7 @@ type balTestEnv struct {
 	signer  types.Signer
 	sealer  balTestSealer
 	db      database.DBManager
+	gspec   *Genesis
 	genesis *types.Block
 	keys    []*ecdsa.PrivateKey
 	addrs   []common.Address
@@ -92,7 +93,8 @@ func newBALTestEnv(t *testing.T, hardfork string, numKeys int) *balTestEnv {
 		alloc[addr] = GenesisAccount{Balance: balFunds}
 	}
 	env.sealer = balTestSealer{Faker: faker.NewFaker(), initAddr: env.addrs[0]}
-	env.genesis = (&Genesis{Config: env.config, Alloc: alloc}).MustCommit(env.db)
+	env.gspec = &Genesis{Config: env.config, Alloc: alloc}
+	env.genesis = env.gspec.MustCommit(env.db)
 	return env
 }
 

@@ -18,10 +18,15 @@ package blockchain
 
 import (
 	"testing"
+	"time"
 
 	"github.com/kaiachain/kaia/blockchain/checkpoint"
+	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/storage/database"
 	storecp "github.com/kaiachain/kaia/storage/database/checkpoint"
+	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -77,11 +82,11 @@ func testBALCheckpoint(t *testing.T, hardfork string) {
 	for i, number := range []uint64{2, 4, 6, 9} {
 		id := uint64(i + 1)
 		meta := storecp.Meta{ID: id, Base: prev, BlockNumber: number, StateRoot: headers[number], Trigger: storecp.TriggerInterval}
-		_, stats, err := checkpoint.Export(store, meta, nodes, code)
+		_, stats, err := checkpoint.Export(store, meta, nodes, code, nil)
 		require.NoError(t, err, "block %d", number)
 		require.NoError(t, store.Verify(id))
 
-		_, fullStats, err := checkpoint.Export(full, storecp.Meta{ID: id, BlockNumber: number, StateRoot: headers[number], Trigger: storecp.TriggerInterval}, nodes, code)
+		_, fullStats, err := checkpoint.Export(full, storecp.Meta{ID: id, BlockNumber: number, StateRoot: headers[number], Trigger: storecp.TriggerInterval}, nodes, code, nil)
 		require.NoError(t, err)
 		fullNodes, fullCodes := chainEntries(t, full, id)
 		nodes, codes := chainEntries(t, store, id)
@@ -99,7 +104,11 @@ func testBALCheckpoint(t *testing.T, hardfork string) {
 	// Every block after a checkpoint is rebuilt with the right root.
 	for id := uint64(1); id <= 4; id++ {
 		meta, _ := store.Meta(id)
-		sdb, _, err := checkpoint.Regen(store, id, lists, uint64(len(c.blocks)), checkpoint.Keys{c.contract: nil}, check)
+		// Regen only resolves the keys of the lists and of extra.
+		extra := checkpoint.Keys{}
+		extra.Add(c.env.addrs[1])
+		extra.Add(c.contract, common.BytesToHash([]byte{5}))
+		sdb, _, err := checkpoint.Regen(store, id, lists, uint64(len(c.blocks)), extra, check)
 		require.NoError(t, err, "from block %d", meta.BlockNumber)
 
 		want, err := c.chain.StateAt(c.blocks[len(c.blocks)-1].Root())
@@ -116,4 +125,47 @@ func testBALCheckpoint(t *testing.T, hardfork string) {
 	want, err := c.chain.StateAt(headers[4])
 	require.NoError(t, err)
 	require.Equal(t, want.GetState(c.contract, common.BytesToHash([]byte{5})), sdb.GetState(c.contract, common.BytesToHash([]byte{5})))
+}
+
+// TestBlockChainCheckpoint inserts blocks into a chain that writes a state
+// checkpoint every third block, then rebuilds the head state from the first
+// checkpoint.
+func TestBlockChainCheckpoint(t *testing.T) {
+	c := newBALHistoryChain(t, "shanghai")
+	dir := t.TempDir()
+	db := database.NewMemoryDBManager()
+	c.env.gspec.MustCommit(db)
+	chain, err := NewBlockChain(db, &CacheConfig{
+		CacheSize:               512,
+		BlockInterval:           DefaultBlockInterval,
+		TriesInMemory:           DefaultTriesInMemory,
+		TrieNodeCacheConfig:     statedb.GetEmptyTrieNodeCacheConfig(),
+		CheckpointDir:           dir,
+		CheckpointBlockInterval: 3,
+	}, c.env.config, c.env.sealer, vm.Config{})
+	require.NoError(t, err)
+	chain.Processor().RegisterBlockStateModule(c.env.sealer)
+	for _, block := range c.blocks {
+		_, err := chain.InsertChain([]*types.Block{block})
+		require.NoError(t, err)
+		for chain.checkpoints.busy.Load() {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	chain.Stop()
+
+	store, err := storecp.Open(dir, nil)
+	require.NoError(t, err)
+	defer store.Close()
+	segments := store.Segments()
+	require.Len(t, segments, 3)
+	for i, meta := range segments {
+		require.Equal(t, uint64(3*(i+1)), meta.BlockNumber)
+		require.Equal(t, c.blocks[meta.BlockNumber-1].Root(), meta.StateRoot)
+		require.Equal(t, uint64(i), meta.Base)
+		require.Equal(t, storecp.TriggerInterval, meta.Trigger)
+	}
+	check := func(n uint64) (common.Hash, error) { return c.blocks[n-1].Root(), nil }
+	_, _, err = checkpoint.Regen(store, segments[0].ID, listSlice(c.lists), uint64(len(c.blocks)), nil, check)
+	require.NoError(t, err)
 }

@@ -210,6 +210,9 @@ var FlagGroups = []FlagGroup{
 			LivePruningFlag,
 			LivePruningRetentionFlag,
 			StateArchiveFlag,
+			StateCheckpointDirFlag,
+			StateCheckpointTimeFlag,
+			StateCheckpointBlockIntervalFlag,
 		},
 	},
 	{

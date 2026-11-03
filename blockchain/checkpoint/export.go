@@ -47,7 +47,10 @@ const (
 	prefixCode    byte = 0x02
 )
 
-var errMissingNode = errors.New("checkpoint chain misses a node")
+var (
+	errMissingNode = errors.New("checkpoint chain misses a node")
+	ErrStopped     = errors.New("checkpoint export stopped")
+)
 
 // NodeReader returns a stored trie node by its hash, see statedb.Database.Node.
 type NodeReader func(hash common.ExtHash) ([]byte, error)
@@ -93,6 +96,7 @@ type differ struct {
 	base   *checkpoint.Store
 	baseID uint64 // 0 if there is no base
 	w      *checkpoint.Writer
+	quit   <-chan struct{}
 
 	newLeaves, oldLeaves map[common.Hash]leaf // collected in the account trie
 	leafErr              error
@@ -185,6 +189,13 @@ func (d *differ) merge(news, olds []ref, key func([]byte) []byte, onLeaf func(pa
 // emit writes the new node n and merges its children with the old nodes under
 // its path. If the first of them is at the path of n, its children are used.
 func (d *differ) emit(n ref, olds []ref, key func([]byte) []byte, onLeaf func(path, key, value []byte, isNew bool)) error {
+	if d.stats.Nodes%4096 == 0 {
+		select {
+		case <-d.quit:
+			return ErrStopped
+		default:
+		}
+	}
 	blob, err := d.newNode(n)
 	if err != nil {
 		return err
@@ -271,8 +282,9 @@ func storageRefs(root common.ExtHash) []ref {
 
 // Export writes the state trie of meta.StateRoot into a new segment of store,
 // as the difference from the segment meta.Base (0 for a full segment). Nodes
-// of the new trie are read through nodes.
-func Export(store *checkpoint.Store, meta checkpoint.Meta, nodes NodeReader, code CodeReader) (checkpoint.Meta, ExportStats, error) {
+// of the new trie are read through nodes and code. Closing quit stops it and
+// discards the segment.
+func Export(store *checkpoint.Store, meta checkpoint.Meta, nodes NodeReader, code CodeReader, quit <-chan struct{}) (checkpoint.Meta, ExportStats, error) {
 	var oldRoot common.Hash
 	if meta.Base != 0 {
 		base, ok := store.Meta(meta.Base)
@@ -286,7 +298,7 @@ func Export(store *checkpoint.Store, meta checkpoint.Meta, nodes NodeReader, cod
 		return checkpoint.Meta{}, ExportStats{}, err
 	}
 	d := &differ{
-		nodes: nodes, code: code, base: store, baseID: meta.Base, w: w,
+		nodes: nodes, code: code, base: store, baseID: meta.Base, w: w, quit: quit,
 		newLeaves: make(map[common.Hash]leaf), oldLeaves: make(map[common.Hash]leaf),
 	}
 	stats, err := d.run(meta.StateRoot, oldRoot)

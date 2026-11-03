@@ -72,8 +72,7 @@ func sortedPaths[T comparable](keys map[T]bool, hash func(T) common.Hash) []hash
 }
 
 // loader copies the nodes on the paths of some keys from a segment chain into
-// a node database. It also copies the children of every branch on a path, which
-// a deletion needs when the branch collapses.
+// a node database, with the children of every node on a path.
 type loader struct {
 	store *checkpoint.Store
 	id    uint64
@@ -114,15 +113,15 @@ func (l *loader) path(root common.ExtHash, key func([]byte) []byte, target []byt
 			}
 			return nil, nil
 		}
+		// The other children are loaded too: a deletion resolves the child left
+		// in a branch, and that child can be the one an extension pointed to,
+		// once an insertion has split the extension.
 		var next *ref
 		for i := range kids {
-			if len(kids[i].path) == len(cur.path)+1 { // a branch child
-				if _, err := l.load(key(kids[i].path), kids[i].hash); err != nil {
-					return nil, err
-				}
-			}
 			if hasPrefix(target, kids[i].path) {
 				next = &kids[i]
+			} else if _, err := l.load(key(kids[i].path), kids[i].hash); err != nil {
+				return nil, err
 			}
 		}
 		if next == nil {
@@ -234,6 +233,9 @@ func Regen(store *checkpoint.Store, id uint64, lists bal.ListReader, to uint64, 
 			return nil, reads, fmt.Errorf("block %d: %w", n, err)
 		}
 		root := sdb.IntermediateRoot(true)
+		if err := sdb.Error(); err != nil {
+			return nil, reads, fmt.Errorf("block %d: %w", n, err)
+		}
 		if check != nil {
 			want, err := check(n)
 			if err != nil {

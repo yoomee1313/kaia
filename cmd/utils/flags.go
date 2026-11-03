@@ -559,6 +559,24 @@ var (
 		EnvVars:  []string{"KAIA_BAL_RECORD_DIR"},
 		Category: "MISC",
 	}
+	StateCheckpointDirFlag = &cli.StringFlag{
+		Name:     "state.checkpoint-dir",
+		Usage:    "Writes incremental state checkpoints in the given directory for the blocks picked by --state.checkpoint-time and --state.checkpoint-block-interval (experimental)",
+		EnvVars:  []string{"KAIA_STATE_CHECKPOINT_DIR"},
+		Category: "STATE",
+	}
+	StateCheckpointTimeFlag = &cli.StringFlag{
+		Name:     "state.checkpoint-time",
+		Usage:    "Yearly time of a state checkpoint as MM-DDTHH:MM with a zone, like 12-28T00:00+09:00: the first block at or after it gets one",
+		EnvVars:  []string{"KAIA_STATE_CHECKPOINT_TIME"},
+		Category: "STATE",
+	}
+	StateCheckpointBlockIntervalFlag = &cli.Uint64Flag{
+		Name:     "state.checkpoint-block-interval",
+		Usage:    "Writes a state checkpoint at every block whose number is a multiple of this (0 = off)",
+		EnvVars:  []string{"KAIA_STATE_CHECKPOINT_BLOCK_INTERVAL"},
+		Category: "STATE",
+	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{
 		Name:     "state.cache-size",
 		Usage:    "Size of in-memory cache of the global state (in MiB) to flush matured singleton trie nodes to disk",

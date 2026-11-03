@@ -139,6 +139,12 @@ type CacheConfig struct {
 	SnapshotCacheSize    int                          // Memory allowance (MB) to use for caching snapshot entries in memory
 	SnapshotAsyncGen     bool                         // Enables snapshot data generation asynchronously
 	BALRecordDir         string                       // If set, block access lists of inserted blocks are recorded under this directory (experimental)
+
+	// State checkpoints are written under CheckpointDir for the blocks picked
+	// by CheckpointTime and CheckpointBlockInterval (experimental).
+	CheckpointDir           string
+	CheckpointTime          string // yearly, "MM-DDTHH:MM" with a zone
+	CheckpointBlockInterval uint64
 }
 
 // gcBlock is used for priority queue for GC.
@@ -165,12 +171,14 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // stateDB caching and trie caching/pruning configuration
 
-	db      database.DBManager // Low level persistent database to store final content in
-	snaps   *snapshot.Tree     // Snapshot tree for fast trie leaf access
-	bal     *balRecorder       // Block access list recorder, nil unless enabled
-	triegc  *prque.Prque       // Priority queue mapping block numbers to tries to gc
-	chBlock chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
-	chPrune chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
+	db     database.DBManager // Low level persistent database to store final content in
+	snaps  *snapshot.Tree     // Snapshot tree for fast trie leaf access
+	bal    *balRecorder       // Block access list recorder, nil unless enabled
+	triegc *prque.Prque       // Priority queue mapping block numbers to tries to gc
+
+	checkpoints *stateCheckpointer // State checkpoint writer, nil unless enabled
+	chBlock     chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
+	chPrune     chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
 
 	hc                 *HeaderChain
 	rmLogsFeed         event.Feed
@@ -363,6 +371,11 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 
 	if cacheConfig.BALRecordDir != "" {
 		if bc.bal, err = newBALRecorder(cacheConfig.BALRecordDir); err != nil {
+			return nil, err
+		}
+	}
+	if cacheConfig.CheckpointDir != "" {
+		if bc.checkpoints, err = newStateCheckpointer(cacheConfig.CheckpointDir, cacheConfig.CheckpointTime, cacheConfig.CheckpointBlockInterval); err != nil {
 			return nil, err
 		}
 	}
@@ -1147,6 +1160,9 @@ func (bc *BlockChain) Stop() {
 	if bc.bal != nil {
 		bc.bal.close(bc.CurrentBlock().NumberU64())
 	}
+	if bc.checkpoints != nil {
+		bc.checkpoints.store.Close()
+	}
 
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
@@ -1465,6 +1481,7 @@ func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) e
 	}
 	trieDB := bc.stateCache.TrieDB()
 	trieDB.UpdateMetricNodes()
+	checkpointTrigger, checkpointed := bc.checkpointTrigger(block)
 
 	// If we're running an archive node, always flush
 	if bc.isArchiveMode() {
@@ -1474,6 +1491,9 @@ func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) e
 
 		bc.checkStartStateMigration(block.NumberU64(), root)
 		bc.lastCommittedBlock = block.NumberU64()
+		if checkpointed {
+			bc.startCheckpoint(block, checkpointTrigger)
+		}
 
 		if bc.IsLivePruningRequired() {
 			bc.chPrune <- block.NumberU64()
@@ -1499,7 +1519,7 @@ func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) e
 			}
 		}
 
-		if isCommitTrieRequired(bc, block.NumberU64()) {
+		if isCommitTrieRequired(bc, block.NumberU64()) || checkpointed {
 			if err := trieDB.Commit(block.Header().Root, true, block.NumberU64()); err != nil {
 				return err
 			}
@@ -1512,6 +1532,9 @@ func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) e
 				}
 			}
 			bc.lastCommittedBlock = block.NumberU64()
+			if checkpointed {
+				bc.startCheckpoint(block, checkpointTrigger)
+			}
 
 			if bc.IsLivePruningRequired() {
 				bc.chPrune <- block.NumberU64()
@@ -1590,7 +1613,7 @@ func (bc *BlockChain) pruneTrieNodeLoop() {
 		for {
 			select {
 			case num := <-bc.chPrune:
-				if num <= bc.cacheConfig.LivePruningRetention {
+				if num <= bc.cacheConfig.LivePruningRetention || bc.pruningPaused() {
 					continue
 				}
 				limit := num - bc.cacheConfig.LivePruningRetention // Prune [1, latest - retention]
