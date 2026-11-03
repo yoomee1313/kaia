@@ -62,6 +62,9 @@ var (
 	// stateArchiveNodePrefix + ExtHash -> chunk number. The exception index of
 	// the state archive.
 	stateArchiveNodePrefix = []byte("StateArchiveNode-")
+	// stateArchiveSamplePrefix + chunk number (uint64 big endian) -> first
+	// counter of the chunk, for every archiveSampleInterval-th chunk.
+	stateArchiveSamplePrefix = []byte("StateArchiveSample-")
 
 	validSectionKey = []byte("count")
 
@@ -328,6 +331,11 @@ func (c *SupplyCheckpoint) Copy() *SupplyCheckpoint {
 
 func supplyCheckpointKey(blockNumber uint64) []byte {
 	return append(supplyCheckpointPrefix, common.Int64ToByteBigEndian(blockNumber)...)
+}
+
+// stateArchiveSampleKey = stateArchiveSamplePrefix + chunk number (uint64 big endian)
+func stateArchiveSampleKey(chunk uint64) []byte {
+	return append(append([]byte{}, stateArchiveSamplePrefix...), common.Int64ToByteBigEndian(chunk)...)
 }
 
 // stateArchiveNodeKey = stateArchiveNodePrefix + hash

@@ -90,6 +90,8 @@ type stateArchive struct {
 	chunks      uint64   // Number of chunks
 	lastCounter uint64   // Highest counter of an in-order node, or the one before the first counter
 	samples     []uint64 // First counter of every archiveSampleInterval-th chunk
+
+	recordedSamples int // Number of samples loaded from MiscDB
 }
 
 // openStateArchiveFreezer opens the trie node freezer at dir and loads its
@@ -107,14 +109,26 @@ func openStateArchiveFreezer(dir string, index Database, readonly bool) (*stateA
 	return a, nil
 }
 
-// load rebuilds the samples and the last counter from the freezer files.
+// load rebuilds the samples and the last counter. The samples recorded in
+// MiscDB are used as far as they go, so that a large archive opens without one
+// disk read per sample; the rest are read from the freezer files.
 func (a *stateArchive) load() error {
 	chunks, err := a.freezer.Ancients()
 	if err != nil {
 		return err
 	}
-	a.chunks, a.samples, a.lastCounter = chunks, nil, 0
-	for i := uint64(0); i < chunks; i += archiveSampleInterval {
+	a.chunks, a.lastCounter = chunks, 0
+	a.samples = a.loadSamples(chunks)
+	if n := len(a.samples); n > 0 {
+		// Check the last recorded sample, in case MiscDB belongs to another archive.
+		chunk := uint64(n-1) * archiveSampleInterval
+		if first, err := a.readFirst(chunk); err != nil || first != a.samples[n-1] {
+			logger.Warn("Ignoring recorded state archive samples", "chunk", chunk, "err", err)
+			a.samples = nil
+		}
+	}
+	a.recordedSamples = len(a.samples)
+	for i := uint64(len(a.samples)) * archiveSampleInterval; i < chunks; i += archiveSampleInterval {
 		first, err := a.readFirst(i)
 		if err != nil {
 			return err
@@ -141,6 +155,97 @@ func (a *stateArchive) load() error {
 		a.lastCounter = max(a.lastCounter, extHashCounter(nodes[len(nodes)-1].Hash))
 	}
 	archiveChunksGauge.Update(int64(chunks))
+	return nil
+}
+
+// loadSamples returns the samples recorded in MiscDB for the first chunks, up
+// to the first one missing.
+func (a *stateArchive) loadSamples(chunks uint64) []uint64 {
+	var samples []uint64
+	it := a.index.NewIterator(stateArchiveSamplePrefix, nil)
+	defer it.Release()
+	for it.Next() {
+		key, value := it.Key(), it.Value()
+		if len(key) != len(stateArchiveSamplePrefix)+8 || len(value) != 8 {
+			break
+		}
+		chunk := binary.BigEndian.Uint64(key[len(stateArchiveSamplePrefix):])
+		if chunk != uint64(len(samples))*archiveSampleInterval || chunk >= chunks {
+			break
+		}
+		samples = append(samples, binary.BigEndian.Uint64(value))
+	}
+	return samples
+}
+
+// recordSamples writes the samples that load read from the freezer files to
+// MiscDB, so that the next open does not read them again.
+func (a *stateArchive) recordSamples() error {
+	if a.recordedSamples == len(a.samples) {
+		return nil
+	}
+	batch := a.index.NewBatch()
+	defer batch.Release()
+	for i := a.recordedSamples; i < len(a.samples); i++ {
+		if err := batch.Put(stateArchiveSampleKey(uint64(i)*archiveSampleInterval), common.Int64ToByteBigEndian(a.samples[i])); err != nil {
+			return err
+		}
+		if _, err := WriteBatchesOverThreshold(batch); err != nil {
+			return err
+		}
+	}
+	if err := batch.Write(); err != nil {
+		return err
+	}
+	a.recordedSamples = len(a.samples)
+	return nil
+}
+
+// reindex writes the exception index entries and the chunk count for the
+// chunks from on. Those are written to MiscDB after the chunks are
+// fsynced, and without a sync of their own, so a crash can lose them while the
+// trie nodes stay in the key-value store. An exception is a node whose counter
+// is zero or below the first counter of its chunk.
+func (a *stateArchive) reindex(from uint64) error {
+	if from >= a.chunks {
+		return nil
+	}
+	batch := a.index.NewBatch()
+	defer batch.Release()
+	exceptions := 0
+	for chunk := from; chunk < a.chunks; chunk++ {
+		first, err := a.readFirst(chunk)
+		if err != nil {
+			return err
+		}
+		data, err := a.freezer.Ancient(ancient.StateArchiveNodesTable, chunk)
+		if err != nil {
+			return err
+		}
+		nodes, err := decodeArchiveChunk(data)
+		if err != nil {
+			return fmt.Errorf("invalid state archive chunk %d: %v", chunk, err)
+		}
+		for _, n := range nodes {
+			if c := extHashCounter(n.Hash); c != 0 && c >= first {
+				break // the exceptions come first
+			}
+			if err := batch.Put(stateArchiveNodeKey(n.Hash), common.Int64ToByteBigEndian(chunk)); err != nil {
+				return err
+			}
+			exceptions++
+		}
+		if _, err := WriteBatchesOverThreshold(batch); err != nil {
+			return err
+		}
+	}
+	if err := batch.Put(stateArchiveChunksKey, common.Int64ToByteBigEndian(a.chunks)); err != nil {
+		return err
+	}
+	if err := batch.Write(); err != nil {
+		return err
+	}
+	logger.Info("Reindexed state archive chunks", "from", from, "to", a.chunks-1, "exceptions", exceptions)
 	return nil
 }
 
@@ -280,6 +385,13 @@ func (a *stateArchive) append(block uint64, nodes []ArchiveNode) error {
 			return err
 		}
 	}
+	for i, c := range chunks {
+		if number := a.chunks + uint64(i); number%archiveSampleInterval == 0 {
+			if err := batch.Put(stateArchiveSampleKey(number), common.Int64ToByteBigEndian(c.first)); err != nil {
+				return err
+			}
+		}
+	}
 	var count [8]byte
 	binary.BigEndian.PutUint64(count[:], a.chunks+uint64(len(chunks)))
 	if err := batch.Put(stateArchiveChunksKey, count[:]); err != nil {
@@ -295,6 +407,7 @@ func (a *stateArchive) append(block uint64, nodes []ArchiveNode) error {
 			a.samples = append(a.samples, c.first)
 		}
 	}
+	a.recordedSamples = len(a.samples) // recorded in the batch above
 	a.chunks += uint64(len(chunks))
 	a.lastCounter = last
 

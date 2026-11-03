@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/kaiachain/kaia/common"
@@ -260,4 +261,127 @@ func TestStateArchive_Misuse(t *testing.T) {
 	movedDBC := newStateArchiveTestConfig(dir, true)
 	movedDBC.AncientDir = movedRoot
 	assert.NoError(t, open(movedDBC))
+}
+
+func countMiscPrefix(t *testing.T, dbm *databaseManager, prefix []byte) int {
+	it := dbm.getDatabase(MiscDB).NewIterator(prefix, nil)
+	defer it.Release()
+	n := 0
+	for it.Next() {
+		n++
+	}
+	return n
+}
+
+// deleteMiscPrefix deletes the MiscDB entries with the given prefix, as an OS
+// crash may lose them when the trie nodes stay in the key-value store.
+func deleteMiscPrefix(t *testing.T, dbm *databaseManager, prefix []byte) {
+	db := dbm.getDatabase(MiscDB)
+	it := db.NewIterator(prefix, nil)
+	var keys [][]byte
+	for it.Next() {
+		keys = append(keys, append([]byte{}, it.Key()...))
+	}
+	it.Release()
+	for _, key := range keys {
+		require.NoError(t, db.Delete(key))
+	}
+}
+
+// TestStateArchive_LostIndex checks that the exception index, the samples and
+// the chunk count are rebuilt on open when MiscDB lost them after the chunks
+// were fsynced.
+func TestStateArchive_LostIndex(t *testing.T) {
+	useSmallStateArchiveChunks(t)
+	dir := t.TempDir()
+	dbm := openFreezerTestDBM(t, newStateArchiveTestConfig(dir, true))
+	var all []ArchiveNode
+	for b := uint64(0); b < 6; b++ {
+		nodes := append(archiveTestNodes(1000+b*20, 1000+b*20+20, "a"), archiveTestNode(0, fmt.Sprint("root", b)))
+		if b == 3 {
+			nodes = append(nodes, archiveTestNodes(500, 505, "late")...)
+		}
+		require.NoError(t, dbm.AppendStateArchive(b, nodes))
+		all = append(all, nodes...)
+	}
+	exceptions := countArchiveExceptions(t, dbm)
+	samples := len(dbm.stateArchive.samples)
+	require.Equal(t, 6+5, exceptions)
+	require.Equal(t, samples, countMiscPrefix(t, dbm, stateArchiveSamplePrefix))
+
+	// Lose everything the appends wrote to MiscDB.
+	deleteMiscPrefix(t, dbm, stateArchiveNodePrefix)
+	deleteMiscPrefix(t, dbm, stateArchiveSamplePrefix)
+	require.NoError(t, dbm.getDatabase(MiscDB).Delete(stateArchiveChunksKey))
+	dbm.Close()
+
+	dbm = openFreezerTestDBM(t, newStateArchiveTestConfig(dir, true))
+	defer dbm.Close()
+	assert.Equal(t, exceptions, countArchiveExceptions(t, dbm))
+	assert.Equal(t, samples, countMiscPrefix(t, dbm, stateArchiveSamplePrefix))
+	recorded, _ := dbm.getDatabase(MiscDB).Get(stateArchiveChunksKey)
+	assert.Equal(t, common.Int64ToByteBigEndian(dbm.stateArchive.chunks), recorded)
+	assertArchived(t, dbm, all)
+}
+
+// TestStateArchive_RecordedSamples checks that the samples are loaded from
+// MiscDB on open, and that wrong recorded samples are ignored.
+func TestStateArchive_RecordedSamples(t *testing.T) {
+	useSmallStateArchiveChunks(t)
+	dir := t.TempDir()
+	dbm := openFreezerTestDBM(t, newStateArchiveTestConfig(dir, true))
+	nodes := archiveTestNodes(1000, 1100, "a")
+	require.NoError(t, dbm.AppendStateArchive(1, nodes))
+	samples := slices.Clone(dbm.stateArchive.samples)
+	require.Greater(t, len(samples), 2)
+	dbm.Close()
+
+	dbm = openFreezerTestDBM(t, newStateArchiveTestConfig(dir, true))
+	assert.Equal(t, samples, dbm.stateArchive.samples)
+	assert.Equal(t, len(samples), dbm.stateArchive.recordedSamples)
+	assertArchived(t, dbm, nodes)
+
+	// A recorded sample that does not match the freezer drops them all.
+	last := uint64(len(samples)-1) * archiveSampleInterval
+	require.NoError(t, dbm.getDatabase(MiscDB).Put(stateArchiveSampleKey(last), common.Int64ToByteBigEndian(1)))
+	dbm.Close()
+	dbm = openFreezerTestDBM(t, newStateArchiveTestConfig(dir, true))
+	defer dbm.Close()
+	assert.Equal(t, samples, dbm.stateArchive.samples)
+	assertArchived(t, dbm, nodes)
+}
+
+// TestStateArchive_Migration checks that db-migration copies the archive and
+// points the destination at the copy.
+func TestStateArchive_Migration(t *testing.T) {
+	useSmallStateArchiveChunks(t)
+	srcDir := t.TempDir()
+	dbm := openFreezerTestDBM(t, newStateArchiveTestConfig(srcDir, true))
+	nodes := append(archiveTestNodes(1000, 1050, "a"), archiveTestNode(0, "root"))
+	require.NoError(t, dbm.AppendStateArchive(1, nodes))
+	dbm.WriteHeadBlockHash(common.HexToHash("0x01"))
+	dbm.Close()
+
+	srcDBC := newStateArchiveTestConfig(srcDir, false)
+	srcDBC.FreezerReadOnly = true
+	src := openFreezerTestDBM(t, srcDBC)
+	require.True(t, src.StateArchiveEnabled())
+
+	single := openFreezerTestDBM(t, &DBConfig{Dir: t.TempDir(), DBType: LevelDB, SingleDB: true, NumStateTrieShards: 1})
+	assert.ErrorContains(t, src.StartDBMigration(single), "does not support the freezer")
+	single.Close()
+
+	dstDir := t.TempDir()
+	dst := openFreezerTestDBM(t, newStateArchiveTestConfig(dstDir, false))
+	require.NoError(t, src.StartDBMigration(dst))
+	src.Close()
+	dst.Close()
+
+	// The source archive is no longer needed.
+	require.NoError(t, os.RemoveAll(filepath.Join(srcDir, DefaultAncientDirName)))
+	dst = openFreezerTestDBM(t, newStateArchiveTestConfig(dstDir, true))
+	defer dst.Close()
+	require.True(t, dst.StateArchiveEnabled())
+	assert.Equal(t, filepath.Join(dstDir, DefaultAncientDirName, ancient.StateArchiveName), dst.stateArchive.dir())
+	assertArchived(t, dst, nodes)
 }
