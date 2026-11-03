@@ -460,7 +460,10 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 		rdb    = dbm.getDatabase(ReceiptsDB)
 		hashes = make([]common.Hash, 0, last-first+1)
 	)
-	var parent common.Hash
+	var (
+		parent common.Hash
+		txs    []types.Transactions
+	)
 	if first > 0 {
 		parent = common.BytesToHash(dbm.readAncientHash(first - 1))
 	}
@@ -491,6 +494,7 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 				return err
 			}
 			hashes = append(hashes, hash)
+			txs = append(txs, decoded.Transactions)
 			parent = hash
 		}
 		return nil
@@ -499,7 +503,42 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 		return err
 	}
 	dbm.finishFreeze(first, hashes)
+	dbm.slimFrozenTxLookups(first, hashes, txs)
 	return nil
+}
+
+// slimFrozenTxLookups rewrites the tx lookup entries of the frozen blocks
+// starting at first without the block hash, so that a chain synced before the
+// freezer was enabled saves the space too. Entries that point elsewhere or are
+// slim already are left alone.
+func (dbm *databaseManager) slimFrozenTxLookups(first uint64, hashes []common.Hash, txs []types.Transactions) {
+	db := dbm.getDatabase(TxLookUpEntryDB)
+	batch := db.NewBatch()
+	defer batch.Release()
+	for i, hash := range hashes {
+		number := first + uint64(i)
+		for index, tx := range txs[i] {
+			key := TxLookupKey(tx.Hash())
+			data, _ := db.Get(key)
+			var entry TxLookupEntry
+			if len(data) == 0 || rlp.DecodeBytes(data, &entry) != nil || entry.BlockHash != hash || entry.BlockIndex != number || entry.Index != uint64(index) {
+				continue
+			}
+			slim, err := rlp.EncodeToBytes(slimTxLookupEntry{BlockIndex: number, Index: uint64(index)})
+			if err != nil {
+				logger.Crit("Failed to encode transaction lookup entry", "err", err)
+			}
+			if err := batch.Put(key, slim); err != nil {
+				logger.Crit("Failed to store transaction lookup entry", "err", err)
+			}
+			if _, err := WriteBatchesOverThreshold(batch); err != nil {
+				logger.Crit("Failed to store transaction lookup entries", "err", err)
+			}
+		}
+	}
+	if err := batch.Write(); err != nil {
+		logger.Crit("Failed to store transaction lookup entries", "err", err)
+	}
 }
 
 // appendFrozenBlock appends a block in its key-value encoding to the freezer,

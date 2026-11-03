@@ -2284,34 +2284,71 @@ func (dbm *databaseManager) ReadTxLookupEntry(hash common.Hash) (common.Hash, ui
 		return common.Hash{}, 0, 0
 	}
 	var entry TxLookupEntry
-	if err := rlp.DecodeBytes(data, &entry); err != nil {
+	if err := rlp.DecodeBytes(data, &entry); err == nil {
+		return entry.BlockHash, entry.BlockIndex, entry.Index
+	}
+	var slim slimTxLookupEntry
+	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		logger.Error("Invalid transaction lookup entry RLP", "hash", hash, "err", err)
 		return common.Hash{}, 0, 0
 	}
-	return entry.BlockHash, entry.BlockIndex, entry.Index
+	// A slim entry names the block by number only. The canonical block must hold
+	// the transaction, in case the entry outlived a reorg.
+	blockHash := dbm.ReadCanonicalHash(slim.BlockIndex)
+	if common.EmptyHash(blockHash) {
+		return common.Hash{}, 0, 0
+	}
+	body := dbm.ReadBody(blockHash, slim.BlockIndex)
+	if body == nil || uint64(len(body.Transactions)) <= slim.Index || body.Transactions[slim.Index].Hash() != hash {
+		return common.Hash{}, 0, 0
+	}
+	return blockHash, slim.BlockIndex, slim.Index
+}
+
+// slimTxLookups reports whether new tx lookup entries leave out the block
+// hash. Only a node with the block freezer writes them, because older versions
+// cannot read them; such a database cannot be opened without the freezer
+// anyway once blocks are frozen.
+func (dbm *databaseManager) slimTxLookups() bool {
+	return dbm.freezer != nil && !dbm.config.FreezerReadOnly
+}
+
+// encodeTxLookupEntry encodes the lookup entry of the index-th transaction of
+// the block.
+func encodeTxLookupEntry(block *types.Block, index int, slim bool) []byte {
+	var (
+		data []byte
+		err  error
+	)
+	if slim {
+		data, err = rlp.EncodeToBytes(slimTxLookupEntry{BlockIndex: block.NumberU64(), Index: uint64(index)})
+	} else {
+		data, err = rlp.EncodeToBytes(TxLookupEntry{BlockHash: block.Hash(), BlockIndex: block.NumberU64(), Index: uint64(index)})
+	}
+	if err != nil {
+		logger.Crit("Failed to encode transaction lookup entry", "err", err)
+	}
+	return data
 }
 
 // WriteTxLookupEntries stores a positional metadata for every transaction from
 // a block, enabling hash based transaction and receipt lookups.
 func (dbm *databaseManager) WriteTxLookupEntries(block *types.Block) {
 	db := dbm.getDatabase(TxLookUpEntryDB)
-	putTxLookupEntriesToPutter(db, block)
+	putTxLookupEntriesToPutter(db, block, dbm.slimTxLookups())
 }
 
 func (dbm *databaseManager) WriteAndCacheTxLookupEntries(block *types.Block) error {
 	batch := dbm.NewBatch(TxLookUpEntryDB)
 	defer batch.Release()
+	slim := dbm.slimTxLookups()
 	for i, tx := range block.Transactions() {
 		entry := TxLookupEntry{
 			BlockHash:  block.Hash(),
 			BlockIndex: block.NumberU64(),
 			Index:      uint64(i),
 		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := batch.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := batch.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i, slim)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 
@@ -2326,21 +2363,12 @@ func (dbm *databaseManager) WriteAndCacheTxLookupEntries(block *types.Block) err
 }
 
 func (dbm *databaseManager) PutTxLookupEntriesToBatch(batch Batch, block *types.Block) {
-	putTxLookupEntriesToPutter(batch, block)
+	putTxLookupEntriesToPutter(batch, block, dbm.slimTxLookups())
 }
 
-func putTxLookupEntriesToPutter(putter KeyValueWriter, block *types.Block) {
+func putTxLookupEntriesToPutter(putter KeyValueWriter, block *types.Block, slim bool) {
 	for i, tx := range block.Transactions() {
-		entry := TxLookupEntry{
-			BlockHash:  block.Hash(),
-			BlockIndex: block.NumberU64(),
-			Index:      uint64(i),
-		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := putter.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := putter.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i, slim)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 	}
