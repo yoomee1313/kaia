@@ -142,7 +142,8 @@ func assertBlockReadable(t *testing.T, dbm DBManager, b *freezerTestBlock) {
 }
 
 // assertBlockFrozen checks that the block was deleted from the key-value store,
-// except for the hash to number mapping and total difficulty.
+// except for the hash to number mapping. The test blocks have total blockscore
+// number+1, so that is deleted as well.
 func assertBlockFrozen(t *testing.T, dbm *databaseManager, b *freezerTestBlock) {
 	hash, number := b.hash(), b.header.Number.Uint64()
 	assert.False(t, hasKV(dbm, headerDB, headerHashKey(number)), "kv canonical hash %d", number)
@@ -150,7 +151,7 @@ func assertBlockFrozen(t *testing.T, dbm *databaseManager, b *freezerTestBlock) 
 	assert.False(t, hasKV(dbm, BodyDB, blockBodyKey(number, hash)), "kv body %d", number)
 	assert.False(t, hasKV(dbm, ReceiptsDB, blockReceiptsKey(number, hash)), "kv receipts %d", number)
 	assert.True(t, hasKV(dbm, headerDB, headerNumberKey(hash)), "kv header number %d", number)
-	assert.True(t, hasKV(dbm, MiscDB, headerTDKey(number, hash)), "kv td %d", number)
+	assert.False(t, hasKV(dbm, MiscDB, headerTDKey(number, hash)), "kv td %d", number)
 }
 
 func assertBlockInKV(t *testing.T, dbm *databaseManager, b *freezerTestBlock) {

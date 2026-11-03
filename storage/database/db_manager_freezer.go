@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"time"
@@ -657,9 +658,12 @@ func (dbm *databaseManager) deleteFrozenBlocks(first uint64, hashes []common.Has
 	headerBatch := dbm.NewBatch(headerDB)
 	bodyBatch := dbm.NewBatch(BodyDB)
 	receiptsBatch := dbm.NewBatch(ReceiptsDB)
+	tdBatch := dbm.NewBatch(MiscDB)
 	defer headerBatch.Release()
 	defer bodyBatch.Release()
 	defer receiptsBatch.Release()
+	defer tdBatch.Release()
+	misc := dbm.getDatabase(MiscDB)
 
 	for i, hash := range hashes {
 		number := first + uint64(i)
@@ -678,8 +682,17 @@ func (dbm *databaseManager) deleteFrozenBlocks(first uint64, hashes []common.Has
 		if err := receiptsBatch.Delete(blockReceiptsKey(number, hash)); err != nil {
 			return err
 		}
+		// ReadTd derives a deleted total blockscore as number+1.
+		if data, _ := misc.Get(headerTDKey(number, hash)); len(data) != 0 {
+			var td big.Int
+			if err := rlp.DecodeBytes(data, &td); err == nil && td.IsUint64() && td.Uint64() == number+1 {
+				if err := tdBatch.Delete(headerTDKey(number, hash)); err != nil {
+					return err
+				}
+			}
+		}
 	}
-	if _, err := WriteBatches(headerBatch, bodyBatch, receiptsBatch); err != nil {
+	if _, err := WriteBatches(headerBatch, bodyBatch, receiptsBatch, tdBatch); err != nil {
 		return err
 	}
 

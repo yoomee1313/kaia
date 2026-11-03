@@ -1526,7 +1526,14 @@ func (dbm *databaseManager) ReadTd(hash common.Hash, number uint64) *big.Int {
 	db := dbm.getDatabase(MiscDB)
 	data, _ := db.Get(headerTDKey(number, hash))
 	if len(data) == 0 {
-		return nil
+		// The freezer deletes the total blockscore of a frozen block if it is
+		// number+1, i.e. every block up to it has blockscore 1.
+		if number == 0 || !dbm.isFrozenCanon(hash, number) {
+			return nil
+		}
+		td := new(big.Int).SetUint64(number + 1)
+		dbm.cm.writeTdCache(hash, td)
+		return td
 	}
 	td := new(big.Int)
 	if err := rlp.Decode(bytes.NewReader(data), td); err != nil {
