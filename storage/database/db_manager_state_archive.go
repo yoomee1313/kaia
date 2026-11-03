@@ -75,8 +75,9 @@ func (dbm *databaseManager) openStateArchive() error {
 	}
 	// Chunks are fsynced before the chunk count is recorded, so the archive may
 	// hold more chunks than recorded (a crash in between), but never fewer.
+	var recorded uint64
 	if data, _ := miscDB.Get(stateArchiveChunksKey); len(data) == 8 {
-		if recorded := binary.BigEndian.Uint64(data); a.chunks < recorded {
+		if recorded = binary.BigEndian.Uint64(data); a.chunks < recorded {
 			a.close()
 			return fmt.Errorf("state archive at %s holds %d chunks, but %d were archived at %s; the archive is older than the database",
 				dir, a.chunks, recorded, marker)
@@ -86,6 +87,17 @@ func (dbm *databaseManager) openStateArchive() error {
 	if readonly {
 		logger.Info("Opened state archive read-only", "dir", dir, "chunks", a.chunks)
 		return nil
+	}
+	// The exception index of the unrecorded chunks may be lost.
+	if err := a.reindex(recorded); err != nil {
+		a.close()
+		dbm.stateArchive = nil
+		return err
+	}
+	if err := a.recordSamples(); err != nil {
+		a.close()
+		dbm.stateArchive = nil
+		return err
 	}
 	if string(marker) != dir {
 		if err := miscDB.Put(stateArchiveDirKey, []byte(dir)); err != nil {

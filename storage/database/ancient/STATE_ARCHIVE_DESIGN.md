@@ -183,7 +183,15 @@ a block that changed no state) is not stored again.
 - `StateArchiveChunks`: the chunk count, written with the exception index
   after each append. An archive with fewer chunks (an older copy, or an empty
   directory) is refused. More chunks are fine (a crash after the fsync).
-- The last counter and the samples are rebuilt from the freezer on open.
+- `StateArchiveSample-` + chunk number: the first counter of every
+  `archiveSampleInterval`-th chunk, written with the exception index. On open,
+  the samples are loaded from there as far as they go, the last one is checked
+  against the freezer, and the rest are read from the freezer and recorded.
+  The last counter is rebuilt from the last chunk.
+- The exception index, the samples and the chunk count are written to MiscDB
+  without a sync of their own, so an OS crash can lose them while the nodes
+  stay in KV. On open, the chunks from the recorded count on are reindexed: an
+  exception is a node whose counter is zero or below its chunk's `first`.
 - On open, the freezer repairs torn appends itself. Nothing else has to be
   repaired, because KV writes come after the archive append.
 
@@ -282,6 +290,11 @@ database without live pruning. State migration already refuses live pruning.
 
 Where it differs from the design above:
 
+- `db-migration` copies the archive files into `<dst datadir>/ancient/state`
+  and records that directory in the destination MiscDB, which already holds
+  the exception index, the samples and the chunk count. A single-DB, DynamoDB
+  or memory destination is refused up front.
+
 - Read order and exception storage: see 3.3 and 3.4.
 - `block` holds the block of the `Commit`, or, for a `Cap` flush, the block of
   the last `Commit` before it.
@@ -291,7 +304,8 @@ Where it differs from the design above:
 
 Tests: `storage/database/state_archive_test.go` (chunk format, in-order and
 out-of-order appends over many chunks and sample groups, reopen, a crash
-between the archive append and the KV write, misuse checks) and
+between the archive append and the KV write, a MiscDB that lost the index,
+recorded samples, migration, misuse checks) and
 `blockchain/blockchain_state_archive_test.go` (live pruning with retention 3
 over 20 blocks; every state, account and storage trie, is read back after
 its roots were deleted from KV; a merkle proof at a pruned block; a counter
@@ -300,18 +314,12 @@ and new blocks on top).
 
 Not handled yet:
 
-- The exception index and the chunk count are written without fsync. After an
-  OS crash (not a process crash), KV may keep a node whose exception entry was
-  lost. This needs a synced MiscDB write, or a repair walk on open.
 - One fsync per append is on the commit path (every block in archive mode).
-- On open, the samples are rebuilt by reading one `first` item per sample
-  (about 500,000 reads for a 35 TB archive). They should be persisted.
 - No read cache for chunks, and no placement of `first` on SSD.
-- `db-migration` does not copy the archive. The copied MiscDB keeps the
-  `StateArchiveDir` marker, so the destination refuses to open instead of
-  losing history.
 - Other node writers (`WriteTrieNode`, the stack trie used by sync) bypass the
-  archive. Snap sync is disabled; fast sync with the archive is untested.
+  archive. The node refuses to start with the archive unless `--syncmode` is
+  `full`, because fast sync writes the pivot state without it. Snap sync is
+  disabled.
 - Found on the way, not caused by the archive: with live pruning,
   `Trie.Prove` writes the nodes below the root under their ExtHash, so
   `VerifyProof` with that proof DB fails (eth_getProof only returns the node
