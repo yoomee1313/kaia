@@ -298,6 +298,18 @@ func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStor
 	}
 }
 
+// applyCode sets code from a block access list. Unlike SetCode it does not
+// load the previous code: a whole account record applied just before may
+// already carry the new code hash, and that code is only in the list.
+func (s *stateObject) applyCode(codeHash common.Hash, code []byte) error {
+	s.db.journal.append(codeChange{
+		account:  &s.address,
+		prevhash: s.CodeHash(),
+		prevcode: s.code,
+	})
+	return s.setCode(codeHash, code)
+}
+
 // ApplyBlockAccessList writes the final values of a block access list to the
 // state, which must be opened at the parent root of the block, and checks the
 // storage roots of the list. The caller then checks that IntermediateRoot(true)
@@ -361,7 +373,7 @@ func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {
 	}
 	if n := len(a.CodeChanges); n > 0 && a.CodeChanges[n-1].Index >= from {
 		code := a.CodeChanges[n-1].Code
-		if err := obj.SetCode(crypto.Keccak256Hash(code), code); err != nil {
+		if err := obj.applyCode(crypto.Keccak256Hash(code), code); err != nil {
 			return err
 		}
 	}
