@@ -68,7 +68,16 @@ func TestBALHistory(t *testing.T) {
 	t.Run("prague", func(t *testing.T) { testBALHistory(t, "prague") })
 }
 
-func testBALHistory(t *testing.T, hardfork string) {
+// balHistoryChain is a chain whose lists exercise every kind of change.
+type balHistoryChain struct {
+	env                      *balTestEnv
+	chain                    *BlockChain
+	blocks                   []*types.Block
+	lists                    []*bal.BlockAccessList
+	contract, child, untouch common.Address
+}
+
+func newBALHistoryChain(t *testing.T, hardfork string) *balHistoryChain {
 	env := newBALTestEnv(t, hardfork, 6)
 	addrs := env.addrs
 	var (
@@ -124,7 +133,16 @@ func testBALHistory(t *testing.T, hardfork string) {
 		}
 		b.AddTx(env.legacyTx(b, 5, &addrs[1], big.NewInt(int64(i+1)), nil))
 	})
-	lists := checkBAL(t, chain, blocks)
+	return &balHistoryChain{
+		env: env, chain: chain, blocks: blocks, lists: checkBAL(t, chain, blocks),
+		contract: contract, child: child, untouch: untouch,
+	}
+}
+
+func testBALHistory(t *testing.T, hardfork string) {
+	c := newBALHistoryChain(t, hardfork)
+	env, chain, blocks, lists := c.env, c.chain, c.blocks, c.lists
+	addrs, contract, child, untouch := env.addrs, c.contract, c.child, c.untouch
 
 	// Index with several flushes and a reopen, so keys span chunks.
 	db := database.NewMemDB()
