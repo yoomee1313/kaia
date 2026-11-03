@@ -160,6 +160,9 @@ func (p *StateProcessor) FinalizeState(header *types.Header, statedb *state.Stat
 
 	header.Root = statedb.IntermediateRoot(true)
 	<-derived
+	if err := p.setBlockAccessListHash(header, statedb); err != nil {
+		return nil, err
+	}
 
 	// Assemble and return the final block for sealing
 	return types.NewBlockWithRoots(header, txs, receipts, txRoot, receiptRoot, bloom), nil
@@ -172,6 +175,23 @@ func (p *StateProcessor) finalizeStateRoot(header *types.Header, statedb *state.
 		return err
 	}
 	header.Root = statedb.IntermediateRoot(true)
+	return p.setBlockAccessListHash(header, statedb)
+}
+
+// setBlockAccessListHash commits the block access list hash in the header from
+// the Amber hardfork. The list is complete after IntermediateRoot. Without a
+// recorder the hash is left unset and the block fails ValidateState.
+func (p *StateProcessor) setBlockAccessListHash(header *types.Header, statedb *state.StateDB) error {
+	if !p.config.IsAmberForkEnabled(header.Number) {
+		return nil
+	}
+	if list := statedb.BlockAccessList(); list != nil {
+		hash, err := list.ChangesHash()
+		if err != nil {
+			return err
+		}
+		header.BlockAccessListHash = &hash
+	}
 	return nil
 }
 
@@ -186,6 +206,9 @@ func (p *StateProcessor) finalizeStateModules(header *types.Header, statedb *sta
 		logger.Error("A block before Magma hardfork shouldn't have baseFee", "blockNum", header.Number.Uint64())
 		return ErrInvalidBaseFee
 	}
+
+	// Changes of FinalizeState belong to the phase after the last tx.
+	statedb.SetBlockAccessIndex(len(txs) + 1)
 
 	for _, module := range p.blockStateModules {
 		if err := module.FinalizeState(header, statedb, txs, receipts); err != nil {

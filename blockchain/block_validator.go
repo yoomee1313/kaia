@@ -437,16 +437,16 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 // itself. ValidateState returns a database batch if the validation was a success
 // otherwise nil and an error is returned.
 func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *state.StateDB, receipts types.Receipts, usedGas uint64) error {
-	return v.validateState(block, types.CreateBloom(receipts), types.DeriveReceiptsRoot(receipts, block.Number()), statedb.IntermediateRoot(true), usedGas)
+	return v.validateState(block, types.CreateBloom(receipts), types.DeriveReceiptsRoot(receipts, block.Number()), statedb, usedGas)
 }
 
 // ValidateStateWithCache performs the same checks as ValidateState but reuses
 // the bloom and receipt root that were computed during speculative execution.
 func (v *BlockValidator) ValidateStateWithCache(block *types.Block, cached *SpeculativeResult) error {
-	return v.validateState(block, cached.Bloom, cached.ReceiptHash, cached.State.IntermediateRoot(true), cached.UsedGas)
+	return v.validateState(block, cached.Bloom, cached.ReceiptHash, cached.State, cached.UsedGas)
 }
 
-func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, receiptHash, root common.Hash, usedGas uint64) error {
+func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, receiptHash common.Hash, statedb *state.StateDB, usedGas uint64) error {
 	header := block.Header()
 	if block.GasUsed() != usedGas {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), usedGas)
@@ -457,8 +457,34 @@ func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, re
 	if receiptHash != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptHash)
 	}
-	if root != header.Root {
+	if root := statedb.IntermediateRoot(true); root != header.Root {
 		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
+	}
+	return validateBlockAccessListHash(v.config, header, statedb)
+}
+
+// validateBlockAccessListHash checks the block access list hash committed from
+// the Amber hardfork against the list recorded while executing the block.
+func validateBlockAccessListHash(config *params.ChainConfig, header *types.Header, statedb *state.StateDB) error {
+	if !config.IsAmberForkEnabled(header.Number) {
+		if header.BlockAccessListHash != nil {
+			return errors.New("block access list hash before the Amber hardfork")
+		}
+		return nil
+	}
+	if header.BlockAccessListHash == nil {
+		return errors.New("missing block access list hash")
+	}
+	list := statedb.BlockAccessList()
+	if list == nil {
+		return errors.New("block access list not recorded")
+	}
+	hash, err := list.ChangesHash()
+	if err != nil {
+		return err
+	}
+	if hash != *header.BlockAccessListHash {
+		return fmt.Errorf("invalid block access list hash (remote: %x local: %x)", *header.BlockAccessListHash, hash)
 	}
 	return nil
 }

@@ -239,8 +239,9 @@ func TestHeaderSizeCalc(t *testing.T) {
 	// + ExcessBlobGas pointer (8)
 	// + BlobGasUsed pointer (8)
 	// + VRank slice (24)
+	// + BlockAccessListHash pointer (8)
 	constantSize := int(reflect.TypeFor[Header]().Size())
-	assert.Equal(t, 520+8+24+24+8+8+24, constantSize)
+	assert.Equal(t, 520+8+24+24+8+8+24+8, constantSize)
 
 	// Test header.Size() while adding fields one by one
 	// Start from a header without any variable length fields.

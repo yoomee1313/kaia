@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 
 	"github.com/kaiachain/kaia/blockchain/bal"
@@ -95,12 +96,32 @@ func kaiaFields(acc account.Account) []byte {
 }
 
 // EnableBlockAccessRecorder starts recording the block access list. It must be
-// called on a StateDB freshly opened at the parent root, before the block is
-// executed. The phase index starts at 0 (InitializeState).
+// called on a StateDB opened at the parent root, before the block is executed.
+// Accounts already loaded hold parent values and are taken as the base of their
+// changes; their reads are not recorded. The phase index starts at 0
+// (InitializeState).
 func (s *StateDB) EnableBlockAccessRecorder() {
-	s.blockAccess = &accessRecorder{
+	if len(s.journal.entries) > 0 || len(s.stateObjectsDirty) > 0 {
+		logger.Error("Block access recorder enabled on a modified state, the list will be wrong")
+	}
+	r := &accessRecorder{
 		builder: bal.NewBuilder(),
-		seen:    make(map[common.Address]*accessView),
+		seen:    make(map[common.Address]*accessView, len(s.stateObjects)),
+	}
+	for addr, obj := range s.stateObjects {
+		r.seen[addr] = newAccessView(obj)
+	}
+	s.blockAccess = r
+}
+
+// copy returns a deep copy of the recorder for a copy of the StateDB, which
+// starts with an empty journal. Views in seen are replaced, never modified, so
+// they are shared.
+func (r *accessRecorder) copy() *accessRecorder {
+	return &accessRecorder{
+		index:   r.index,
+		builder: r.builder.Copy(),
+		seen:    maps.Clone(r.seen),
 	}
 }
 

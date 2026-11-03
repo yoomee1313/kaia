@@ -34,6 +34,7 @@ import (
 	"math/big"
 
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/rlp"
 )
 
@@ -106,6 +107,27 @@ func (s *BlockAccessList) Encode() ([]byte, error) {
 }
 
 // Decode parses an RLP-encoded list and checks that it is in canonical order.
+// ChangesHash returns the hash committed in the header from the Amber hardfork:
+// the keccak256 of the RLP encoding of the list without storage reads and
+// without the accounts that were only read. Reads are left out because a block
+// producer also reads state for txs it does not include, so only the changes
+// are reproduced exactly by every node executing the block.
+func (s *BlockAccessList) ChangesHash() (common.Hash, error) {
+	changes := &BlockAccessList{Accounts: make([]AccountAccess, 0, len(s.Accounts))}
+	for _, a := range s.Accounts {
+		if !a.Changed() {
+			continue
+		}
+		a.StorageReads = nil
+		changes.Accounts = append(changes.Accounts, a)
+	}
+	enc, err := changes.Encode()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return crypto.Keccak256Hash(enc), nil
+}
+
 func Decode(b []byte) (*BlockAccessList, error) {
 	s := new(BlockAccessList)
 	if err := rlp.DecodeBytes(b, s); err != nil {

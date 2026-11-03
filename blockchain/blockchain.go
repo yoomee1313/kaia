@@ -2117,8 +2117,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			validateStart    time.Time
 		)
 
-		// The speculative state was executed without the access recorder, so recording skips the cache.
-		if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); bc.bal == nil && cached != nil {
+		// The speculative state records accesses only from the Amber hardfork, so recording before it skips the cache.
+		useCache := bc.bal == nil || bc.chainConfig.IsAmberForkEnabled(block.Number())
+		if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); useCache && cached != nil {
 			validateStart = time.Now()
 			if err = bc.validator.ValidateStateWithCache(block, cached); err == nil {
 				stateDB = cached.State
@@ -2139,7 +2140,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			if err != nil {
 				return i, events, coalescedLogs, err
 			}
-			if bc.bal != nil {
+			if bc.bal != nil || bc.chainConfig.IsAmberForkEnabled(block.Number()) {
 				stateDB.EnableBlockAccessRecorder()
 			}
 
