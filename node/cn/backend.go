@@ -287,6 +287,10 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			SnapshotCacheSize:    config.SnapshotCacheSize,
 			SnapshotAsyncGen:     config.SnapshotAsyncGen,
 			BALRecordDir:         config.BALRecordDir,
+
+			CheckpointDir:           config.CheckpointDir,
+			CheckpointTime:          config.CheckpointTime,
+			CheckpointBlockInterval: config.CheckpointBlockInterval,
 		}
 	)
 

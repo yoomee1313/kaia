@@ -205,6 +205,9 @@ var FlagGroups = []FlagGroup{
 			TriesInMemoryFlag,
 			LivePruningFlag,
 			LivePruningRetentionFlag,
+			StateCheckpointDirFlag,
+			StateCheckpointTimeFlag,
+			StateCheckpointBlockIntervalFlag,
 		},
 	},
 	{

@@ -805,6 +805,9 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
 	cfg.BALRecordDir = ctx.String(BALRecordDirFlag.Name)
+	cfg.CheckpointDir = ctx.String(StateCheckpointDirFlag.Name)
+	cfg.CheckpointTime = ctx.String(StateCheckpointTimeFlag.Name)
+	cfg.CheckpointBlockInterval = ctx.Uint64(StateCheckpointBlockIntervalFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

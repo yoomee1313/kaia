@@ -215,6 +215,24 @@ func (a *AccountAccess) Changed() bool {
 		len(a.CodeChanges) > 0 || len(a.AccountChanges) > 0 || len(a.Deleted) > 0 || len(a.StorageCleared) > 0
 }
 
+// Reset returns how a deletion or a recreation in the block supersedes the
+// changes of the account. If deleted is set, the account does not exist at the
+// end of the block. Otherwise changes with an index below from are superseded,
+// and cleared tells that the account was recreated from scratch at from, with
+// an empty storage. Changes with the same index as a deletion happened after it.
+func (a *AccountAccess) Reset() (from uint32, cleared, deleted bool) {
+	if n := len(a.Deleted); n > 0 {
+		if last, ok := a.LastWriteIndex(); !ok || last < a.Deleted[n-1] {
+			return 0, false, true
+		}
+		from, cleared = a.Deleted[n-1], true
+	}
+	if n := len(a.StorageCleared); n > 0 && a.StorageCleared[n-1] >= from {
+		from, cleared = a.StorageCleared[n-1], true
+	}
+	return from, cleared, false
+}
+
 // LastWriteIndex returns the highest index of any recorded write to the account
 // except deletion. ok is false if the account has no such write.
 func (a *AccountAccess) LastWriteIndex() (idx uint32, ok bool) {

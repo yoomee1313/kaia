@@ -140,6 +140,10 @@ type Config struct {
 	SnapshotAsyncGen     bool
 	BALRecordDir         string
 
+	CheckpointDir           string
+	CheckpointTime          string
+	CheckpointBlockInterval uint64
+
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`
 	ExtraData          []byte         `toml:",omitempty"`

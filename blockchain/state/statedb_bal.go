@@ -298,6 +298,18 @@ func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStor
 	}
 }
 
+// applyCode sets code from a block access list. Unlike SetCode it does not
+// load the previous code: a whole account record applied just before may
+// already carry the new code hash, and that code is only in the list.
+func (s *stateObject) applyCode(codeHash common.Hash, code []byte) error {
+	s.db.journal.append(codeChange{
+		account:  &s.address,
+		prevhash: s.CodeHash(),
+		prevcode: s.code,
+	})
+	return s.setCode(codeHash, code)
+}
+
 // ApplyBlockAccessList writes the final values of a block access list to the
 // state, which must be opened at the parent root of the block, and checks the
 // storage roots of the list. The caller then checks that IntermediateRoot(true)
@@ -329,22 +341,12 @@ func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {
 	addr := a.Address
 
 	// Changes before from are superseded by a deletion or a recreation.
-	var (
-		from    uint32
-		cleared bool
-	)
-	if n := len(a.Deleted); n > 0 {
-		// Changes with the same index as a deletion happened after it.
-		if last, ok := a.LastWriteIndex(); !ok || last < a.Deleted[n-1] {
-			if s.getStateObject(addr) != nil {
-				s.SelfDestruct(addr)
-			}
-			return nil
+	from, cleared, deleted := a.Reset()
+	if deleted {
+		if s.getStateObject(addr) != nil {
+			s.SelfDestruct(addr)
 		}
-		from, cleared = a.Deleted[n-1], true
-	}
-	if n := len(a.StorageCleared); n > 0 && a.StorageCleared[n-1] >= from {
-		from, cleared = a.StorageCleared[n-1], true
+		return nil
 	}
 
 	if n := len(a.AccountChanges); n > 0 && a.AccountChanges[n-1].Index >= from {
@@ -371,7 +373,7 @@ func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {
 	}
 	if n := len(a.CodeChanges); n > 0 && a.CodeChanges[n-1].Index >= from {
 		code := a.CodeChanges[n-1].Code
-		if err := obj.SetCode(crypto.Keccak256Hash(code), code); err != nil {
+		if err := obj.applyCode(crypto.Keccak256Hash(code), code); err != nil {
 			return err
 		}
 	}
@@ -381,4 +383,29 @@ func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {
 		}
 	}
 	return nil
+}
+
+// BALBase serves a state as the base of a BAL index, see bal.History.
+type BALBase struct {
+	s *StateDB
+}
+
+func NewBALBase(s *StateDB) *BALBase {
+	return &BALBase{s: s}
+}
+
+func (b *BALBase) Account(addr common.Address) (account.Account, error) {
+	acc := b.s.GetAccount(addr)
+	if acc == nil {
+		return nil, b.s.Error()
+	}
+	return acc.DeepCopy(), b.s.Error()
+}
+
+func (b *BALBase) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
+	return b.s.GetState(addr, slot), b.s.Error()
+}
+
+func (b *BALBase) Code(codeHash common.Hash) ([]byte, error) {
+	return b.s.db.ContractCode(codeHash)
 }
