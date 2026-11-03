@@ -19,11 +19,21 @@ cheaper disk (HDD). It is a port of go-ethereum's chain freezer
 - The chain freezer has four tables, all keyed by block number:
   `hashes` (raw, no compression), `headers`, `bodies` and `receipts` (snappy).
   Headers and bodies are stored exactly as they are in the key-value store
-  (header RLP, body RLP). Receipts are stored without their bloom filters
-  (`db_manager_freezer_receipts.go`): a slim item is `0x01` followed by the RLP
-  of the storage receipts minus the bloom, and the blooms are derived from the
-  logs on read. That saves 259 bytes per receipt. If a stored bloom does not
-  match its logs, the item is frozen unchanged; both formats are read.
+  (header RLP, body RLP). Receipts leave out what can be derived
+  (`db_manager_freezer_receipts.go`). The key-value form repeats the block and
+  transaction data: every receipt holds its tx hash and bloom, and every log
+  holds the block number, block hash, tx hash, tx index and log index. A frozen
+  item is `0x02` followed by the RLP of the receipts with the status, the
+  contract address (empty unless a contract was created; deriving it needs a
+  signature recovery), the logs' address, topics and data, and the gas used.
+  On read, the rest is derived from the block hash, the number and the body,
+  which is read through the body cache. Per receipt this saves 259 bytes of
+  bloom, 33 of tx hash and about 20 of contract address, plus about 78 per log.
+  In the unit test, 4 receipts with 6 logs take 2,201 bytes in the key-value
+  form and 555 frozen.
+  At freeze time every derived field is checked against the block. If one
+  differs, the item is frozen as `0x01` (the key-value form without the blooms),
+  and if a bloom does not match its logs, unchanged. All three formats are read.
   Deriving a bloom costs about 4 µs for a receipt with one log and three topics
   and 34 µs with eight logs (keccak dominates), so a block of 300 receipts adds
   1–3 ms to a frozen read, less than one HDD seek.

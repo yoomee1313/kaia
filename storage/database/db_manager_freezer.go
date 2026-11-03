@@ -478,6 +478,10 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 			if len(receipts) == 0 {
 				return fmt.Errorf("block receipts missing, can't freeze block %d", number)
 			}
+			var decoded types.Body
+			if err := rlp.DecodeBytes(body, &decoded); err != nil {
+				return fmt.Errorf("invalid block body, can't freeze block %d: %v", number, err)
+			}
 			if err := op.AppendRaw(ancient.ChainFreezerHashTable, number, hash[:]); err != nil {
 				return fmt.Errorf("can't write hash to freezer: %v", err)
 			}
@@ -487,7 +491,7 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
 				return fmt.Errorf("can't write body to freezer: %v", err)
 			}
-			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(number, receipts)); err != nil {
+			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(hash, number, decoded.Transactions, receipts)); err != nil {
 				return fmt.Errorf("can't write receipts to freezer: %v", err)
 			}
 			hashes = append(hashes, hash)
@@ -592,7 +596,7 @@ func (dbm *databaseManager) FreezeSyncedBlocks(blocks types.Blocks, receipts []t
 			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
 				return fmt.Errorf("can't write body to freezer: %v", err)
 			}
-			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(number, encodeStorageReceipts(receipts[i]))); err != nil {
+			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(hash, number, block.Transactions(), encodeStorageReceipts(receipts[i]))); err != nil {
 				return fmt.Errorf("can't write receipts to freezer: %v", err)
 			}
 			hashes[i] = hash

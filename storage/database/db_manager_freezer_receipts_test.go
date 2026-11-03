@@ -27,33 +27,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func genSlimTestReceipts() types.Receipts {
+// genDerivableReceipts makes receipts for the transactions of block (hash,
+// number) whose derived fields are set as block processing sets them. Receipt
+// i has i logs with up to three topics each, and receipt 1 created a contract.
+func genDerivableReceipts(hash common.Hash, number uint64, txs types.Transactions) types.Receipts {
 	var receipts types.Receipts
-	for i := 0; i < 4; i++ {
+	logIndex := uint(0)
+	for i, tx := range txs {
 		r := &types.Receipt{
 			Status:  types.ReceiptStatusSuccessful,
-			TxHash:  common.BytesToHash([]byte{byte(i), 0xaa}),
+			TxHash:  tx.Hash(),
 			GasUsed: uint64(21000 + i),
 			Logs:    []*types.Log{}, // decoded receipts have an empty slice
 		}
 		if i == 1 {
 			r.ContractAddress = common.BytesToAddress([]byte{0xcc, byte(i)})
 		}
-		// Receipt i has i logs with up to three topics each.
 		for j := 0; j < i; j++ {
 			log := &types.Log{
 				Address:     common.BytesToAddress([]byte{byte(j), 0xbb}),
+				Topics:      []common.Hash{},
 				Data:        []byte{byte(i), byte(j)},
-				BlockNumber: 7,
+				BlockNumber: number,
 				TxHash:      r.TxHash,
 				TxIndex:     uint(i),
-				BlockHash:   common.BytesToHash([]byte{0xdd}),
-				Index:       uint(i*10 + j),
+				BlockHash:   hash,
+				Index:       logIndex,
 			}
 			for k := 0; k <= j && k < 3; k++ {
 				log.Topics = append(log.Topics, common.BytesToHash([]byte{byte(i), byte(j), byte(k)}))
 			}
 			r.Logs = append(r.Logs, log)
+			logIndex++
 		}
 		r.Bloom = types.CreateBloom(types.Receipts{r})
 		receipts = append(receipts, r)
@@ -61,81 +66,129 @@ func genSlimTestReceipts() types.Receipts {
 	return receipts
 }
 
-func storageReceiptsRLP(t *testing.T, receipts types.Receipts) []byte {
-	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
-	for i, r := range receipts {
-		storageReceipts[i] = (*types.ReceiptForStorage)(r)
+func genReceiptTestTxs(t *testing.T, n int) types.Transactions {
+	var txs types.Transactions
+	for i := 0; i < n; i++ {
+		tx, err := genTransaction(uint64(i + 1))
+		require.NoError(t, err)
+		txs = append(txs, tx)
 	}
-	data, err := rlp.EncodeToBytes(storageReceipts)
-	require.NoError(t, err)
-	return data
+	return txs
 }
 
-// TestFrozenReceipts_Slim checks that the slim format drops the blooms and
-// restores the receipts exactly.
-func TestFrozenReceipts_Slim(t *testing.T) {
-	receipts := genSlimTestReceipts()
-	data := storageReceiptsRLP(t, receipts)
+func bodyOf(txs types.Transactions) func() *types.Body {
+	return func() *types.Body { return &types.Body{Transactions: txs} }
+}
 
-	slim, err := encodeFrozenReceipts(data)
+// TestFrozenReceipts_Derived checks that the derived format leaves out the
+// blooms and every field derived from the block, and restores the receipts
+// exactly.
+func TestFrozenReceipts_Derived(t *testing.T) {
+	var (
+		hash   = common.HexToHash("0xb10c")
+		number = uint64(7)
+		txs    = genReceiptTestTxs(t, 4)
+	)
+	receipts := genDerivableReceipts(hash, number, txs)
+	data := encodeStorageReceipts(receipts)
+
+	frozen := frozenReceipts(hash, number, txs, data)
+	require.Equal(t, byte(derivedReceiptsPrefix), frozen[0])
+	var stored []*types.ReceiptForStorage
+	require.NoError(t, rlp.DecodeBytes(data, &stored))
+	slim, err := encodeSlimReceipts(stored)
 	require.NoError(t, err)
-	assert.Equal(t, byte(slimReceiptsPrefix), slim[0])
-	// Each bloom is 256 bytes plus its RLP header; the prefix adds one byte.
-	assert.LessOrEqual(t, len(slim), len(data)-len(receipts)*types.BloomByteLength+1)
+	t.Logf("4 receipts, 6 logs: key-value %d bytes, slim %d, derived %d", len(data), len(slim), len(frozen))
+	assert.Less(t, len(frozen), len(slim))
+	assert.Less(t, len(slim), len(data))
 
-	decoded, err := decodeReceipts(slim)
+	decoded, err := decodeReceipts(frozen, hash, number, bodyOf(txs))
 	require.NoError(t, err)
 	assert.Equal(t, receipts, decoded)
 
-	// The key-value format still decodes.
-	decoded, err = decodeReceipts(data)
-	require.NoError(t, err)
-	assert.Equal(t, receipts, decoded)
+	// The slim and key-value formats still decode, without the body.
+	noBody := func() *types.Body { t.Fatal("body read"); return nil }
+	for _, item := range [][]byte{slim, data} {
+		decoded, err = decodeReceipts(item, hash, number, noBody)
+		require.NoError(t, err)
+		assert.Equal(t, receipts, decoded)
+	}
+
+	// The derived format needs the body.
+	_, err = decodeReceipts(frozen, hash, number, func() *types.Body { return nil })
+	assert.Error(t, err)
 
 	// A block without transactions.
-	empty := storageReceiptsRLP(t, types.Receipts{})
-	slim, err = encodeFrozenReceipts(empty)
-	require.NoError(t, err)
-	decoded, err = decodeReceipts(slim)
+	empty := frozenReceipts(hash, number, nil, encodeStorageReceipts(types.Receipts{}))
+	assert.Equal(t, byte(derivedReceiptsPrefix), empty[0])
+	decoded, err = decodeReceipts(empty, hash, number, bodyOf(nil))
 	require.NoError(t, err)
 	assert.Empty(t, decoded)
 }
 
-// TestFrozenReceipts_BloomMismatch checks that receipts whose stored bloom
-// does not match their logs are frozen unchanged.
-func TestFrozenReceipts_BloomMismatch(t *testing.T) {
-	receipts := genSlimTestReceipts()
-	receipts[2].Bloom[0] ^= 0x80
-	data := storageReceiptsRLP(t, receipts)
-
-	_, err := encodeFrozenReceipts(data)
-	assert.ErrorIs(t, err, errSlimReceiptsBloom)
-	assert.Equal(t, data, frozenReceipts(1, data))
-
-	decoded, err := decodeReceipts(frozenReceipts(1, data))
-	require.NoError(t, err)
-	assert.Equal(t, receipts, decoded)
+// TestFrozenReceipts_Fallback checks that receipts whose stored fields differ
+// from the derived ones are frozen in a format that keeps them.
+func TestFrozenReceipts_Fallback(t *testing.T) {
+	var (
+		hash   = common.HexToHash("0xb10c")
+		number = uint64(7)
+		txs    = genReceiptTestTxs(t, 4)
+	)
+	for name, tc := range map[string]struct {
+		modify func(types.Receipts)
+		txs    types.Transactions
+		prefix byte
+	}{
+		"log block hash": {func(r types.Receipts) { r[2].Logs[0].BlockHash = common.Hash{} }, txs, slimReceiptsPrefix},
+		"log index":      {func(r types.Receipts) { r[3].Logs[1].Index = 9 }, txs, slimReceiptsPrefix},
+		"tx hash":        {func(r types.Receipts) { r[0].TxHash = common.Hash{1} }, txs, slimReceiptsPrefix},
+		"tx count":       {func(types.Receipts) {}, txs[:3], slimReceiptsPrefix},
+		"bloom":          {func(r types.Receipts) { r[2].Bloom[0] ^= 0x80 }, txs, 0}, // unchanged
+	} {
+		t.Run(name, func(t *testing.T) {
+			receipts := genDerivableReceipts(hash, number, txs)
+			tc.modify(receipts)
+			data := encodeStorageReceipts(receipts)
+			frozen := frozenReceipts(hash, number, tc.txs, data)
+			if tc.prefix == 0 {
+				assert.Equal(t, data, frozen)
+			} else {
+				assert.Equal(t, tc.prefix, frozen[0])
+			}
+			decoded, err := decodeReceipts(frozen, hash, number, bodyOf(tc.txs))
+			require.NoError(t, err)
+			assert.Equal(t, receipts, decoded)
+		})
+	}
 }
 
 // TestFreezer_SlimReceipts checks that the freeze loop stores receipts in the
-// slim format and that they read back as they were written.
+// derived format when they match their block, in the slim format otherwise,
+// and that both read back as they were written.
 func TestFreezer_SlimReceipts(t *testing.T) {
 	dir := t.TempDir()
 	dbm := openFreezerTestDBM(t, newFreezerTestConfig(dir, true, 2))
 	defer dbm.Close()
 
 	blocks := writeFreezerTestChain(t, dbm, 6)
-	receipts := genSlimTestReceipts()
+	// The logs of the test chain carry another block number, so they are frozen
+	// in the slim format. Block 2 gets receipts that match it.
 	b := blocks[2]
+	receipts := genDerivableReceipts(b.hash(), 2, b.body.Transactions)
 	dbm.WriteReceipts(b.hash(), 2, receipts)
 	triggerFreeze(t, dbm)
 	require.Equal(t, uint64(4), dbm.FrozenBlocks())
 
-	for number := uint64(1); number < 4; number++ {
+	for _, fb := range blocks[1:4] {
+		number := fb.header.Number.Uint64()
 		item, err := dbm.freezer.Ancient(ancient.ChainFreezerReceiptTable, number)
 		require.NoError(t, err)
-		assert.Equal(t, byte(slimReceiptsPrefix), item[0], "receipts %d", number)
+		want, wantReceipts := byte(slimReceiptsPrefix), fb.receipts
+		if number == 2 {
+			want, wantReceipts = derivedReceiptsPrefix, receipts
+		}
+		assert.Equal(t, want, item[0], "receipts %d", number)
+		assert.Equal(t, wantReceipts, dbm.ReadReceipts(fb.hash(), number), "receipts %d", number)
 	}
-	assert.Equal(t, receipts, dbm.ReadReceipts(b.hash(), 2))
 	assert.Equal(t, receipts, dbm.ReadReceiptsByBlockHash(b.hash()))
 }
