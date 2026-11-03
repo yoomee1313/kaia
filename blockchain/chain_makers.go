@@ -281,6 +281,9 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 		if err != nil {
 			panic(err)
 		}
+		if config.IsAmberForkEnabled(new(big.Int).Add(parent.Number(), common.Big1)) {
+			statedb.EnableBlockAccessRecorder()
+		}
 		block, receipt := genblock(i, parent, statedb)
 		blocks[i] = block
 		receipts[i] = receipt

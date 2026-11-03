@@ -1002,6 +1002,13 @@ func copyStateDB(dst, src *StateDB) {
 	dst.transientStorage = src.transientStorage.Copy()
 	dst.journal = newJournal()
 
+	// The recorder is copied too, so that a state restored from a copy keeps
+	// the changes recorded until the copy.
+	dst.blockAccess = nil
+	if src.blockAccess != nil {
+		dst.blockAccess = src.blockAccess.copy()
+	}
+
 	// Copy the dirty states, logs, and preimages
 	for addr := range src.journal.dirties {
 		// As documented [here](https://github.com/ethereum/go-ethereum/pull/16485#issuecomment-380438527),

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 
 	"github.com/kaiachain/kaia/blockchain/bal"
@@ -32,6 +33,7 @@ import (
 var (
 	errBALMissingAccount = errors.New("recreated or new account has no whole account record")
 	errBALNoAccount      = errors.New("changed account does not exist and has no whole account record")
+	errBALStorageRoot    = errors.New("storage root mismatch")
 )
 
 // accessRecorder records the block access list while a block is executed. It
@@ -95,12 +97,32 @@ func kaiaFields(acc account.Account) []byte {
 }
 
 // EnableBlockAccessRecorder starts recording the block access list. It must be
-// called on a StateDB freshly opened at the parent root, before the block is
-// executed. The phase index starts at 0 (InitializeState).
+// called on a StateDB opened at the parent root, before the block is executed.
+// Accounts already loaded hold parent values and are taken as the base of their
+// changes; their reads are not recorded. The phase index starts at 0
+// (InitializeState).
 func (s *StateDB) EnableBlockAccessRecorder() {
-	s.blockAccess = &accessRecorder{
+	if len(s.journal.entries) > 0 || len(s.stateObjectsDirty) > 0 {
+		logger.Error("Block access recorder enabled on a modified state, the list will be wrong")
+	}
+	r := &accessRecorder{
 		builder: bal.NewBuilder(),
-		seen:    make(map[common.Address]*accessView),
+		seen:    make(map[common.Address]*accessView, len(s.stateObjects)),
+	}
+	for addr, obj := range s.stateObjects {
+		r.seen[addr] = newAccessView(obj)
+	}
+	s.blockAccess = r
+}
+
+// copy returns a deep copy of the recorder for a copy of the StateDB, which
+// starts with an empty journal. Views in seen are replaced, never modified, so
+// they are shared.
+func (r *accessRecorder) copy() *accessRecorder {
+	return &accessRecorder{
+		index:   r.index,
+		builder: r.builder.Copy(),
+		seen:    maps.Clone(r.seen),
 	}
 }
 
@@ -118,13 +140,24 @@ func (s *StateDB) SetBlockAccessIndex(idx int) {
 }
 
 // BlockAccessList returns the recorded block access list, or nil if the recorder
-// is not enabled. Changes are recorded at Finalise, so it is complete after
-// IntermediateRoot of the block.
+// is not enabled. Changes are recorded at Finalise and storage roots are taken
+// from the state, so it is complete after IntermediateRoot of the block.
 func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	if s.blockAccess == nil {
 		return nil
 	}
-	return s.blockAccess.builder.Build()
+	list := s.blockAccess.builder.Build()
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if !a.StorageChanged() {
+			continue
+		}
+		if obj := s.stateObjects[a.Address]; obj != nil && !obj.deleted {
+			root := obj.Root()
+			a.StorageRoot = &root
+		}
+	}
+	return list
 }
 
 func (r *accessRecorder) accountLoaded(addr common.Address, obj *stateObject) {
@@ -266,13 +299,24 @@ func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStor
 }
 
 // ApplyBlockAccessList writes the final values of a block access list to the
-// state, which must be opened at the parent root of the block. The caller then
-// checks that IntermediateRoot(true) equals the state root of the header.
+// state, which must be opened at the parent root of the block, and checks the
+// storage roots of the list. The caller then checks that IntermediateRoot(true)
+// equals the state root of the header.
 func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		if err := s.applyAccountAccess(a); err != nil {
 			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.IntermediateRoot(true)
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if a.StorageRoot == nil {
+			continue
+		}
+		if root := s.GetStorageRoot(a.Address); root != *a.StorageRoot {
+			return fmt.Errorf("account %s: %w (recorded %x, applied %x)", a.Address.Hex(), errBALStorageRoot, *a.StorageRoot, root)
 		}
 	}
 	return nil

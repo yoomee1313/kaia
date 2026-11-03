@@ -221,6 +221,11 @@ func TestKaiaConfig(maxHardfork string) *ChainConfig {
 		return chainConfig
 	}
 
+	chainConfig.AmberCompatibleBlock = big.NewInt(0)
+	if maxHardfork == "amber" {
+		return chainConfig
+	}
+
 	return chainConfig
 }
 
@@ -283,6 +288,7 @@ type ChainConfig struct {
 	PragueCompatibleBlock         *big.Int `json:"pragueCompatibleBlock,omitempty"`         // PragueCompatible switch block (nil = no fork)
 	OsakaCompatibleBlock          *big.Int `json:"osakaCompatibleBlock,omitempty"`          // OsakaCompatible switch block (nil = no fork)
 	PermissionlessCompatibleBlock *big.Int `json:"permissionlessCompatibleBlock,omitempty"` // PermissionlessCompatible switch block (nil = no fork)
+	AmberCompatibleBlock          *big.Int `json:"amberCompatibleBlock,omitempty"`          // AmberCompatible switch block (nil = no fork), commits the block access list hash in the header (experimental)
 
 	// Kip103 is a special purpose hardfork feature that can be executed only once
 	// Both Kip103CompatibleBlock and Kip103ContractAddress should be specified to enable KIP103
@@ -418,6 +424,7 @@ func (c *ChainConfig) String() string {
 		" PragueCompatibleBlock: %v"+
 		" OsakaCompatibleBlock: %v"+
 		" PermissionlessCompatibleBlock: %v"+
+		" AmberCompatibleBlock: %v"+
 		"%s%s%s"+
 		" UnitPrice: %d"+
 		" DeriveShaImpl: %d"+
@@ -435,6 +442,7 @@ func (c *ChainConfig) String() string {
 		c.PragueCompatibleBlock,
 		c.OsakaCompatibleBlock,
 		c.PermissionlessCompatibleBlock,
+		c.AmberCompatibleBlock,
 		kip103, kip160, subGroupSize,
 		c.UnitPrice,
 		c.DeriveShaImpl,
@@ -557,6 +565,11 @@ func (c *ChainConfig) IsPermissionlessForkEnabled(num *big.Int) bool {
 	return isForked(c.PermissionlessCompatibleBlock, num)
 }
 
+// IsAmberForkEnabled returns whether num is either equal to the amber block or greater.
+func (c *ChainConfig) IsAmberForkEnabled(num *big.Int) bool {
+	return isForked(c.AmberCompatibleBlock, num)
+}
+
 // IsKIP103ForkBlock returns whether num is equal to the kip103 block.
 func (c *ChainConfig) IsKIP103ForkBlock(num *big.Int) bool {
 	return isForkBlock(c.Kip103CompatibleBlock, num)
@@ -632,6 +645,7 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		{name: "pragueBlock", block: c.PragueCompatibleBlock},
 		{name: "osakaBlock", block: c.OsakaCompatibleBlock},
 		{name: "permissionlessBlock", block: c.PermissionlessCompatibleBlock},
+		{name: "amberBlock", block: c.AmberCompatibleBlock},
 	} {
 		if lastFork.name != "" {
 			// Next one must be higher number
@@ -720,6 +734,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, head *big.Int) *Confi
 	}
 	if isForkIncompatible(c.PermissionlessCompatibleBlock, newcfg.PermissionlessCompatibleBlock, head) {
 		return newCompatError("Permissionless Block", c.PermissionlessCompatibleBlock, newcfg.PermissionlessCompatibleBlock)
+	}
+	if isForkIncompatible(c.AmberCompatibleBlock, newcfg.AmberCompatibleBlock, head) {
+		return newCompatError("Amber Block", c.AmberCompatibleBlock, newcfg.AmberCompatibleBlock)
 	}
 	return nil
 }
@@ -868,6 +885,7 @@ type Rules struct {
 	IsPrague         bool
 	IsOsaka          bool
 	IsPermissionless bool
+	IsAmber          bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -890,6 +908,7 @@ func (c *ChainConfig) Rules(num *big.Int) Rules {
 		IsPrague:         c.IsPragueForkEnabled(num),
 		IsOsaka:          c.IsOsakaForkEnabled(num),
 		IsPermissionless: c.IsPermissionlessForkEnabled(num),
+		IsAmber:          c.IsAmberForkEnabled(num),
 	}
 }
 

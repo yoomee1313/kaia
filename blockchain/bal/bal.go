@@ -34,6 +34,7 @@ import (
 	"math/big"
 
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/rlp"
 )
 
@@ -42,6 +43,7 @@ var (
 	errUnsortedSlots    = errors.New("slots are not strictly sorted")
 	errUnsortedIndices  = errors.New("change indices are not strictly increasing")
 	errEmptySlotWrites  = errors.New("slot has no write")
+	errNoStorageChange  = errors.New("storage root without a storage change")
 )
 
 // BlockAccessList is the access list of one block. Accounts are sorted by address.
@@ -66,6 +68,12 @@ type AccountAccess struct {
 	AccountChanges []AccountChange // sorted by index
 	Deleted        []uint32        // phases in which the account was deleted
 	StorageCleared []uint32        // phases in which the account was recreated, dropping its storage
+
+	// StorageRoot is the storage root at the end of the block, set if the
+	// storage changed and the account exists at the end of the block. It lets
+	// the account trie be rebuilt without rebuilding every storage trie.
+	// Lists recorded before it was added do not have it.
+	StorageRoot *common.Hash `rlp:"optional"`
 }
 
 // SlotWrites holds the post values of one storage slot.
@@ -106,6 +114,27 @@ func (s *BlockAccessList) Encode() ([]byte, error) {
 }
 
 // Decode parses an RLP-encoded list and checks that it is in canonical order.
+// ChangesHash returns the hash committed in the header from the Amber hardfork:
+// the keccak256 of the RLP encoding of the list without storage reads and
+// without the accounts that were only read. Reads are left out because a block
+// producer also reads state for txs it does not include, so only the changes
+// are reproduced exactly by every node executing the block.
+func (s *BlockAccessList) ChangesHash() (common.Hash, error) {
+	changes := &BlockAccessList{Accounts: make([]AccountAccess, 0, len(s.Accounts))}
+	for _, a := range s.Accounts {
+		if !a.Changed() {
+			continue
+		}
+		a.StorageReads = nil
+		changes.Accounts = append(changes.Accounts, a)
+	}
+	enc, err := changes.Encode()
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return crypto.Keccak256Hash(enc), nil
+}
+
 func Decode(b []byte) (*BlockAccessList, error) {
 	s := new(BlockAccessList)
 	if err := rlp.DecodeBytes(b, s); err != nil {
@@ -159,7 +188,16 @@ func (a *AccountAccess) validate() error {
 	if !ok {
 		return errUnsortedIndices
 	}
+	if a.StorageRoot != nil && !a.StorageChanged() {
+		return errNoStorageChange
+	}
 	return nil
+}
+
+// StorageChanged returns whether the block wrote or dropped the storage of the
+// account.
+func (a *AccountAccess) StorageChanged() bool {
+	return len(a.StorageWrites) > 0 || len(a.StorageCleared) > 0
 }
 
 func increasing(n int, index func(int) uint32) bool {

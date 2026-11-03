@@ -79,6 +79,10 @@ type Header struct {
 	// VRank was added by KIP-227 and is ignored in legacy headers.
 	VRank []byte `json:"vrank,omitempty" rlp:"optional"`
 
+	// BlockAccessListHash was added by the Amber hardfork (experimental). It is
+	// the hash of the changes of the block access list, see bal.ChangesHash.
+	BlockAccessListHash *common.Hash `json:"blockAccessListHash,omitempty" rlp:"optional"`
+
 	// New header fields must be added at tail for backward compatibility.
 }
 
@@ -299,6 +303,10 @@ func CopyHeader(h *Header) *Header {
 	if len(h.VRank) > 0 {
 		cpy.VRank = make([]byte, len(h.VRank))
 		copy(cpy.VRank, h.VRank)
+	}
+	if h.BlockAccessListHash != nil {
+		cpy.BlockAccessListHash = new(common.Hash)
+		*cpy.BlockAccessListHash = *h.BlockAccessListHash
 	}
 	return &cpy
 }

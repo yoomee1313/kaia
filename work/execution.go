@@ -101,6 +101,9 @@ func (e *DefaultExecutor) ResetWithState(statedb *state.StateDB, header *types.H
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if e.config.IsAmberForkEnabled(header.Number) {
+		statedb.EnableBlockAccessRecorder()
+	}
 	e.state = statedb
 	e.header = header
 	e.txs = nil

@@ -18,6 +18,7 @@ package bal
 
 import (
 	"bytes"
+	"maps"
 	"math/big"
 	"slices"
 
@@ -128,6 +129,28 @@ func (a *accountBuilder) trimSlots(idx uint32) {
 			a.slots[slot] = changes
 		}
 	}
+}
+
+// Copy returns a deep copy of the builder.
+func (b *Builder) Copy() *Builder {
+	cpy := NewBuilder()
+	for addr, a := range b.accounts {
+		c := &accountBuilder{
+			reads:    maps.Clone(a.reads),
+			slots:    make(map[common.Hash][]SlotChange, len(a.slots)),
+			balances: slices.Clone(a.balances),
+			nonces:   slices.Clone(a.nonces),
+			codes:    slices.Clone(a.codes),
+			accounts: slices.Clone(a.accounts),
+			deleted:  slices.Clone(a.deleted),
+			cleared:  slices.Clone(a.cleared),
+		}
+		for slot, changes := range a.slots {
+			c.slots[slot] = slices.Clone(changes)
+		}
+		cpy.accounts[addr] = c
+	}
+	return cpy
 }
 
 // Build returns the list in canonical order.

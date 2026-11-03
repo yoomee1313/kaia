@@ -2123,7 +2123,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		if err != nil {
 			return i, events, coalescedLogs, err
 		}
-		if bc.bal != nil {
+		if bc.bal != nil || bc.chainConfig.IsAmberForkEnabled(block.Number()) {
 			stateDB.EnableBlockAccessRecorder()
 		}
 
@@ -2671,6 +2671,9 @@ func (bc *BlockChain) ValidateProposalExecution(block *types.Block) error {
 	stateDB, err := bc.PrunableStateAt(parent.Root(), parent.NumberU64())
 	if err != nil {
 		return err
+	}
+	if bc.chainConfig.IsAmberForkEnabled(block.Number()) {
+		stateDB.EnableBlockAccessRecorder()
 	}
 	receipts, _, usedGas, _, _, err := bc.processor.Process(block, stateDB, bc.vmConfig)
 	if err == nil {

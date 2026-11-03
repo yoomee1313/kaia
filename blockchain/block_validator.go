@@ -567,5 +567,31 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 	if root := statedb.IntermediateRoot(true); header.Root != root {
 		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
 	}
+	return validateBlockAccessListHash(v.config, header, statedb)
+}
+
+// validateBlockAccessListHash checks the block access list hash committed from
+// the Amber hardfork against the list recorded while executing the block.
+func validateBlockAccessListHash(config *params.ChainConfig, header *types.Header, statedb *state.StateDB) error {
+	if !config.IsAmberForkEnabled(header.Number) {
+		if header.BlockAccessListHash != nil {
+			return errors.New("block access list hash before the Amber hardfork")
+		}
+		return nil
+	}
+	if header.BlockAccessListHash == nil {
+		return errors.New("missing block access list hash")
+	}
+	list := statedb.BlockAccessList()
+	if list == nil {
+		return errors.New("block access list not recorded")
+	}
+	hash, err := list.ChangesHash()
+	if err != nil {
+		return err
+	}
+	if hash != *header.BlockAccessListHash {
+		return fmt.Errorf("invalid block access list hash (remote: %x local: %x)", *header.BlockAccessListHash, hash)
+	}
 	return nil
 }
