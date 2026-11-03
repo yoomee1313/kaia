@@ -123,3 +123,34 @@ func TestFreezer(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, genesis.Accounts)
 }
+
+// TestStorageRootOptional checks that a list without storage roots, as recorded
+// before they were added, still decodes, and that a storage root without a
+// storage change is rejected.
+func TestStorageRootOptional(t *testing.T) {
+	addr := common.HexToAddress("0x1")
+	list := &BlockAccessList{Accounts: []AccountAccess{{
+		Address:       addr,
+		StorageWrites: []SlotWrites{{Slot: common.Hash{1}, Changes: []SlotChange{{Index: 1, Value: common.Hash{2}}}}},
+	}}}
+	enc, err := list.Encode()
+	require.NoError(t, err)
+	decoded, err := Decode(enc)
+	require.NoError(t, err)
+	require.Nil(t, decoded.Accounts[0].StorageRoot)
+
+	root := common.Hash{3}
+	list.Accounts[0].StorageRoot = &root
+	enc, err = list.Encode()
+	require.NoError(t, err)
+	decoded, err = Decode(enc)
+	require.NoError(t, err)
+	require.Equal(t, root, *decoded.Accounts[0].StorageRoot)
+
+	list.Accounts[0].StorageWrites = nil
+	list.Accounts[0].BalanceChanges = []BalanceChange{{Index: 1, Balance: common.Big1}}
+	enc, err = list.Encode()
+	require.NoError(t, err)
+	_, err = Decode(enc)
+	require.ErrorIs(t, err, errNoStorageChange)
+}

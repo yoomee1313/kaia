@@ -33,6 +33,7 @@ import (
 var (
 	errBALMissingAccount = errors.New("recreated or new account has no whole account record")
 	errBALNoAccount      = errors.New("changed account does not exist and has no whole account record")
+	errBALStorageRoot    = errors.New("storage root mismatch")
 )
 
 // accessRecorder records the block access list while a block is executed. It
@@ -139,13 +140,24 @@ func (s *StateDB) SetBlockAccessIndex(idx int) {
 }
 
 // BlockAccessList returns the recorded block access list, or nil if the recorder
-// is not enabled. Changes are recorded at Finalise, so it is complete after
-// IntermediateRoot of the block.
+// is not enabled. Changes are recorded at Finalise and storage roots are taken
+// from the state, so it is complete after IntermediateRoot of the block.
 func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	if s.blockAccess == nil {
 		return nil
 	}
-	return s.blockAccess.builder.Build()
+	list := s.blockAccess.builder.Build()
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if !a.StorageChanged() {
+			continue
+		}
+		if obj := s.stateObjects[a.Address]; obj != nil && !obj.deleted {
+			root := obj.Root()
+			a.StorageRoot = &root
+		}
+	}
+	return list
 }
 
 func (r *accessRecorder) accountLoaded(addr common.Address, obj *stateObject) {
@@ -287,13 +299,24 @@ func (s *StateDB) SetAccount(addr common.Address, acc account.Account, clearStor
 }
 
 // ApplyBlockAccessList writes the final values of a block access list to the
-// state, which must be opened at the parent root of the block. The caller then
-// checks that IntermediateRoot(true) equals the state root of the header.
+// state, which must be opened at the parent root of the block, and checks the
+// storage roots of the list. The caller then checks that IntermediateRoot(true)
+// equals the state root of the header.
 func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		if err := s.applyAccountAccess(a); err != nil {
 			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.IntermediateRoot(true)
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if a.StorageRoot == nil {
+			continue
+		}
+		if root := s.GetStorageRoot(a.Address); root != *a.StorageRoot {
+			return fmt.Errorf("account %s: %w (recorded %x, applied %x)", a.Address.Hex(), errBALStorageRoot, *a.StorageRoot, root)
 		}
 	}
 	return nil

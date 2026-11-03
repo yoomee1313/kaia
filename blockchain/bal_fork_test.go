@@ -92,3 +92,27 @@ func TestAmberBlockAccessListHashInvalid(t *testing.T) {
 		})
 	}
 }
+
+// TestBlockAccessListStorageRoot checks that the list carries the storage root
+// of an account whose storage changed and that applying a list with a wrong
+// storage root fails.
+func TestBlockAccessListStorageRoot(t *testing.T) {
+	env := newBALTestEnv(t, "prague", 2)
+	chain, blocks := env.generate(1, func(i int, b *BlockGen) {
+		b.AddTx(env.legacyTx(b, 0, &env.addrs[1], big.NewInt(params.KAIA), nil))
+		b.AddTx(env.legacyTx(b, 1, &balStoreAddr, common.Big0, balSlotData(1, 2)))
+	})
+	list := checkBAL(t, chain, blocks)[0]
+
+	store := findAccess(t, list, balStoreAddr)
+	require.NotNil(t, store.StorageRoot)
+	statedb, err := chain.StateAt(blocks[0].Root())
+	require.NoError(t, err)
+	require.Equal(t, statedb.GetStorageRoot(balStoreAddr), *store.StorageRoot)
+	require.Nil(t, findAccess(t, list, env.addrs[1]).StorageRoot)
+
+	store.StorageRoot[0] ^= 1
+	parent, err := chain.StateAt(env.genesis.Root())
+	require.NoError(t, err)
+	require.ErrorContains(t, parent.ApplyBlockAccessList(list), "storage root mismatch")
+}

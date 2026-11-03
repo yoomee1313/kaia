@@ -43,6 +43,7 @@ var (
 	errUnsortedSlots    = errors.New("slots are not strictly sorted")
 	errUnsortedIndices  = errors.New("change indices are not strictly increasing")
 	errEmptySlotWrites  = errors.New("slot has no write")
+	errNoStorageChange  = errors.New("storage root without a storage change")
 )
 
 // BlockAccessList is the access list of one block. Accounts are sorted by address.
@@ -67,6 +68,12 @@ type AccountAccess struct {
 	AccountChanges []AccountChange // sorted by index
 	Deleted        []uint32        // phases in which the account was deleted
 	StorageCleared []uint32        // phases in which the account was recreated, dropping its storage
+
+	// StorageRoot is the storage root at the end of the block, set if the
+	// storage changed and the account exists at the end of the block. It lets
+	// the account trie be rebuilt without rebuilding every storage trie.
+	// Lists recorded before it was added do not have it.
+	StorageRoot *common.Hash `rlp:"optional"`
 }
 
 // SlotWrites holds the post values of one storage slot.
@@ -181,7 +188,16 @@ func (a *AccountAccess) validate() error {
 	if !ok {
 		return errUnsortedIndices
 	}
+	if a.StorageRoot != nil && !a.StorageChanged() {
+		return errNoStorageChange
+	}
 	return nil
+}
+
+// StorageChanged returns whether the block wrote or dropped the storage of the
+// account.
+func (a *AccountAccess) StorageChanged() bool {
+	return len(a.StorageWrites) > 0 || len(a.StorageCleared) > 0
 }
 
 func increasing(n int, index func(int) uint32) bool {
