@@ -459,6 +459,10 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 		rdb    = dbm.getDatabase(ReceiptsDB)
 		hashes = make([]common.Hash, 0, last-first+1)
 	)
+	var parent common.Hash
+	if first > 0 {
+		parent = common.BytesToHash(dbm.readAncientHash(first - 1))
+	}
 	_, err := dbm.freezer.ModifyAncients(func(op ancient.AncientWriteOp) error {
 		for number := first; number <= last; number++ {
 			hashData, _ := hdb.Get(headerHashKey(number))
@@ -482,19 +486,11 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 			if err := rlp.DecodeBytes(body, &decoded); err != nil {
 				return fmt.Errorf("invalid block body, can't freeze block %d: %v", number, err)
 			}
-			if err := op.AppendRaw(ancient.ChainFreezerHashTable, number, hash[:]); err != nil {
-				return fmt.Errorf("can't write hash to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerHeaderTable, number, header); err != nil {
-				return fmt.Errorf("can't write header to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
-				return fmt.Errorf("can't write body to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(hash, number, decoded.Transactions, receipts)); err != nil {
-				return fmt.Errorf("can't write receipts to freezer: %v", err)
+			if err := appendFrozenBlock(op, number, hash, parent, header, body, decoded.Transactions, receipts); err != nil {
+				return err
 			}
 			hashes = append(hashes, hash)
+			parent = hash
 		}
 		return nil
 	})
@@ -502,6 +498,25 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 		return err
 	}
 	dbm.finishFreeze(first, hashes)
+	return nil
+}
+
+// appendFrozenBlock appends a block in its key-value encoding to the freezer,
+// with the fields that can be derived left out of the header and receipts.
+// parent is the hash of the frozen block before it.
+func appendFrozenBlock(op ancient.AncientWriteOp, number uint64, hash, parent common.Hash, header, body []byte, txs types.Transactions, receipts []byte) error {
+	if err := op.AppendRaw(ancient.ChainFreezerHashTable, number, hash[:]); err != nil {
+		return fmt.Errorf("can't write hash to freezer: %v", err)
+	}
+	if err := op.AppendRaw(ancient.ChainFreezerHeaderTable, number, frozenHeader(number, parent, header)); err != nil {
+		return fmt.Errorf("can't write header to freezer: %v", err)
+	}
+	if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
+		return fmt.Errorf("can't write body to freezer: %v", err)
+	}
+	if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(hash, number, txs, receipts)); err != nil {
+		return fmt.Errorf("can't write receipts to freezer: %v", err)
+	}
 	return nil
 }
 
@@ -576,6 +591,7 @@ func (dbm *databaseManager) FreezeSyncedBlocks(blocks types.Blocks, receipts []t
 		return 0, nil
 	}
 	hashes := make([]common.Hash, n)
+	parent := common.BytesToHash(dbm.readAncientHash(first - 1))
 	_, err := dbm.freezer.ModifyAncients(func(op ancient.AncientWriteOp) error {
 		for i, block := range blocks[:n] {
 			number, hash := block.NumberU64(), block.Hash()
@@ -587,19 +603,11 @@ func (dbm *databaseManager) FreezeSyncedBlocks(blocks types.Blocks, receipts []t
 			if err != nil {
 				return err
 			}
-			if err := op.AppendRaw(ancient.ChainFreezerHashTable, number, hash[:]); err != nil {
-				return fmt.Errorf("can't write hash to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerHeaderTable, number, header); err != nil {
-				return fmt.Errorf("can't write header to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerBodiesTable, number, body); err != nil {
-				return fmt.Errorf("can't write body to freezer: %v", err)
-			}
-			if err := op.AppendRaw(ancient.ChainFreezerReceiptTable, number, frozenReceipts(hash, number, block.Transactions(), encodeStorageReceipts(receipts[i]))); err != nil {
-				return fmt.Errorf("can't write receipts to freezer: %v", err)
+			if err := appendFrozenBlock(op, number, hash, parent, header, body, block.Transactions(), encodeStorageReceipts(receipts[i])); err != nil {
+				return err
 			}
 			hashes[i] = hash
+			parent = hash
 		}
 		return nil
 	})
