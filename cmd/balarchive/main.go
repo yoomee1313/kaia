@@ -24,6 +24,7 @@
 //	balarchive export  -chaindata DIR -checkpoints DIR -at N
 //	balarchive regen   -bal DIR -checkpoints DIR -chaindata DIR -id ID -to N [-addr A]
 //	balarchive inspect -checkpoints DIR
+//	balarchive sync    -bal DIR -chaindata DIR -out DIR [-to N]
 package main
 
 import (
@@ -52,7 +53,7 @@ func main() {
 	}
 	cmds := map[string]func([]string) error{
 		"index": cmdIndex, "verify": cmdVerify, "get": cmdGet,
-		"export": cmdExport, "regen": cmdRegen, "inspect": cmdInspect,
+		"export": cmdExport, "regen": cmdRegen, "inspect": cmdInspect, "sync": cmdSync,
 	}
 	cmd, ok := cmds[os.Args[1]]
 	if !ok {
@@ -65,7 +66,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: balarchive index|verify|get|export|regen|inspect [flags], see -h of each")
+	fmt.Fprintln(os.Stderr, "usage: balarchive index|verify|get|export|regen|inspect|sync [flags], see -h of each")
 	os.Exit(2)
 }
 
