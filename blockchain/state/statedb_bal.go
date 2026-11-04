@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"sync"
+	"sync/atomic"
 
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types/account"
@@ -332,6 +334,52 @@ func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
 		}
 	}
 	return nil
+}
+
+// ApplyBlockAccessListUnchecked writes the final values of a block access list
+// like ApplyBlockAccessList and finalises the block without hashing, so that
+// several blocks can be applied in a row and checked once at the end: call
+// HashStorages, then IntermediateRoot. The storage roots of the list are not
+// checked.
+func (s *StateDB) ApplyBlockAccessListUnchecked(list *bal.BlockAccessList) error {
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if err := s.applyAccountAccess(a); err != nil {
+			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.Finalise(true, false)
+	return nil
+}
+
+// HashStorages computes the storage roots left out by Finalise with
+// setStorageRoot unset, with up to workers storage tries hashed at a time, and
+// writes the accounts to the account trie.
+func (s *StateDB) HashStorages(workers int) {
+	objs := make([]*stateObject, 0, len(s.stateObjectsDirtyStorage))
+	for addr := range s.stateObjectsDirtyStorage {
+		if so := s.getStateObject(addr); so != nil {
+			objs = append(objs, so)
+		}
+	}
+	s.stateObjectsDirtyStorage = make(map[common.Address]struct{})
+
+	// Each object hashes its own storage trie, so they do not share state.
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	for range max(1, workers) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < len(objs); i = int(next.Add(1) - 1) {
+				objs[i].updateStorageRoot(s.db)
+			}
+		})
+	}
+	wg.Wait()
+	for _, so := range objs {
+		s.updateStateObject(so)
+	}
 }
 
 func (s *StateDB) applyAccountAccess(a *bal.AccountAccess) error {

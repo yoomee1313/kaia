@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
@@ -47,10 +49,14 @@ type syncItem struct {
 }
 
 // cmdSync rebuilds the state from the genesis block by applying the block
-// access lists, without executing any block, into a new database. Every block
-// is checked against the state root of its header in the source chaindata.
+// access lists, without executing any block, into a new database. Blocks are
+// applied in batches that are hashed once and checked against the state root
+// in the header of their last block; a batch of 1 checks every block, and a
+// failed batch is replayed block by block to find the first wrong block.
+// Storage tries are hashed in parallel, and the trie nodes of the next batch
+// are read ahead while a batch is applied.
 //
-//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-commit N] [-cache MiB]
+//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-batch N] [-workers N]
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	balDir := fs.String("bal", "", "BAL freezer directory")
@@ -60,6 +66,9 @@ func cmdSync(args []string) error {
 	commitEvery := fs.Uint64("commit", 10000, "blocks between commits to disk")
 	dirtyMiB := fs.Int("dirty", 2048, "MiB of trie nodes held in memory before flushing")
 	cacheMiB := fs.Int("cache", 4096, "MiB of the trie node cache")
+	batchSize := fs.Uint64("batch", 1000, "blocks applied before one root check")
+	workers := fs.Int("workers", 8, "goroutines hashing storage tries and reading ahead")
+	prefetch := fs.Bool("prefetch", true, "read the trie nodes of the next batch ahead")
 	fs.Parse(args)
 
 	freezer, err := bal.OpenFreezer(*balDir, true)
@@ -97,16 +106,18 @@ func cmdSync(args []string) error {
 		end = *to
 	}
 
-	// Read and decode the lists and the header roots ahead of the applier.
-	items := make(chan syncItem, 4096)
+	// Read and decode the lists and the header roots ahead of the applier, in
+	// batches ending at multiples of the batch size.
+	batches := make(chan []syncItem, 4)
 	quit := make(chan struct{})
 	defer close(quit)
 	go func() {
-		defer close(items)
+		defer close(batches)
+		var batch []syncItem
 		for n := progress.Block + 1; n <= end; {
 			encs, err := freezer.ReadRawRange(n, min(end-n+1, 10_000), 16<<20)
 			if err != nil {
-				items <- syncItem{err: err}
+				batches <- []syncItem{{number: n, err: err}}
 				return
 			}
 			for _, enc := range encs {
@@ -118,13 +129,17 @@ func cmdSync(args []string) error {
 						item.err = fmt.Errorf("no header for block %d", n)
 					}
 				}
-				select {
-				case items <- item:
-				case <-quit:
-					return
-				}
-				if item.err != nil {
-					return
+				batch = append(batch, item)
+				if item.err != nil || n%*batchSize == 0 || n == end {
+					select {
+					case batches <- batch:
+					case <-quit:
+						return
+					}
+					if item.err != nil {
+						return
+					}
+					batch = nil
 				}
 				n++
 			}
@@ -151,38 +166,45 @@ func cmdSync(args []string) error {
 		}
 		return os.Rename(tmp, progressFile)
 	}
-	for item := range items {
-		if item.err != nil {
-			return fmt.Errorf("block %d: %w", item.number, item.err)
+	var prefetching atomic.Bool
+	readAhead := func(batch []syncItem, root common.Hash) {
+		if !*prefetch || !prefetching.CompareAndSwap(false, true) {
+			return
 		}
-		n := item.number
-		sdb, err := state.New(root, stateDB, nil, nil)
+		go func() {
+			defer prefetching.Store(false)
+			syncReadAhead(stateDB, root, batch, *workers)
+		}()
+	}
+	lastCommit := from
+	cur, ok := <-batches
+	for ok {
+		next, more := <-batches
+		if more {
+			readAhead(next, root)
+		}
+		if err := cur[len(cur)-1].err; err != nil {
+			return fmt.Errorf("block %d: %w", cur[len(cur)-1].number, err)
+		}
+		nextRoot, err := syncApply(stateDB, root, cur, *workers)
 		if err != nil {
-			return fmt.Errorf("block %d: %w", n, err)
+			return err
 		}
-		if err := sdb.ApplyBlockAccessList(item.list); err != nil {
-			return fmt.Errorf("block %d: %w", n, err)
-		}
-		next, err := sdb.Commit(true)
-		if err != nil {
-			return fmt.Errorf("block %d: %w", n, err)
-		}
-		if next != item.root {
-			return fmt.Errorf("block %d: state root %x, header has %x", n, next, item.root)
-		}
-		trieDB.ReferenceRoot(next)
+		trieDB.ReferenceRoot(nextRoot)
 		trieDB.Dereference(root)
-		root = next
+		root = nextRoot
 
+		n := cur[len(cur)-1].number
 		if nodes, _, _ := trieDB.Size(); nodes > common.StorageSize(*dirtyMiB)*1024*1024 {
 			if err := trieDB.Cap(common.StorageSize(*dirtyMiB)*1024*1024 - database.IdealBatchSize); err != nil {
 				return err
 			}
 		}
-		if n%*commitEvery == 0 || n == end {
+		if n-lastCommit >= *commitEvery || n == end {
 			if err := commit(n, root); err != nil {
 				return err
 			}
+			lastCommit = n
 		}
 		if time.Since(last) > 30*time.Second {
 			last = time.Now()
@@ -191,8 +213,90 @@ func cmdSync(args []string) error {
 			fmt.Printf("synced %d/%d, %.0f blocks/s, dirty %s, eta %s\n", n, end, rate, nodes,
 				(time.Duration(float64(end-n)/rate) * time.Second).Round(time.Minute))
 		}
+		cur, ok = next, more
 	}
 	fmt.Printf("rebuilt the state of block %d (root %x) from block %d in %s, every root matched\n",
 		end, root, from, time.Since(start).Round(time.Second))
 	return nil
+}
+
+// syncApply applies a batch of lists to the state at root and returns the new
+// root, committed to the trie database. If the root of the batch does not match
+// the header of its last block, the batch is replayed block by block from root
+// to report the first wrong block.
+func syncApply(stateDB state.Database, root common.Hash, batch []syncItem, workers int) (common.Hash, error) {
+	sdb, err := state.New(root, stateDB, nil, nil)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("block %d: %w", batch[0].number, err)
+	}
+	for _, item := range batch {
+		if err := sdb.ApplyBlockAccessListUnchecked(item.list); err != nil {
+			return common.Hash{}, fmt.Errorf("block %d: %w", item.number, err)
+		}
+	}
+	sdb.HashStorages(workers)
+	last := batch[len(batch)-1]
+	if got := sdb.IntermediateRoot(true); got != last.root || sdb.Error() != nil {
+		return common.Hash{}, syncFindBad(stateDB, root, batch)
+	}
+	return sdb.Commit(true)
+}
+
+func syncFindBad(stateDB state.Database, root common.Hash, batch []syncItem) error {
+	sdb, err := state.New(root, stateDB, nil, nil)
+	if err != nil {
+		return err
+	}
+	for _, item := range batch {
+		if err := sdb.ApplyBlockAccessList(item.list); err != nil {
+			return fmt.Errorf("block %d: %w", item.number, err)
+		}
+		if got := sdb.IntermediateRoot(true); got != item.root {
+			return fmt.Errorf("block %d: state root %x, header has %x", item.number, got, item.root)
+		}
+		if err := sdb.Error(); err != nil {
+			return fmt.Errorf("block %d: %w", item.number, err)
+		}
+	}
+	return fmt.Errorf("blocks %d-%d: the batch root did not match, but every block does", batch[0].number, batch[len(batch)-1].number)
+}
+
+// syncReadAhead reads the accounts and slots of a batch from the state at root,
+// so that their trie nodes are in the cache when the batch is applied. Errors
+// are ignored: root may be released meanwhile.
+func syncReadAhead(stateDB state.Database, root common.Hash, batch []syncItem, workers int) {
+	type key struct {
+		addr common.Address
+		slot *common.Hash
+	}
+	var keys []key
+	for _, item := range batch {
+		for i := range item.list.Accounts {
+			a := &item.list.Accounts[i]
+			keys = append(keys, key{addr: a.Address})
+			for j := range a.StorageWrites {
+				keys = append(keys, key{addr: a.Address, slot: &a.StorageWrites[j].Slot})
+			}
+		}
+	}
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	for range max(1, workers) {
+		wg.Go(func() {
+			sdb, err := state.New(root, stateDB, nil, nil)
+			if err != nil {
+				return
+			}
+			for i := int(next.Add(1) - 1); i < len(keys); i = int(next.Add(1) - 1) {
+				if k := keys[i]; k.slot == nil {
+					sdb.GetBalance(k.addr)
+				} else {
+					sdb.GetState(k.addr, *k.slot)
+				}
+			}
+		})
+	}
+	wg.Wait()
 }

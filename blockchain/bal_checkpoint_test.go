@@ -169,3 +169,27 @@ func TestBlockChainCheckpoint(t *testing.T) {
 	_, _, err = checkpoint.Regen(store, segments[0].ID, listSlice(c.lists), uint64(len(c.blocks)), nil, check)
 	require.NoError(t, err)
 }
+
+// TestBALApplyUnchecked applies the lists of several blocks in a row, hashing
+// once per batch, and checks the root at the end of every batch.
+func TestBALApplyUnchecked(t *testing.T) {
+	for _, hardfork := range []string{"shanghai", "prague"} {
+		c := newBALHistoryChain(t, hardfork)
+		for _, size := range []int{1, 2, 3, 4, len(c.lists)} {
+			root := c.env.genesis.Root()
+			for start := 0; start < len(c.lists); start += size {
+				end := min(start+size, len(c.lists))
+				sdb, err := c.chain.StateAt(root)
+				require.NoError(t, err)
+				for _, list := range c.lists[start:end] {
+					require.NoError(t, sdb.ApplyBlockAccessListUnchecked(list))
+				}
+				sdb.HashStorages(4)
+				require.Equal(t, c.blocks[end-1].Root(), sdb.IntermediateRoot(true), "%s: batch %d of blocks %d-%d", hardfork, size, start+1, end)
+				root, err = sdb.Commit(true)
+				require.NoError(t, err)
+				require.NoError(t, sdb.Error())
+			}
+		}
+	}
+}
