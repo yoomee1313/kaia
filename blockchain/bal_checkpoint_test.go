@@ -22,6 +22,7 @@ import (
 
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/checkpoint"
+	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
@@ -260,4 +261,43 @@ func TestRegenListHash(t *testing.T) {
 	err = regen(tamper(0, otherValue))
 	require.NotErrorIs(t, err, bal.ErrHashMismatch)
 	require.ErrorContains(t, err, "block 1: state root")
+}
+
+// TestRevert sets the head state of a chain back to every earlier block with
+// the history and checks the root, through the deletion and recreation of a
+// contract (shanghai) and EIP-7702 delegation (prague).
+func TestRevert(t *testing.T) {
+	for _, hardfork := range []string{"shanghai", "prague"} {
+		c := newBALHistoryChain(t, hardfork)
+		db := database.NewMemDB()
+		builder, err := bal.NewIndexBuilder(db, 0, c.env.genesis.Root())
+		require.NoError(t, err)
+		for i, list := range c.lists {
+			require.NoError(t, builder.Add(uint64(i+1), list))
+		}
+		require.NoError(t, builder.Flush())
+		index, err := bal.OpenIndex(db)
+		require.NoError(t, err)
+		base, err := c.chain.StateAt(c.env.genesis.Root())
+		require.NoError(t, err)
+		history := bal.NewHistory(index, listSlice(c.lists), state.NewBALBase(base))
+		headers := func(n uint64) (*types.Header, error) {
+			if n == 0 {
+				return c.env.genesis.Header(), nil
+			}
+			return c.blocks[n-1].Header(), nil
+		}
+
+		head := uint64(len(c.blocks))
+		for target := uint64(0); target <= head; target++ {
+			sdb, err := c.chain.StateAt(c.blocks[head-1].Root())
+			require.NoError(t, err)
+			stats, err := checkpoint.Revert(sdb, history, listSlice(c.lists), target, head, headers)
+			require.NoError(t, err, "%s: block %d", hardfork, target)
+			if hardfork == "shanghai" && target == 3 {
+				// The child, recreated in 4, deleted in 6 and recreated in 8.
+				require.NotZero(t, stats.Rebuilt)
+			}
+		}
+	}
 }
