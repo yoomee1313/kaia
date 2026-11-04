@@ -715,6 +715,9 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 	// First, check stateObjects if there is "live" object.
 	if obj := s.stateObjects[addr]; obj != nil {
+		if s.blockAccess != nil {
+			s.blockAccess.accountRead(addr)
+		}
 		return obj
 	}
 	obj := s.loadStateObject(addr)
@@ -1094,6 +1097,14 @@ func (s *StateDB) RevertToSnapshot(revid int) {
 	// Replay the journal to undo changes and remove invalidated snapshots
 	s.journal.revert(s, snapshot)
 	s.validRevisions = s.validRevisions[:idx]
+
+	// Reverting to the start of the journal drops a whole tx, as a block
+	// producer does with a tx it cannot include, so its reads are dropped too.
+	// A tx that reverts in the EVM keeps its reads: it is still included, and
+	// its first snapshot is taken after the gas is bought.
+	if snapshot == 0 && s.blockAccess != nil {
+		s.blockAccess.dropReads()
+	}
 }
 
 // GetRefund returns the current value of the refund counter.

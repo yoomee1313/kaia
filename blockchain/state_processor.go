@@ -120,6 +120,7 @@ func (p *StateProcessor) InitializeState(header *types.Header, statedb *state.St
 			return err
 		}
 	}
+	statedb.EndBlockAccessInitialization()
 	return nil
 }
 
@@ -156,7 +157,7 @@ func (p *StateProcessor) FinalizeState(header *types.Header, statedb *state.Stat
 	// is left unset and the block fails ValidateState.
 	if p.config.IsAmberForkEnabled(header.Number) {
 		if list := statedb.BlockAccessList(); list != nil {
-			hash, err := list.ChangesHash()
+			hash, err := list.Hash()
 			if err != nil {
 				return nil, err
 			}

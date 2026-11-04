@@ -41,14 +41,23 @@ var (
 // accessRecorder records the block access list while a block is executed. It
 // only observes the StateDB and never changes state or gas.
 //
-// Reads are recorded when an account is loaded and when a slot is read through
-// GetState or GetCommittedState. Writes are recorded as post values whenever
-// the journal is flushed: at every Finalise, which marks the end of a tx, and
-// when the phase index changes, so that changes of InitializeState that were
-// not finalised are not attributed to the first tx.
+// Reads are recorded when an account is accessed and when a slot is read
+// through GetState or GetCommittedState. Writes are recorded as post values
+// whenever the journal is flushed: at every Finalise, which marks the end of a
+// tx, and when the phase index changes, so that changes of InitializeState that
+// were not finalised are not attributed to the first tx.
+//
+// Reads are held as pending until the phase they belong to is kept: they are
+// committed at Finalise and at the end of InitializeState, and dropped when a
+// tx starts and when a whole tx is reverted. So a block producer that reads
+// state between txs, or runs a tx it then drops, records the same reads as a
+// validator that runs only the included txs.
 type accessRecorder struct {
 	index   uint32
 	builder *bal.Builder
+
+	pendingAccounts map[common.Address]struct{}
+	pendingSlots    map[common.Address]map[common.Hash]struct{}
 
 	// seen holds, per account, the values as of the last recorded change, or
 	// as loaded from the parent state. A change is recorded only if the value
@@ -101,15 +110,16 @@ func kaiaFields(acc account.Account) []byte {
 // EnableBlockAccessRecorder starts recording the block access list. It must be
 // called on a StateDB opened at the parent root, before the block is executed.
 // Accounts already loaded hold parent values and are taken as the base of their
-// changes; their reads are not recorded. The phase index starts at 0
-// (InitializeState).
+// changes. The phase index starts at 0 (InitializeState).
 func (s *StateDB) EnableBlockAccessRecorder() {
 	if len(s.journal.entries) > 0 || len(s.stateObjectsDirty) > 0 {
 		logger.Error("Block access recorder enabled on a modified state, the list will be wrong")
 	}
 	r := &accessRecorder{
-		builder: bal.NewBuilder(),
-		seen:    make(map[common.Address]*accessView, len(s.stateObjects)),
+		builder:         bal.NewBuilder(),
+		seen:            make(map[common.Address]*accessView, len(s.stateObjects)),
+		pendingAccounts: make(map[common.Address]struct{}),
+		pendingSlots:    make(map[common.Address]map[common.Hash]struct{}),
 	}
 	for addr, obj := range s.stateObjects {
 		r.seen[addr] = newAccessView(obj)
@@ -121,57 +131,100 @@ func (s *StateDB) EnableBlockAccessRecorder() {
 // starts with an empty journal. Views in seen are replaced, never modified, so
 // they are shared.
 func (r *accessRecorder) copy() *accessRecorder {
+	slots := make(map[common.Address]map[common.Hash]struct{}, len(r.pendingSlots))
+	for addr, m := range r.pendingSlots {
+		slots[addr] = maps.Clone(m)
+	}
 	return &accessRecorder{
-		index:   r.index,
-		builder: r.builder.Copy(),
-		seen:    maps.Clone(r.seen),
+		index:           r.index,
+		builder:         r.builder.Copy(),
+		seen:            maps.Clone(r.seen),
+		pendingAccounts: maps.Clone(r.pendingAccounts),
+		pendingSlots:    slots,
 	}
 }
 
-// SetBlockAccessIndex switches the phase index of the block access recorder:
-// 0 for InitializeState, i+1 for the i-th tx, and len(txs)+1 for
-// FinalizeState. Changes not yet finalised are recorded under the old index.
-// It is a no-op if the recorder is not enabled.
+// SetBlockAccessIndex starts a phase of the block access recorder: 0 for
+// InitializeState, i+1 for the i-th tx, and len(txs)+1 for FinalizeState.
+// Changes not yet finalised are recorded under the old index. Pending reads are
+// dropped: they were made after the last Finalise, outside of any tx, as a
+// block producer does. It is a no-op if the recorder is not enabled.
 func (s *StateDB) SetBlockAccessIndex(idx int) {
 	r := s.blockAccess
-	if r == nil || r.index == uint32(idx) {
+	if r == nil {
+		return
+	}
+	r.dropReads()
+	if r.index == uint32(idx) {
 		return
 	}
 	r.capture(s, false, false)
 	r.index = uint32(idx)
 }
 
+// EndBlockAccessInitialization keeps the changes and reads of InitializeState,
+// which may not be finalised. It is a no-op if the recorder is not enabled.
+func (s *StateDB) EndBlockAccessInitialization() {
+	if r := s.blockAccess; r != nil {
+		r.capture(s, false, false)
+		r.commitReads()
+	}
+}
+
 // BlockAccessList returns the recorded block access list, or nil if the recorder
-// is not enabled. Changes are recorded at Finalise and storage roots are taken
-// from the state, so it is complete after IntermediateRoot of the block.
+// is not enabled. Changes are recorded at Finalise, so it is complete after
+// IntermediateRoot of the block. Storage roots are not recorded.
 func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	if s.blockAccess == nil {
 		return nil
 	}
-	list := s.blockAccess.builder.Build()
-	for i := range list.Accounts {
-		a := &list.Accounts[i]
-		if !a.StorageChanged() {
-			continue
-		}
-		if obj := s.stateObjects[a.Address]; obj != nil && !obj.deleted {
-			root := obj.Root()
-			a.StorageRoot = &root
-		}
-	}
-	return list
+	return s.blockAccess.builder.Build()
 }
 
+// accountLoaded takes the values of a newly loaded account as the base of its
+// changes, and records the read.
 func (r *accessRecorder) accountLoaded(addr common.Address, obj *stateObject) {
-	if _, ok := r.seen[addr]; ok {
-		return
+	if _, ok := r.seen[addr]; !ok {
+		r.seen[addr] = newAccessView(obj)
 	}
-	r.builder.ReadAccount(addr)
-	r.seen[addr] = newAccessView(obj)
+	r.accountRead(addr)
+}
+
+// accountRead records a read of an account, loaded or not. It is recorded on
+// every access, not on load only: a tx that is dropped may be the one that
+// loaded the account.
+func (r *accessRecorder) accountRead(addr common.Address) {
+	r.pendingAccounts[addr] = struct{}{}
 }
 
 func (r *accessRecorder) slotRead(addr common.Address, slot common.Hash) {
-	r.builder.ReadSlot(addr, slot)
+	m := r.pendingSlots[addr]
+	if m == nil {
+		m = make(map[common.Hash]struct{})
+		r.pendingSlots[addr] = m
+	}
+	m[slot] = struct{}{}
+}
+
+func (r *accessRecorder) commitReads() {
+	for addr := range r.pendingAccounts {
+		r.builder.ReadAccount(addr)
+	}
+	for addr, slots := range r.pendingSlots {
+		for slot := range slots {
+			r.builder.ReadSlot(addr, slot)
+		}
+	}
+	r.dropReads()
+}
+
+func (r *accessRecorder) dropReads() {
+	if len(r.pendingAccounts) > 0 {
+		r.pendingAccounts = make(map[common.Address]struct{})
+	}
+	if len(r.pendingSlots) > 0 {
+		r.pendingSlots = make(map[common.Address]map[common.Hash]struct{})
+	}
 }
 
 // capture records the post values of the accounts changed since the last
@@ -184,8 +237,9 @@ func (r *accessRecorder) capture(s *StateDB, final, deleteEmptyObjects bool) {
 	}
 	r.journalOffset = len(s.journal.entries)
 	if final {
-		// Finalise clears the journal.
+		// Finalise clears the journal and ends the tx, which keeps its reads.
 		r.journalOffset = 0
+		r.commitReads()
 	}
 
 	// Collect the written slots with their values before the first write, and
@@ -324,6 +378,7 @@ func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
 		}
 	}
 	s.IntermediateRoot(true)
+	// Lists recorded with storage roots are checked against them.
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		if a.StorageRoot == nil {

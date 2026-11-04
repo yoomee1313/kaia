@@ -80,7 +80,7 @@ type Header struct {
 	VRank []byte `json:"vrank,omitempty" rlp:"optional"`
 
 	// BlockAccessListHash was added by the Amber hardfork (experimental). It is
-	// the hash of the changes of the block access list, see bal.ChangesHash.
+	// the hash of the whole block access list, see bal.BlockAccessList.Hash.
 	BlockAccessListHash *common.Hash `json:"blockAccessListHash,omitempty" rlp:"optional"`
 
 	// New header fields must be added at tail for backward compatibility.

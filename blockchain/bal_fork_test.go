@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
@@ -42,7 +43,7 @@ func amberTestTxs(env *balTestEnv) func(int, *BlockGen) {
 }
 
 // TestAmberBlockAccessListHash checks that blocks from the Amber hardfork commit
-// the hash of the changes of their block access list and are accepted.
+// the hash of their block access list and are accepted.
 func TestAmberBlockAccessListHash(t *testing.T) {
 	env := newAmberTestEnv(t)
 	chain, blocks := env.generate(4, amberTestTxs(env))
@@ -54,7 +55,7 @@ func TestAmberBlockAccessListHash(t *testing.T) {
 			continue
 		}
 		require.NotNil(t, block.Header().BlockAccessListHash, "block %d", block.NumberU64())
-		hash, err := lists[i].ChangesHash()
+		hash, err := lists[i].Hash()
 		require.NoError(t, err)
 		require.Equal(t, hash, *block.Header().BlockAccessListHash, "block %d", block.NumberU64())
 	}
@@ -93,9 +94,9 @@ func TestAmberBlockAccessListHashInvalid(t *testing.T) {
 	}
 }
 
-// TestBlockAccessListStorageRoot checks that the list carries the storage root
-// of an account whose storage changed and that applying a list with a wrong
-// storage root fails.
+// TestBlockAccessListStorageRoot checks that storage roots are no longer
+// recorded, and that a list that has one, recorded before, is still applied and
+// checked against it. The root is not part of the hash.
 func TestBlockAccessListStorageRoot(t *testing.T) {
 	env := newBALTestEnv(t, "prague", 2)
 	chain, blocks := env.generate(1, func(i int, b *BlockGen) {
@@ -103,16 +104,30 @@ func TestBlockAccessListStorageRoot(t *testing.T) {
 		b.AddTx(env.legacyTx(b, 1, &balStoreAddr, common.Big0, balSlotData(1, 2)))
 	})
 	list := checkBAL(t, chain, blocks)[0]
+	for _, a := range list.Accounts {
+		require.Nil(t, a.StorageRoot, "account %s", a.Address.Hex())
+	}
+	hash, err := list.Hash()
+	require.NoError(t, err)
 
-	store := findAccess(t, list, balStoreAddr)
-	require.NotNil(t, store.StorageRoot)
+	// A list recorded with the storage root of the store contract.
 	statedb, err := chain.StateAt(blocks[0].Root())
 	require.NoError(t, err)
-	require.Equal(t, statedb.GetStorageRoot(balStoreAddr), *store.StorageRoot)
-	require.Nil(t, findAccess(t, list, env.addrs[1]).StorageRoot)
+	store := findAccess(t, list, balStoreAddr)
+	root := statedb.GetStorageRoot(balStoreAddr)
+	store.StorageRoot = &root
+	enc, err := list.Encode()
+	require.NoError(t, err)
+	old, err := bal.Decode(enc)
+	require.NoError(t, err)
+	require.NoError(t, old.CheckHash(&hash))
+	parent, err := chain.StateAt(env.genesis.Root())
+	require.NoError(t, err)
+	require.NoError(t, parent.ApplyBlockAccessList(old))
+	require.Equal(t, blocks[0].Root(), parent.IntermediateRoot(true))
 
 	store.StorageRoot[0] ^= 1
-	parent, err := chain.StateAt(env.genesis.Root())
+	parent, err = chain.StateAt(env.genesis.Root())
 	require.NoError(t, err)
 	require.ErrorContains(t, parent.ApplyBlockAccessList(list), "storage root mismatch")
 }

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/checkpoint"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -67,7 +68,7 @@ func testBALCheckpoint(t *testing.T, hardfork string) {
 		headers[b.NumberU64()] = b.Root()
 	}
 	lists := listSlice(c.lists)
-	check := func(n uint64) (common.Hash, error) { return headers[n], nil }
+	check := func(n uint64) (*types.Header, error) { return c.blocks[n-1].Header(), nil }
 
 	store, err := storecp.Open(t.TempDir(), nil)
 	require.NoError(t, err)
@@ -165,7 +166,7 @@ func TestBlockChainCheckpoint(t *testing.T) {
 		require.Equal(t, uint64(i), meta.Base)
 		require.Equal(t, storecp.TriggerInterval, meta.Trigger)
 	}
-	check := func(n uint64) (common.Hash, error) { return c.blocks[n-1].Root(), nil }
+	check := func(n uint64) (*types.Header, error) { return c.blocks[n-1].Header(), nil }
 	_, _, err = checkpoint.Regen(store, segments[0].ID, listSlice(c.lists), uint64(len(c.blocks)), nil, check)
 	require.NoError(t, err)
 }
@@ -192,4 +193,71 @@ func TestBALApplyUnchecked(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRegenListHash checks that Regen rejects a list whose writes differ from
+// the hash in the header before applying it, and accepts a list whose reads
+// differ or are left out, since the hash covers the writes only.
+func TestRegenListHash(t *testing.T) {
+	env := newAmberTestEnv(t)
+	chain, blocks := env.generate(4, amberTestTxs(env))
+	lists := checkBAL(t, chain, blocks)
+	require.Nil(t, blocks[0].Header().BlockAccessListHash)
+	require.NotNil(t, blocks[3].Header().BlockAccessListHash)
+
+	store, err := storecp.Open(t.TempDir(), nil)
+	require.NoError(t, err)
+	defer store.Close()
+	_, _, err = checkpoint.Export(store, storecp.Meta{ID: 1, BlockNumber: 0, StateRoot: env.genesis.Root(), Trigger: storecp.TriggerInterval},
+		chain.StateCache().TrieDB().Node, chain.StateCache().ContractCode, nil)
+	require.NoError(t, err)
+	headers := func(n uint64) (*types.Header, error) { return blocks[n-1].Header(), nil }
+	regen := func(lists []*bal.BlockAccessList) error {
+		_, _, err := checkpoint.Regen(store, 1, listSlice(lists), 4, nil, headers)
+		return err
+	}
+	require.NoError(t, regen(lists))
+
+	// tamper returns the lists with list i copied and changed by f.
+	tamper := func(i int, f func(*bal.AccountAccess)) []*bal.BlockAccessList {
+		out := make([]*bal.BlockAccessList, len(lists))
+		copy(out, lists)
+		enc, err := lists[i].Encode()
+		require.NoError(t, err)
+		out[i], err = bal.Decode(enc)
+		require.NoError(t, err)
+		for j := range out[i].Accounts {
+			if a := &out[i].Accounts[j]; a.Address == balStoreAddr {
+				f(a)
+			}
+		}
+		require.NoError(t, out[i].Validate())
+		return out
+	}
+	extraRead := func(a *bal.AccountAccess) {
+		a.StorageReads = append(a.StorageReads, common.HexToHash("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+	}
+	otherValue := func(a *bal.AccountAccess) {
+		w := &a.StorageWrites[0]
+		w.Changes[len(w.Changes)-1].Value[0] ^= 1
+	}
+
+	// Reads are not covered by the hash: a list with another read, or with
+	// the writes only, passes.
+	require.NoError(t, regen(tamper(2, extraRead)))
+	writesOnly := make([]*bal.BlockAccessList, len(lists))
+	for i, l := range lists {
+		writesOnly[i] = l.Writes()
+	}
+	require.NoError(t, regen(writesOnly))
+
+	// A different write is rejected by the hash before it is applied.
+	err = regen(tamper(2, otherValue))
+	require.ErrorIs(t, err, bal.ErrHashMismatch)
+	require.ErrorContains(t, err, "block 3")
+
+	// Before the Amber hardfork only the state root catches it, after applying.
+	err = regen(tamper(0, otherValue))
+	require.NotErrorIs(t, err, bal.ErrHashMismatch)
+	require.ErrorContains(t, err, "block 1: state root")
 }

@@ -49,7 +49,9 @@ type syncItem struct {
 }
 
 // cmdSync rebuilds the state from the genesis block by applying the block
-// access lists, without executing any block, into a new database. Blocks are
+// access lists, without executing any block, into a new database. A list is
+// first checked against the list hash of its header, from the Amber hardfork,
+// so that its per-tx values and reads are covered too. Blocks are then
 // applied in batches that are hashed once and checked against the state root
 // in the header of their last block; a batch of 1 checks every block, and a
 // failed batch is replayed block by block to find the first wrong block.
@@ -123,10 +125,11 @@ func cmdSync(args []string) error {
 			for _, enc := range encs {
 				item := syncItem{number: n}
 				if item.list, item.err = bal.Decode(enc); item.err == nil {
-					if h := src.ReadHeader(src.ReadCanonicalHash(n), n); h != nil {
-						item.root = h.Root
-					} else {
+					if h := src.ReadHeader(src.ReadCanonicalHash(n), n); h == nil {
 						item.err = fmt.Errorf("no header for block %d", n)
+					} else if item.err = item.list.CheckHash(h.BlockAccessListHash); item.err == nil {
+						// Lists of blocks with a list hash are checked before they are applied.
+						item.root = h.Root
 					}
 				}
 				batch = append(batch, item)
