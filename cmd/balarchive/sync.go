@@ -56,9 +56,11 @@ type syncItem struct {
 // in the header of their last block; a batch of 1 checks every block, and a
 // failed batch is replayed block by block to find the first wrong block.
 // Storage tries are hashed in parallel, and the trie nodes of the next batch
-// are read ahead while a batch is applied.
+// are read ahead while a batch is applied. A new database gets live pruning:
+// trie nodes are deleted once they have been obsolete for -retention blocks, as
+// a node does with --state.live-pruning-retention.
 //
-//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-batch N] [-workers N]
+//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-batch N] [-workers N] [-retention N]
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	balDir := fs.String("bal", "", "BAL freezer directory")
@@ -71,6 +73,7 @@ func cmdSync(args []string) error {
 	batchSize := fs.Uint64("batch", 1000, "blocks applied before one root check")
 	workers := fs.Int("workers", 8, "goroutines hashing storage tries and reading ahead")
 	prefetch := fs.Bool("prefetch", true, "read the trie nodes of the next batch ahead")
+	retention := fs.Uint64("retention", blockchain.DefaultLivePruningRetention, "blocks an obsolete trie node is kept, 0 = no pruning (only for a new database)")
 	fs.Parse(args)
 
 	freezer, err := bal.OpenFreezer(*balDir, true)
@@ -99,9 +102,18 @@ func cmdSync(args []string) error {
 			return fmt.Errorf("genesis root %x, chaindata has %x: only Kairos is supported", genesis.Root(), want)
 		}
 		progress.Root = genesis.Root()
+		if *retention > 0 {
+			dst.WritePruningEnabled()
+		}
 	} else {
 		return err
 	}
+	pruning := dst.ReadPruningEnabled() && *retention > 0
+	pruneFrom := uint64(1)
+	if last, err := dst.ReadLastPrunedBlockNumber(); err == nil {
+		pruneFrom = last + 1
+	}
+	fmt.Printf("live pruning: %v, retention %d blocks\n", pruning, *retention)
 
 	end := freezer.Next() - 1
 	if *to != 0 && *to < end {
@@ -158,9 +170,19 @@ func cmdSync(args []string) error {
 
 	start, last := time.Now(), time.Now()
 	from := progress.Block
+	var pruned uint64
 	commit := func(number uint64, root common.Hash) error {
 		if err := trieDB.Commit(root, false, number); err != nil {
 			return err
+		}
+		// Committed marks of nodes obsolete for the retention are deleted.
+		if pruning && number > *retention && number-*retention >= pruneFrom {
+			limit := number - *retention
+			marks := dst.ReadPruningMarks(pruneFrom, limit+1)
+			dst.PruneTrieNodes(marks)
+			dst.DeletePruningMarks(marks)
+			dst.WriteLastPrunedBlockNumber(limit)
+			pruneFrom, pruned = limit+1, pruned+uint64(len(marks))
 		}
 		enc, _ := json.Marshal(syncProgress{Block: number, Root: root})
 		tmp := progressFile + ".tmp"
@@ -189,7 +211,11 @@ func cmdSync(args []string) error {
 		if err := cur[len(cur)-1].err; err != nil {
 			return fmt.Errorf("block %d: %w", cur[len(cur)-1].number, err)
 		}
-		nextRoot, err := syncApply(stateDB, root, cur, *workers)
+		var opts *statedb.TrieOpts
+		if pruning {
+			opts = &statedb.TrieOpts{PruningBlockNumber: cur[len(cur)-1].number}
+		}
+		nextRoot, err := syncApply(stateDB, root, cur, *workers, opts)
 		if err != nil {
 			return err
 		}
@@ -213,7 +239,7 @@ func cmdSync(args []string) error {
 			last = time.Now()
 			rate := float64(n-from) / time.Since(start).Seconds()
 			nodes, _, _ := trieDB.Size()
-			fmt.Printf("synced %d/%d, %.0f blocks/s, dirty %s, eta %s\n", n, end, rate, nodes,
+			fmt.Printf("synced %d/%d, %.0f blocks/s, dirty %s, pruned %d nodes, eta %s\n", n, end, rate, nodes, pruned,
 				(time.Duration(float64(end-n)/rate) * time.Second).Round(time.Minute))
 		}
 		cur, ok = next, more
@@ -226,9 +252,9 @@ func cmdSync(args []string) error {
 // syncApply applies a batch of lists to the state at root and returns the new
 // root, committed to the trie database. If the root of the batch does not match
 // the header of its last block, the batch is replayed block by block from root
-// to report the first wrong block.
-func syncApply(stateDB state.Database, root common.Hash, batch []syncItem, workers int) (common.Hash, error) {
-	sdb, err := state.New(root, stateDB, nil, nil)
+// to report the first wrong block. opts marks obsolete nodes for pruning.
+func syncApply(stateDB state.Database, root common.Hash, batch []syncItem, workers int, opts *statedb.TrieOpts) (common.Hash, error) {
+	sdb, err := state.New(root, stateDB, nil, opts)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("block %d: %w", batch[0].number, err)
 	}
