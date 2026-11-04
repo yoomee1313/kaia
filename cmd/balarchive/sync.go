@@ -67,10 +67,10 @@ func cmdSync(args []string) error {
 	chaindata := fs.String("chaindata", "", "chaindata with the headers to check against")
 	out := fs.String("out", "", "directory of the new state database")
 	to := fs.Uint64("to", 0, "last block (0 = last in the freezer)")
-	commitEvery := fs.Uint64("commit", 10000, "blocks between commits to disk")
+	commitEvery := fs.Uint64("commit", 7200, "commits to disk at every multiple of this block number")
 	dirtyMiB := fs.Int("dirty", 2048, "MiB of trie nodes held in memory before flushing")
 	cacheMiB := fs.Int("cache", 4096, "MiB of the trie node cache")
-	batchSize := fs.Uint64("batch", 1000, "blocks applied before one root check")
+	batchSize := fs.Uint64("batch", 720, "blocks applied before one root check, at multiples of this block number")
 	workers := fs.Int("workers", 8, "goroutines hashing storage tries and reading ahead")
 	prefetch := fs.Bool("prefetch", true, "read the trie nodes of the next batch ahead")
 	retention := fs.Uint64("retention", blockchain.DefaultLivePruningRetention, "blocks an obsolete trie node is kept, 0 = no pruning (only for a new database)")
@@ -107,6 +107,11 @@ func cmdSync(args []string) error {
 		}
 	} else {
 		return err
+	}
+	// Batches line up with commits and with the retention, so that nodes are
+	// pruned exactly when the retention has passed at the end of a batch.
+	if *commitEvery%*batchSize != 0 || (*retention > 0 && *retention%*batchSize != 0) {
+		fmt.Printf("warning: batch %d does not divide commit %d and retention %d\n", *batchSize, *commitEvery, *retention)
 	}
 	pruning := dst.ReadPruningEnabled() && *retention > 0
 	pruneFrom := uint64(1)
@@ -201,7 +206,6 @@ func cmdSync(args []string) error {
 			syncReadAhead(stateDB, root, batch, *workers)
 		}()
 	}
-	lastCommit := from
 	cur, ok := <-batches
 	for ok {
 		next, more := <-batches
@@ -229,11 +233,10 @@ func cmdSync(args []string) error {
 				return err
 			}
 		}
-		if n-lastCommit >= *commitEvery || n == end {
+		if n%*commitEvery == 0 || n == end {
 			if err := commit(n, root); err != nil {
 				return err
 			}
-			lastCommit = n
 		}
 		if time.Since(last) > 30*time.Second {
 			last = time.Now()
