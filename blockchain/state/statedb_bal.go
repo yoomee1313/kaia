@@ -172,24 +172,13 @@ func (s *StateDB) EndBlockAccessInitialization() {
 }
 
 // BlockAccessList returns the recorded block access list, or nil if the recorder
-// is not enabled. Changes are recorded at Finalise and storage roots are taken
-// from the state, so it is complete after IntermediateRoot of the block.
+// is not enabled. Changes are recorded at Finalise, so it is complete after
+// IntermediateRoot of the block. Storage roots are not recorded.
 func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	if s.blockAccess == nil {
 		return nil
 	}
-	list := s.blockAccess.builder.Build()
-	for i := range list.Accounts {
-		a := &list.Accounts[i]
-		if !a.StorageChanged() {
-			continue
-		}
-		if obj := s.stateObjects[a.Address]; obj != nil && !obj.deleted {
-			root := obj.Root()
-			a.StorageRoot = &root
-		}
-	}
-	return list
+	return s.blockAccess.builder.Build()
 }
 
 // accountLoaded takes the values of a newly loaded account as the base of its
@@ -389,6 +378,7 @@ func (s *StateDB) ApplyBlockAccessList(list *bal.BlockAccessList) error {
 		}
 	}
 	s.IntermediateRoot(true)
+	// Lists recorded with storage roots are checked against them.
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		if a.StorageRoot == nil {

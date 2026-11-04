@@ -155,13 +155,51 @@ func TestStorageRootOptional(t *testing.T) {
 	require.ErrorIs(t, err, errNoStorageChange)
 }
 
+// TestCheckHash checks that the hash covers the writes only: lists that differ
+// in reads or storage roots have the same hash, and so has the list without
+// its reads, while a different write is rejected.
 func TestCheckHash(t *testing.T) {
-	list := &BlockAccessList{Accounts: []AccountAccess{{Address: common.HexToAddress("0x1"), StorageReads: []common.Hash{{1}}}}}
-	hash, err := list.Hash()
+	root := common.Hash{9}
+	list := func() *BlockAccessList {
+		return &BlockAccessList{Accounts: []AccountAccess{
+			{
+				Address:        common.HexToAddress("0x1"),
+				StorageWrites:  []SlotWrites{{Slot: common.Hash{1}, Changes: []SlotChange{{Index: 1, Value: common.Hash{2}}}}},
+				StorageReads:   []common.Hash{{3}},
+				BalanceChanges: []BalanceChange{{Index: 1, Balance: big.NewInt(5)}},
+				StorageRoot:    &root,
+			},
+			{Address: common.HexToAddress("0x2"), StorageReads: []common.Hash{{4}}}, // only read
+		}}
+	}
+	full := list()
+	hash, err := full.Hash()
 	require.NoError(t, err)
-	require.NoError(t, list.CheckHash(nil))
-	require.NoError(t, list.CheckHash(&hash))
+	require.NoError(t, full.CheckHash(nil))
+	require.NoError(t, full.CheckHash(&hash))
 
-	list.Accounts[0].StorageReads = append(list.Accounts[0].StorageReads, common.Hash{2})
-	require.ErrorIs(t, list.CheckHash(&hash), ErrHashMismatch)
+	otherReads := list()
+	otherReads.Accounts[0].StorageReads = []common.Hash{{7}, {8}}
+	otherReads.Accounts[0].StorageRoot = nil
+	otherReads.Accounts = append(otherReads.Accounts, AccountAccess{Address: common.HexToAddress("0x3")})
+	require.NoError(t, otherReads.Validate())
+	require.NoError(t, otherReads.CheckHash(&hash), "reads and storage roots are not hashed")
+
+	writes := full.Writes()
+	require.Len(t, writes.Accounts, 1)
+	require.Nil(t, writes.Accounts[0].StorageReads)
+	require.Nil(t, writes.Accounts[0].StorageRoot)
+	require.NotNil(t, full.Accounts[0].StorageRoot, "Writes leaves the list as it is")
+	enc, err := writes.Encode()
+	require.NoError(t, err)
+	decoded, err := Decode(enc)
+	require.NoError(t, err)
+	require.NoError(t, decoded.CheckHash(&hash), "the writes alone pass the header check")
+
+	otherWrite := list()
+	otherWrite.Accounts[0].StorageWrites[0].Changes[0].Value = common.Hash{6}
+	require.ErrorIs(t, otherWrite.CheckHash(&hash), ErrHashMismatch)
+	otherBalance := list()
+	otherBalance.Accounts[0].BalanceChanges[0].Balance = big.NewInt(6)
+	require.ErrorIs(t, otherBalance.CheckHash(&hash), ErrHashMismatch)
 }

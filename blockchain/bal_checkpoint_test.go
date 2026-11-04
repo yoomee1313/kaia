@@ -195,9 +195,9 @@ func TestBALApplyUnchecked(t *testing.T) {
 	}
 }
 
-// TestRegenListHash checks that Regen rejects a list whose hash differs from the
-// one in the header before applying it, also when only a read differs, which
-// the state root cannot catch.
+// TestRegenListHash checks that Regen rejects a list whose writes differ from
+// the hash in the header before applying it, and accepts a list whose reads
+// differ or are left out, since the hash covers the writes only.
 func TestRegenListHash(t *testing.T) {
 	env := newAmberTestEnv(t)
 	chain, blocks := env.generate(4, amberTestTxs(env))
@@ -212,28 +212,52 @@ func TestRegenListHash(t *testing.T) {
 		chain.StateCache().TrieDB().Node, chain.StateCache().ContractCode, nil)
 	require.NoError(t, err)
 	headers := func(n uint64) (*types.Header, error) { return blocks[n-1].Header(), nil }
+	regen := func(lists []*bal.BlockAccessList) error {
+		_, _, err := checkpoint.Regen(store, 1, listSlice(lists), 4, nil, headers)
+		return err
+	}
+	require.NoError(t, regen(lists))
 
-	_, _, err = checkpoint.Regen(store, 1, listSlice(lists), 4, nil, headers)
-	require.NoError(t, err)
-
-	// An extra read leaves the state root as it is.
-	withRead := func(i int) []*bal.BlockAccessList {
-		tampered := make([]*bal.BlockAccessList, len(lists))
-		copy(tampered, lists)
+	// tamper returns the lists with list i copied and changed by f.
+	tamper := func(i int, f func(*bal.AccountAccess)) []*bal.BlockAccessList {
+		out := make([]*bal.BlockAccessList, len(lists))
+		copy(out, lists)
 		enc, err := lists[i].Encode()
 		require.NoError(t, err)
-		tampered[i], err = bal.Decode(enc)
+		out[i], err = bal.Decode(enc)
 		require.NoError(t, err)
-		a := &tampered[i].Accounts[len(tampered[i].Accounts)-1]
-		a.StorageReads = append(a.StorageReads, common.HexToHash("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
-		require.NoError(t, tampered[i].Validate())
-		return tampered
+		for j := range out[i].Accounts {
+			if a := &out[i].Accounts[j]; a.Address == balStoreAddr {
+				f(a)
+			}
+		}
+		require.NoError(t, out[i].Validate())
+		return out
 	}
-	_, _, err = checkpoint.Regen(store, 1, listSlice(withRead(2)), 4, nil, headers)
+	extraRead := func(a *bal.AccountAccess) {
+		a.StorageReads = append(a.StorageReads, common.HexToHash("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+	}
+	otherValue := func(a *bal.AccountAccess) {
+		w := &a.StorageWrites[0]
+		w.Changes[len(w.Changes)-1].Value[0] ^= 1
+	}
+
+	// Reads are not covered by the hash: a list with another read, or with
+	// the writes only, passes.
+	require.NoError(t, regen(tamper(2, extraRead)))
+	writesOnly := make([]*bal.BlockAccessList, len(lists))
+	for i, l := range lists {
+		writesOnly[i] = l.Writes()
+	}
+	require.NoError(t, regen(writesOnly))
+
+	// A different write is rejected by the hash before it is applied.
+	err = regen(tamper(2, otherValue))
 	require.ErrorIs(t, err, bal.ErrHashMismatch)
 	require.ErrorContains(t, err, "block 3")
 
-	// Before the Amber hardfork only the state root checks the list.
-	_, _, err = checkpoint.Regen(store, 1, listSlice(withRead(0)), 4, nil, headers)
-	require.NoError(t, err)
+	// Before the Amber hardfork only the state root catches it, after applying.
+	err = regen(tamper(0, otherValue))
+	require.NotErrorIs(t, err, bal.ErrHashMismatch)
+	require.ErrorContains(t, err, "block 1: state root")
 }

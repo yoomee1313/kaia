@@ -71,10 +71,10 @@ type AccountAccess struct {
 	Deleted        []uint32        // phases in which the account was deleted
 	StorageCleared []uint32        // phases in which the account was recreated, dropping its storage
 
-	// StorageRoot is the storage root at the end of the block, set if the
-	// storage changed and the account exists at the end of the block. It lets
-	// the account trie be rebuilt without rebuilding every storage trie.
-	// Lists recorded before it was added do not have it.
+	// StorageRoot is the storage root at the end of the block, if the storage
+	// changed and the account exists at the end of the block. It is no longer
+	// recorded, and is not part of the hash, but lists that have it are still
+	// decoded and the root is checked when they are applied.
 	StorageRoot *common.Hash `rlp:"optional"`
 }
 
@@ -115,20 +115,36 @@ func (s *BlockAccessList) Encode() ([]byte, error) {
 	return rlp.EncodeToBytes(s)
 }
 
+// Writes returns the list without its reads: the accounts that were only read
+// are left out, and so are the storage reads and storage roots of the others.
+// Accounts are shared with s, so neither may be modified afterwards.
+func (s *BlockAccessList) Writes() *BlockAccessList {
+	w := &BlockAccessList{Accounts: make([]AccountAccess, 0, len(s.Accounts))}
+	for _, a := range s.Accounts {
+		if !a.Changed() {
+			continue
+		}
+		a.StorageReads, a.StorageRoot = nil, nil
+		w.Accounts = append(w.Accounts, a)
+	}
+	return w
+}
+
 // Hash returns the hash committed in the header from the Amber hardfork: the
-// keccak256 of the RLP encoding of the whole list, reads included, as in
-// EIP-7928. A block producer records the reads of the txs it includes only, so
-// every node executing the block reproduces the list exactly.
+// keccak256 of the RLP encoding of Writes. Blocks and headers carry the writes
+// only, so a node that receives or keeps the writes only checks them against
+// the header as well; the reads are meant to be exchanged in consensus
+// messages.
 func (s *BlockAccessList) Hash() (common.Hash, error) {
-	enc, err := s.Encode()
+	enc, err := s.Writes().Encode()
 	if err != nil {
 		return common.Hash{}, err
 	}
 	return crypto.Keccak256Hash(enc), nil
 }
 
-// CheckHash checks the list against the hash committed in a header, before the
-// list is applied. A header without one, before the Amber hardfork, passes:
+// CheckHash checks the writes of the list against the hash committed in a
+// header, before the list is applied. A header without one, before the Amber hardfork, passes:
 // only the state root after applying the list can check it then.
 func (s *BlockAccessList) CheckHash(want *common.Hash) error {
 	if want == nil {
