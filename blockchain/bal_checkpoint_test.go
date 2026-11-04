@@ -26,6 +26,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/storage/database"
 	storecp "github.com/kaiachain/kaia/storage/database/checkpoint"
 	"github.com/kaiachain/kaia/storage/statedb"
@@ -300,4 +301,92 @@ func TestRevert(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRevertGenesisStorage reverts through a contract that has storage from
+// genesis, never written afterwards, and is destroyed and recreated twice
+// (shanghai, before EIP-6780). Rebuilding it before the first destruction needs
+// the genesis slots, which only the base state has, and rebuilding it later
+// must leave them out.
+func TestRevertGenesisStorage(t *testing.T) {
+	initCode := balInitCode(balDestructibleCode())
+	child := crypto.CreateAddress2(balFactory, [32]byte{}, crypto.Keccak256(initCode))
+	slot := func(n byte) common.Hash { return common.BytesToHash([]byte{n}) }
+	env := newBALTestEnvWithAlloc(t, "shanghai", 2, GenesisAlloc{
+		child: {Code: balDestructibleCode(), Balance: common.Big0, Storage: map[common.Hash]common.Hash{
+			slot(9): common.HexToHash("0x99"), slot(1): common.HexToHash("0x01"),
+		}},
+	})
+	chain, blocks := env.generate(7, func(i int, b *BlockGen) {
+		switch i {
+		case 0:
+			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, balSlotData(3, 0x33)))
+		case 1, 3:
+			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, nil)) // destroy
+		case 2, 4:
+			b.AddTx(env.legacyTx(b, 1, &balFactory, common.Big0, initCode)) // recreate: slots 1 and 2
+			b.AddTx(env.legacyTx(b, 1, &child, common.Big0, balSlotData(byte(4+i), 0x44)))
+		}
+		b.AddTx(env.legacyTx(b, 0, &env.addrs[1], common.Big1, nil))
+	})
+	lists := checkBAL(t, chain, blocks)
+
+	// The genesis slots are in the state of block 1 and gone from block 2.
+	s1, err := chain.StateAt(blocks[0].Root())
+	require.NoError(t, err)
+	require.Equal(t, common.HexToHash("0x99"), s1.GetState(child, slot(9)))
+	s3, err := chain.StateAt(blocks[2].Root())
+	require.NoError(t, err)
+	require.Equal(t, common.Hash{}, s3.GetState(child, slot(9)))
+	require.Equal(t, common.HexToHash("0x11"), s3.GetState(child, slot(1)))
+
+	db := database.NewMemDB()
+	builder, err := bal.NewIndexBuilder(db, 0, env.genesis.Root())
+	require.NoError(t, err)
+	for i, list := range lists {
+		require.NoError(t, builder.Add(uint64(i+1), list))
+	}
+	require.NoError(t, builder.Flush())
+	index, err := bal.OpenIndex(db)
+	require.NoError(t, err)
+	slots, err := index.SlotsBefore(child, uint64(len(blocks)))
+	require.NoError(t, err)
+	require.NotContains(t, slots, slot(9), "the genesis slot is never written")
+
+	base, err := chain.StateAt(env.genesis.Root())
+	require.NoError(t, err)
+	history := bal.NewHistory(index, listSlice(lists), state.NewBALBase(base))
+	headers := func(n uint64) (*types.Header, error) {
+		if n == 0 {
+			return env.genesis.Header(), nil
+		}
+		return blocks[n-1].Header(), nil
+	}
+	head := uint64(len(blocks))
+	for target := uint64(0); target < head; target++ {
+		sdb, err := chain.StateAt(blocks[head-1].Root())
+		require.NoError(t, err)
+		stats, err := checkpoint.Revert(sdb, history, listSlice(lists), target, head, headers)
+		require.NoError(t, err, "block %d", target)
+		// The child is destroyed in blocks 2 and 4 and recreated in 3 and 5.
+		// Before 5 it is rebuilt where it exists at target, and removed where
+		// it does not.
+		switch target {
+		case 2, 4:
+			require.NotZero(t, stats.Removed, "block %d", target)
+		case 0, 1, 3:
+			require.NotZero(t, stats.Rebuilt, "block %d", target)
+		}
+		want, err := chain.StateAt(headers2Root(t, headers, target))
+		require.NoError(t, err)
+		for n := byte(0); n < 10; n++ {
+			require.Equal(t, want.GetState(child, slot(n)), sdb.GetState(child, slot(n)), "block %d slot %d", target, n)
+		}
+	}
+}
+
+func headers2Root(t *testing.T, headers func(uint64) (*types.Header, error), n uint64) common.Hash {
+	h, err := headers(n)
+	require.NoError(t, err)
+	return h.Root
 }
