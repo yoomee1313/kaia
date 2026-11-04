@@ -113,28 +113,19 @@ func (s *BlockAccessList) Encode() ([]byte, error) {
 	return rlp.EncodeToBytes(s)
 }
 
-// Decode parses an RLP-encoded list and checks that it is in canonical order.
-// ChangesHash returns the hash committed in the header from the Amber hardfork:
-// the keccak256 of the RLP encoding of the list without storage reads and
-// without the accounts that were only read. Reads are left out because a block
-// producer also reads state for txs it does not include, so only the changes
-// are reproduced exactly by every node executing the block.
-func (s *BlockAccessList) ChangesHash() (common.Hash, error) {
-	changes := &BlockAccessList{Accounts: make([]AccountAccess, 0, len(s.Accounts))}
-	for _, a := range s.Accounts {
-		if !a.Changed() {
-			continue
-		}
-		a.StorageReads = nil
-		changes.Accounts = append(changes.Accounts, a)
-	}
-	enc, err := changes.Encode()
+// Hash returns the hash committed in the header from the Amber hardfork: the
+// keccak256 of the RLP encoding of the whole list, reads included, as in
+// EIP-7928. A block producer records the reads of the txs it includes only, so
+// every node executing the block reproduces the list exactly.
+func (s *BlockAccessList) Hash() (common.Hash, error) {
+	enc, err := s.Encode()
 	if err != nil {
 		return common.Hash{}, err
 	}
 	return crypto.Keccak256Hash(enc), nil
 }
 
+// Decode parses an RLP-encoded list and checks that it is in canonical order.
 func Decode(b []byte) (*BlockAccessList, error) {
 	s := new(BlockAccessList)
 	if err := rlp.DecodeBytes(b, s); err != nil {

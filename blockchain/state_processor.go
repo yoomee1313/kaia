@@ -126,6 +126,7 @@ func (p *StateProcessor) InitializeState(header *types.Header, statedb *state.St
 	for _, module := range p.blockStateModules {
 		module.InitializeState(header, statedb)
 	}
+	statedb.EndBlockAccessInitialization()
 }
 
 // RegisterBlockStateModule registers state transition modules handled by this processor.
@@ -186,7 +187,7 @@ func (p *StateProcessor) setBlockAccessListHash(header *types.Header, statedb *s
 		return nil
 	}
 	if list := statedb.BlockAccessList(); list != nil {
-		hash, err := list.ChangesHash()
+		hash, err := list.Hash()
 		if err != nil {
 			return err
 		}

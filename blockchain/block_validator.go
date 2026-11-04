@@ -479,7 +479,7 @@ func validateBlockAccessListHash(config *params.ChainConfig, header *types.Heade
 	if list == nil {
 		return errors.New("block access list not recorded")
 	}
-	hash, err := list.ChangesHash()
+	hash, err := list.Hash()
 	if err != nil {
 		return err
 	}

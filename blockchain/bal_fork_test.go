@@ -42,7 +42,7 @@ func amberTestTxs(env *balTestEnv) func(int, *BlockGen) {
 }
 
 // TestAmberBlockAccessListHash checks that blocks from the Amber hardfork commit
-// the hash of the changes of their block access list and are accepted.
+// the hash of their block access list and are accepted.
 func TestAmberBlockAccessListHash(t *testing.T) {
 	env := newAmberTestEnv(t)
 	chain, blocks := env.generate(4, amberTestTxs(env))
@@ -54,7 +54,7 @@ func TestAmberBlockAccessListHash(t *testing.T) {
 			continue
 		}
 		require.NotNil(t, block.Header().BlockAccessListHash, "block %d", block.NumberU64())
-		hash, err := lists[i].ChangesHash()
+		hash, err := lists[i].Hash()
 		require.NoError(t, err)
 		require.Equal(t, hash, *block.Header().BlockAccessListHash, "block %d", block.NumberU64())
 	}
