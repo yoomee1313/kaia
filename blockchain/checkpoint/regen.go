@@ -23,6 +23,7 @@ import (
 
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/state"
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/storage/database"
@@ -192,11 +193,11 @@ func Rebuild(store *checkpoint.Store, id uint64, keys Keys) (*state.StateDB, uin
 }
 
 // Regen rebuilds the state at block to from the segment id, at the block of
-// the segment, by applying the block access lists after it. check, if set,
-// returns the state root of a block, and every block is checked against it.
-// extra holds the keys the caller reads afterwards, such as the ones of a
-// proof.
-func Regen(store *checkpoint.Store, id uint64, lists bal.ListReader, to uint64, extra Keys, check func(uint64) (common.Hash, error)) (*state.StateDB, uint64, error) {
+// the segment, by applying the block access lists after it. headers, if set,
+// returns the header of a block: a list is checked against the list hash of
+// the header before it is applied, and the state root after. extra holds the
+// keys the caller reads afterwards, such as the ones of a proof.
+func Regen(store *checkpoint.Store, id uint64, lists bal.ListReader, to uint64, extra Keys, headers func(uint64) (*types.Header, error)) (*state.StateDB, uint64, error) {
 	meta, ok := store.Meta(id)
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: %d", checkpoint.ErrUnknownSegment, id)
@@ -229,6 +230,15 @@ func Regen(store *checkpoint.Store, id uint64, lists bal.ListReader, to uint64, 
 		if err != nil {
 			return nil, reads, fmt.Errorf("block %d: %w", n, err)
 		}
+		var header *types.Header
+		if headers != nil {
+			if header, err = headers(n); err != nil {
+				return nil, reads, err
+			}
+			if err := list.CheckHash(header.BlockAccessListHash); err != nil {
+				return nil, reads, fmt.Errorf("block %d: %w", n, err)
+			}
+		}
 		if err := sdb.ApplyBlockAccessList(list); err != nil {
 			return nil, reads, fmt.Errorf("block %d: %w", n, err)
 		}
@@ -236,14 +246,8 @@ func Regen(store *checkpoint.Store, id uint64, lists bal.ListReader, to uint64, 
 		if err := sdb.Error(); err != nil {
 			return nil, reads, fmt.Errorf("block %d: %w", n, err)
 		}
-		if check != nil {
-			want, err := check(n)
-			if err != nil {
-				return nil, reads, err
-			}
-			if root != want {
-				return nil, reads, fmt.Errorf("block %d: state root %x, want %x", n, root, want)
-			}
+		if header != nil && root != header.Root {
+			return nil, reads, fmt.Errorf("block %d: state root %x, want %x", n, root, header.Root)
 		}
 	}
 	return sdb, reads, nil

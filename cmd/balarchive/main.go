@@ -38,6 +38,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/checkpoint"
 	"github.com/kaiachain/kaia/blockchain/state"
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
@@ -383,23 +384,23 @@ func cmdRegen(args []string) error {
 	defer store.Close()
 	dbm := openChain(*o.chaindata)
 	defer dbm.Close()
-	check := func(n uint64) (common.Hash, error) {
+	headers := func(n uint64) (*types.Header, error) {
 		header := dbm.ReadHeader(dbm.ReadCanonicalHash(n), n)
 		if header == nil {
-			return common.Hash{}, fmt.Errorf("no header for block %d", n)
+			return nil, fmt.Errorf("no header for block %d", n)
 		}
-		return header.Root, nil
+		return header, nil
 	}
 	extra := make(checkpoint.Keys)
 	if *o.addr != "" {
 		extra.Add(common.HexToAddress(*o.addr))
 	}
 	start := time.Now()
-	sdb, reads, err := checkpoint.Regen(store, *o.id, freezer, *o.to, extra, check)
+	sdb, reads, err := checkpoint.Regen(store, *o.id, freezer, *o.to, extra, headers)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("rebuilt block %d from segment %d with %d checkpoint reads in %s, every root matched\n", *o.to, *o.id, reads, time.Since(start).Round(time.Millisecond))
+	fmt.Printf("rebuilt block %d from segment %d with %d checkpoint reads in %s, every list hash and root matched\n", *o.to, *o.id, reads, time.Since(start).Round(time.Millisecond))
 	if *o.addr != "" {
 		addr := common.HexToAddress(*o.addr)
 		fmt.Printf("%s: balance %s nonce %d\n", addr.Hex(), sdb.GetBalance(addr), sdb.GetNonce(addr))

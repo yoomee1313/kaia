@@ -154,3 +154,14 @@ func TestStorageRootOptional(t *testing.T) {
 	_, err = Decode(enc)
 	require.ErrorIs(t, err, errNoStorageChange)
 }
+
+func TestCheckHash(t *testing.T) {
+	list := &BlockAccessList{Accounts: []AccountAccess{{Address: common.HexToAddress("0x1"), StorageReads: []common.Hash{{1}}}}}
+	hash, err := list.Hash()
+	require.NoError(t, err)
+	require.NoError(t, list.CheckHash(nil))
+	require.NoError(t, list.CheckHash(&hash))
+
+	list.Accounts[0].StorageReads = append(list.Accounts[0].StorageReads, common.Hash{2})
+	require.ErrorIs(t, list.CheckHash(&hash), ErrHashMismatch)
+}

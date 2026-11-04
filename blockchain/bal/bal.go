@@ -44,6 +44,8 @@ var (
 	errUnsortedIndices  = errors.New("change indices are not strictly increasing")
 	errEmptySlotWrites  = errors.New("slot has no write")
 	errNoStorageChange  = errors.New("storage root without a storage change")
+
+	ErrHashMismatch = errors.New("block access list hash mismatch")
 )
 
 // BlockAccessList is the access list of one block. Accounts are sorted by address.
@@ -123,6 +125,23 @@ func (s *BlockAccessList) Hash() (common.Hash, error) {
 		return common.Hash{}, err
 	}
 	return crypto.Keccak256Hash(enc), nil
+}
+
+// CheckHash checks the list against the hash committed in a header, before the
+// list is applied. A header without one, before the Amber hardfork, passes:
+// only the state root after applying the list can check it then.
+func (s *BlockAccessList) CheckHash(want *common.Hash) error {
+	if want == nil {
+		return nil
+	}
+	got, err := s.Hash()
+	if err != nil {
+		return err
+	}
+	if got != *want {
+		return fmt.Errorf("%w: header %x, list %x", ErrHashMismatch, *want, got)
+	}
+	return nil
 }
 
 // Decode parses an RLP-encoded list and checks that it is in canonical order.

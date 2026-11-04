@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/checkpoint"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -67,7 +68,7 @@ func testBALCheckpoint(t *testing.T, hardfork string) {
 		headers[b.NumberU64()] = b.Root()
 	}
 	lists := listSlice(c.lists)
-	check := func(n uint64) (common.Hash, error) { return headers[n], nil }
+	check := func(n uint64) (*types.Header, error) { return c.blocks[n-1].Header(), nil }
 
 	store, err := storecp.Open(t.TempDir(), nil)
 	require.NoError(t, err)
@@ -165,7 +166,7 @@ func TestBlockChainCheckpoint(t *testing.T) {
 		require.Equal(t, uint64(i), meta.Base)
 		require.Equal(t, storecp.TriggerInterval, meta.Trigger)
 	}
-	check := func(n uint64) (common.Hash, error) { return c.blocks[n-1].Root(), nil }
+	check := func(n uint64) (*types.Header, error) { return c.blocks[n-1].Header(), nil }
 	_, _, err = checkpoint.Regen(store, segments[0].ID, listSlice(c.lists), uint64(len(c.blocks)), nil, check)
 	require.NoError(t, err)
 }
@@ -192,4 +193,47 @@ func TestBALApplyUnchecked(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRegenListHash checks that Regen rejects a list whose hash differs from the
+// one in the header before applying it, also when only a read differs, which
+// the state root cannot catch.
+func TestRegenListHash(t *testing.T) {
+	env := newAmberTestEnv(t)
+	chain, blocks := env.generate(4, amberTestTxs(env))
+	lists := checkBAL(t, chain, blocks)
+	require.Nil(t, blocks[0].Header().BlockAccessListHash)
+	require.NotNil(t, blocks[3].Header().BlockAccessListHash)
+
+	store, err := storecp.Open(t.TempDir(), nil)
+	require.NoError(t, err)
+	defer store.Close()
+	_, _, err = checkpoint.Export(store, storecp.Meta{ID: 1, BlockNumber: 0, StateRoot: env.genesis.Root(), Trigger: storecp.TriggerInterval},
+		chain.StateCache().TrieDB().Node, chain.StateCache().ContractCode, nil)
+	require.NoError(t, err)
+	headers := func(n uint64) (*types.Header, error) { return blocks[n-1].Header(), nil }
+
+	_, _, err = checkpoint.Regen(store, 1, listSlice(lists), 4, nil, headers)
+	require.NoError(t, err)
+
+	// An extra read leaves the state root as it is.
+	withRead := func(i int) []*bal.BlockAccessList {
+		tampered := make([]*bal.BlockAccessList, len(lists))
+		copy(tampered, lists)
+		enc, err := lists[i].Encode()
+		require.NoError(t, err)
+		tampered[i], err = bal.Decode(enc)
+		require.NoError(t, err)
+		a := &tampered[i].Accounts[len(tampered[i].Accounts)-1]
+		a.StorageReads = append(a.StorageReads, common.HexToHash("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))
+		require.NoError(t, tampered[i].Validate())
+		return tampered
+	}
+	_, _, err = checkpoint.Regen(store, 1, listSlice(withRead(2)), 4, nil, headers)
+	require.ErrorIs(t, err, bal.ErrHashMismatch)
+	require.ErrorContains(t, err, "block 3")
+
+	// Before the Amber hardfork only the state root checks the list.
+	_, _, err = checkpoint.Regen(store, 1, listSlice(withRead(0)), 4, nil, headers)
+	require.NoError(t, err)
 }
