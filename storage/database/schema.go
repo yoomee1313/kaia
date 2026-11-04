@@ -55,17 +55,6 @@ var (
 	// of the key-value store.
 	ancientDirKey = []byte("AncientDir")
 
-	// stateArchiveDirKey tracks the state archive directory once it is enabled.
-	stateArchiveDirKey = []byte("StateArchiveDir")
-	// stateArchiveChunksKey tracks the number of chunks in the state archive.
-	stateArchiveChunksKey = []byte("StateArchiveChunks")
-	// stateArchiveNodePrefix + ExtHash -> chunk number. The exception index of
-	// the state archive.
-	stateArchiveNodePrefix = []byte("StateArchiveNode-")
-	// stateArchiveSamplePrefix + chunk number (uint64 big endian) -> first
-	// counter of the chunk, for every archiveSampleInterval-th chunk.
-	stateArchiveSamplePrefix = []byte("StateArchiveSample-")
-
 	validSectionKey = []byte("count")
 
 	sectionHeadKeyPrefix = []byte("shead")
@@ -338,14 +327,4 @@ func (c *SupplyCheckpoint) Copy() *SupplyCheckpoint {
 
 func supplyCheckpointKey(blockNumber uint64) []byte {
 	return append(supplyCheckpointPrefix, common.Int64ToByteBigEndian(blockNumber)...)
-}
-
-// stateArchiveSampleKey = stateArchiveSamplePrefix + chunk number (uint64 big endian)
-func stateArchiveSampleKey(chunk uint64) []byte {
-	return append(append([]byte{}, stateArchiveSamplePrefix...), common.Int64ToByteBigEndian(chunk)...)
-}
-
-// stateArchiveNodeKey = stateArchiveNodePrefix + hash
-func stateArchiveNodeKey(hash common.ExtHash) []byte {
-	return append(append([]byte{}, stateArchiveNodePrefix...), hash[:]...)
 }

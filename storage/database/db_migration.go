@@ -170,8 +170,6 @@ func (dbm *databaseManager) StartDBMigration(dstdbm DBManager) error {
 		if len(errs) == 0 {
 			if err := dbm.migrateFreezer(dstdbm, quit); err != nil {
 				errs = append(errs, err)
-			} else if err := dbm.migrateStateArchive(dstdbm, quit); err != nil {
-				errs = append(errs, err)
 			}
 		}
 		return errors.Join(errs...)

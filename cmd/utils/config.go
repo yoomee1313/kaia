@@ -708,7 +708,6 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	cfg.TriesInMemory = ctx.Uint64(TriesInMemoryFlag.Name)
 	cfg.LivePruning = ctx.Bool(LivePruningFlag.Name)
 	cfg.LivePruningRetention = ctx.Uint64(LivePruningRetentionFlag.Name)
-	cfg.StateArchive = ctx.Bool(StateArchiveFlag.Name)
 
 	if ctx.IsSet(FlatTrieFlag.Name) {
 		cfg.UseFlatTrie = ctx.Bool(FlatTrieFlag.Name)

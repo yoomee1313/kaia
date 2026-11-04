@@ -742,16 +742,16 @@ func (dbm *databaseManager) deleteFrozenBlocks(first uint64, hashes []common.Has
 	return nil
 }
 
-// checkFreezerMigration fails if dbm has frozen blocks or a state archive and
-// the destination of a DB migration cannot hold them.
+// checkFreezerMigration fails if dbm has frozen blocks and the destination of a
+// DB migration cannot hold them.
 func (dbm *databaseManager) checkFreezerMigration(dstdbm DBManager) error {
-	if dbm.FrozenBlocks() == 0 && dbm.stateArchive == nil {
+	if dbm.FrozenBlocks() == 0 {
 		return nil
 	}
 	dst := dstdbm.GetDBConfig()
 	if dst.SingleDB || dst.DBType == MemoryDB || dst.DBType == DynamoDB {
-		return fmt.Errorf("the source has %d frozen blocks and state archive %v, but the destination (DBType %s, single %v) does not support the freezer",
-			dbm.FrozenBlocks(), dbm.stateArchive != nil, dst.DBType, dst.SingleDB)
+		return fmt.Errorf("the source has %d frozen blocks, but the destination (DBType %s, single %v) does not support the freezer",
+			dbm.FrozenBlocks(), dst.DBType, dst.SingleDB)
 	}
 	return nil
 }
@@ -765,41 +765,6 @@ func (dbm *databaseManager) migrateFreezer(dstdbm DBManager, quit chan struct{})
 	}
 	src := dbm.freezerDir()
 	dst := filepath.Join(dstdbm.GetDBConfig().Dir, DefaultAncientDirName, ancient.ChainFreezerName)
-	start := time.Now()
-	if err := copyFreezerFiles(src, dst, quit); err != nil {
-		return err
-	}
-	if err := dstdbm.getDatabase(MiscDB).Put(ancientDirKey, []byte(dst)); err != nil {
-		return err
-	}
-	logger.Info("Finish freezer migration", "src", src, "dst", dst, "frozen", dbm.FrozenBlocks(), "elapsed", time.Since(start))
-	return nil
-}
-
-// migrateStateArchive copies the state archive files of dbm into the default
-// state archive directory of the migrated database, and records that
-// directory in its MiscDB. The exception index, the samples and the chunk
-// count are in MiscDB and were copied with it.
-func (dbm *databaseManager) migrateStateArchive(dstdbm DBManager, quit chan struct{}) error {
-	if dbm.stateArchive == nil {
-		return nil
-	}
-	src := dbm.stateArchive.dir()
-	dst := filepath.Join(dstdbm.GetDBConfig().Dir, DefaultAncientDirName, ancient.StateArchiveName)
-	start := time.Now()
-	if err := copyFreezerFiles(src, dst, quit); err != nil {
-		return err
-	}
-	if err := dstdbm.getDatabase(MiscDB).Put(stateArchiveDirKey, []byte(dst)); err != nil {
-		return err
-	}
-	logger.Info("Finish state archive migration", "src", src, "dst", dst, "chunks", dbm.stateArchive.chunks, "elapsed", time.Since(start))
-	return nil
-}
-
-// copyFreezerFiles copies the files of the freezer at src into the empty or
-// missing directory dst.
-func copyFreezerFiles(src, dst string, quit chan struct{}) error {
 	if entries, _ := os.ReadDir(dst); len(entries) != 0 {
 		return fmt.Errorf("freezer directory %s of the destination is not empty", dst)
 	}
@@ -810,6 +775,7 @@ func copyFreezerFiles(src, dst string, quit chan struct{}) error {
 	if err != nil {
 		return err
 	}
+	start := time.Now()
 	for _, e := range entries {
 		if e.IsDir() || e.Name() == "FLOCK" {
 			continue
@@ -823,6 +789,10 @@ func copyFreezerFiles(src, dst string, quit chan struct{}) error {
 			return fmt.Errorf("failed to copy freezer file %s: %w", e.Name(), err)
 		}
 	}
+	if err := dstdbm.getDatabase(MiscDB).Put(ancientDirKey, []byte(dst)); err != nil {
+		return err
+	}
+	logger.Info("Finish freezer migration", "src", src, "dst", dst, "frozen", dbm.FrozenBlocks(), "elapsed", time.Since(start))
 	return nil
 }
 
