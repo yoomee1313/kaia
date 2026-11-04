@@ -108,8 +108,6 @@ type Database struct {
 	nodesSize     common.StorageSize // Storage size of the nodes cache
 	preimagesSize common.StorageSize // Storage size of the preimages cache
 
-	lastCommitBlock uint64 // Block number of the last Commit, recorded with the nodes that Cap archives
-
 	lock sync.RWMutex
 
 	trieNodeCache                TrieNodeCache        // GC friendly memory cache of trie node RLPs
@@ -776,20 +774,14 @@ func (db *Database) Cap(limit common.StorageSize) error {
 	oldest := db.oldest
 	batch := db.diskDB.NewBatch(database.StateTrieDB)
 	defer batch.Release()
-	archive := db.diskDB.StateArchiveEnabled()
-	var archived []database.ArchiveNode
 	for size > limit && !common.EmptyExtHash(oldest) {
 		// Fetch the oldest referenced node and push into the batch
 		node := db.nodes[oldest]
 		enc := node.rlp()
-		if archive {
-			archived = append(archived, database.ArchiveNode{Hash: oldest, Node: enc})
-		} else {
-			db.diskDB.PutTrieNodeToBatch(batch, oldest, enc)
-			if _, err := database.WriteBatchesOverThreshold(batch); err != nil {
-				db.lock.RUnlock()
-				return err
-			}
+		db.diskDB.PutTrieNodeToBatch(batch, oldest, enc)
+		if _, err := database.WriteBatchesOverThreshold(batch); err != nil {
+			db.lock.RUnlock()
+			return err
 		}
 
 		db.setCachedNode(oldest, enc)
@@ -799,12 +791,6 @@ func (db *Database) Cap(limit common.StorageSize) error {
 		// we need to reduce both.
 		size -= common.StorageSize(3*common.HashLength + int(node.size))
 		oldest = node.flushNext
-	}
-	if archive {
-		if err := db.writeArchivedNodes(batch, db.lastCommitBlock, archived); err != nil {
-			db.lock.RUnlock()
-			return err
-		}
 	}
 	// Flush out any remainder data from the last batch
 	if _, err := database.WriteBatches(batch); err != nil {
@@ -860,25 +846,7 @@ type commitResult struct {
 	val  []byte
 }
 
-// writeArchivedNodes appends the nodes to the state archive, and then puts them
-// into the batch. A node is archived before it is written to the key-value
-// store, so that a node in the key-value store is always in the archive as well
-// and live pruning can delete it.
-func (db *Database) writeArchivedNodes(batch database.Batch, blockNum uint64, nodes []database.ArchiveNode) error {
-	if err := db.diskDB.AppendStateArchive(blockNum, nodes); err != nil {
-		logger.Error("Failed to append trie nodes to the state archive", "blockNum", blockNum, "nodes", len(nodes), "err", err)
-		return err
-	}
-	for _, n := range nodes {
-		db.diskDB.PutTrieNodeToBatch(batch, n.Hash, n.Node)
-		if _, err := database.WriteBatchesOverThreshold(batch); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (db *Database) writeBatchNodes(node common.ExtHash, blockNum uint64) error {
+func (db *Database) writeBatchNodes(node common.ExtHash) error {
 	rootNode, ok := db.nodes[node]
 	if !ok {
 		return nil
@@ -898,8 +866,6 @@ func (db *Database) writeBatchNodes(node common.ExtHash, blockNum uint64) error 
 
 	batch := db.diskDB.NewBatch(database.StateTrieDB)
 	defer batch.Release()
-	archive := db.diskDB.StateArchiveEnabled()
-	var archived []database.ArchiveNode
 	for numGoRoutines > 0 {
 		result := <-resultCh
 		if common.EmptyExtHash(result.hash) && result.val == nil {
@@ -907,10 +873,6 @@ func (db *Database) writeBatchNodes(node common.ExtHash, blockNum uint64) error 
 			continue
 		}
 
-		if archive {
-			archived = append(archived, database.ArchiveNode{Hash: result.hash, Node: result.val})
-			continue
-		}
 		db.diskDB.PutTrieNodeToBatch(batch, result.hash, result.val)
 		if _, err := database.WriteBatchesOverThreshold(batch); err != nil {
 			return err
@@ -918,13 +880,7 @@ func (db *Database) writeBatchNodes(node common.ExtHash, blockNum uint64) error 
 	}
 
 	enc := rootNode.rlp()
-	if archive {
-		if err := db.writeArchivedNodes(batch, blockNum, append(archived, database.ArchiveNode{Hash: node, Node: enc})); err != nil {
-			return err
-		}
-	} else {
-		db.diskDB.PutTrieNodeToBatch(batch, node, enc)
-	}
+	db.diskDB.PutTrieNodeToBatch(batch, node, enc)
 	if err := batch.Write(); err != nil {
 		logger.Error("Failed to write trie to disk", "err", err)
 		return err
@@ -962,7 +918,7 @@ func (db *Database) Commit(root common.Hash, report bool, blockNum uint64) error
 
 	// Move the trie itself into the batch, flushing if enough data is accumulated
 	numNodes, nodesSize := len(db.nodes), db.nodesSize
-	if err := db.writeBatchNodes(hash, blockNum); err != nil {
+	if err := db.writeBatchNodes(hash); err != nil {
 		db.lock.RUnlock()
 		return err
 	}
@@ -976,7 +932,6 @@ func (db *Database) Commit(root common.Hash, report bool, blockNum uint64) error
 	db.preimages = make(map[common.Hash][]byte)
 	db.preimagesSize = 0
 	db.pruningMarks = []database.PruningMark{}
-	db.lastCommitBlock = blockNum
 
 	uncacheStart := time.Now()
 	db.uncache(hash)

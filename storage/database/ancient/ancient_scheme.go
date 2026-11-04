@@ -56,33 +56,6 @@ var chainFreezerTableConfigs = map[string]TableConfig{
 	ChainFreezerReceiptTable: {NoSnappy: false},
 }
 
-// The list of table names of the state archive. All tables hold one item per
-// chunk of trie nodes.
-const (
-	// StateArchiveNodesTable holds the chunks of trie nodes, sorted by counter.
-	StateArchiveNodesTable = "nodes"
-
-	// StateArchiveFirstTable holds the 8-byte big endian counter that starts the
-	// counter range of each chunk.
-	StateArchiveFirstTable = "first"
-
-	// StateArchiveBlockTable holds the 8-byte big endian number of the block
-	// committed last when the chunk was written.
-	StateArchiveBlockTable = "block"
-)
-
-// StateArchiveName is the sub-directory of the ancient root holding the state archive.
-const StateArchiveName = "state"
-
-// stateArchiveTableConfigs configures the settings for tables in the state
-// archive. Counters and block numbers are small and are read by binary
-// search, so they are not compressed.
-var stateArchiveTableConfigs = map[string]TableConfig{
-	StateArchiveNodesTable: {NoSnappy: false},
-	StateArchiveFirstTable: {NoSnappy: true},
-	StateArchiveBlockTable: {NoSnappy: true},
-}
-
 // TableConfig contains the settings for a freezer table.
 type TableConfig struct {
 	// NoSnappy disables item compression when true.
@@ -130,11 +103,4 @@ const DefaultTableSize = freezerTableSize
 // directory. The metrics are registered under the given namespace.
 func NewChainFreezer(datadir string, namespace string, readonly bool) (*Freezer, error) {
 	return NewFreezer(datadir, namespace, readonly, freezerTableSize, chainFreezerTableConfigs)
-}
-
-// NewStateArchiveFreezer opens (or creates) the trie node freezer of the state
-// archive at the given directory. The metrics are registered under the given
-// namespace.
-func NewStateArchiveFreezer(datadir string, namespace string, readonly bool) (*Freezer, error) {
-	return NewFreezer(datadir, namespace, readonly, freezerTableSize, stateArchiveTableConfigs)
 }

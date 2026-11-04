@@ -73,7 +73,6 @@ var (
 			utils.OverrideOsaka,
 			utils.OverridePermissionless,
 			utils.LivePruningFlag,
-			utils.StateArchiveFlag,
 			utils.FlatTrieFlag,
 			utils.AncientDirFlag,
 		},
@@ -151,7 +150,6 @@ func initGenesis(ctx *cli.Context) error {
 	singleDB := ctx.Bool(utils.SingleDBFlag.Name)
 	numStateTrieShards := ctx.Uint(utils.NumStateTrieShardsFlag.Name)
 	livePruning := ctx.Bool(utils.LivePruningFlag.Name)
-	stateArchive := ctx.Bool(utils.StateArchiveFlag.Name)
 	useFlatTrie := ctx.Bool(utils.FlatTrieFlag.Name)
 
 	dbtype := database.DBType(ctx.String(utils.DbTypeFlag.Name)).ToValid()
@@ -193,10 +191,6 @@ func initGenesis(ctx *cli.Context) error {
 			DynamoDBConfig: dynamoDBConfig, RocksDBConfig: rocksDBConfig,
 			UseFlatTrie:     useFlatTrie,
 			FreezerReadOnly: true, AncientDir: ctx.String(utils.AncientDirFlag.Name),
-			EnableStateArchive: stateArchive,
-		}
-		if stateArchive && !livePruning {
-			logger.Crit("The state archive requires live pruning", "flag", utils.LivePruningFlag.Name)
 		}
 		chainDB := stack.OpenDatabase(dbc)
 
