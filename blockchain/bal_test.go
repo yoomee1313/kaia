@@ -77,6 +77,11 @@ type balTestEnv struct {
 }
 
 func newBALTestEnv(t *testing.T, hardfork string, numKeys int) *balTestEnv {
+	return newBALTestEnvWithAlloc(t, hardfork, numKeys, nil)
+}
+
+// newBALTestEnvWithAlloc is newBALTestEnv with extra genesis accounts.
+func newBALTestEnvWithAlloc(t *testing.T, hardfork string, numKeys int, extra GenesisAlloc) *balTestEnv {
 	env := &balTestEnv{t: t, config: params.TestKaiaConfig(hardfork), db: database.NewMemoryDBManager()}
 	env.signer = types.LatestSignerForChainID(env.config.ChainID)
 	alloc := GenesisAlloc{
@@ -91,6 +96,9 @@ func newBALTestEnv(t *testing.T, hardfork string, numKeys int) *balTestEnv {
 		env.keys = append(env.keys, key)
 		env.addrs = append(env.addrs, addr)
 		alloc[addr] = GenesisAccount{Balance: balFunds}
+	}
+	for addr, acc := range extra {
+		alloc[addr] = acc
 	}
 	env.sealer = balTestSealer{Faker: faker.NewFaker(), initAddr: env.addrs[0]}
 	env.gspec = &Genesis{Config: env.config, Alloc: alloc}

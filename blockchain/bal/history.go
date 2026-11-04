@@ -62,8 +62,39 @@ type History struct {
 }
 
 func NewHistory(index *Index, lists ListReader, base BaseState) *History {
-	cache, _ := lru.New(16)
+	return NewHistoryWithCache(index, lists, base, 16)
+}
+
+// NewHistoryWithCache is NewHistory keeping up to lists decoded lists in memory.
+func NewHistoryWithCache(index *Index, lists ListReader, base BaseState, cached int) *History {
+	cache, _ := lru.New(cached)
 	return &History{index: index, lists: lists, base: base, cache: cache}
+}
+
+// Index returns the index the history reads.
+func (h *History) Index() *Index { return h.index }
+
+// slotLister is a base state that can list the slots of an account.
+type slotLister interface {
+	Slots(addr common.Address) ([]common.Hash, error)
+}
+
+// Slots returns every slot of addr that may be set at the end of the given
+// block: the slots written after the base, and the slots of the base if it
+// can list them.
+func (h *History) Slots(addr common.Address, number uint64) ([]common.Hash, error) {
+	slots, err := h.index.SlotsBefore(addr, number)
+	if err != nil {
+		return nil, err
+	}
+	if l, ok := h.base.(slotLister); ok {
+		base, err := l.Slots(addr)
+		if err != nil {
+			return nil, err
+		}
+		slots = append(slots, base...)
+	}
+	return slots, nil
 }
 
 func (h *History) access(number uint64, addr common.Address) (*AccountAccess, error) {

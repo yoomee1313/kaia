@@ -267,3 +267,26 @@ func (ix *Index) blocks(prefix []byte, number uint64) ([]uint64, error) {
 	}
 	return out, it.Error()
 }
+
+// SlotsBefore returns the slots of addr written in a block after the base and at
+// or before number, in slot order.
+func (ix *Index) SlotsBefore(addr common.Address, number uint64) ([]common.Hash, error) {
+	prefix := accountKey(kindSlot, addr)
+	it := ix.db.NewIterator(prefix, nil)
+	defer it.Release()
+	var slots []common.Hash
+	for it.Next() {
+		key := it.Key()
+		if len(key) != len(prefix)+common.HashLength+8 {
+			return nil, fmt.Errorf("malformed BAL index key %x", key)
+		}
+		if first := ^binary.BigEndian.Uint64(key[len(key)-8:]); first > number {
+			continue
+		}
+		slot := common.BytesToHash(key[len(prefix) : len(prefix)+common.HashLength])
+		if n := len(slots); n == 0 || slots[n-1] != slot {
+			slots = append(slots, slot)
+		}
+	}
+	return slots, it.Error()
+}

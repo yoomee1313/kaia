@@ -512,3 +512,13 @@ func (b *BALBase) Storage(addr common.Address, slot common.Hash) (common.Hash, e
 func (b *BALBase) Code(codeHash common.Hash) ([]byte, error) {
 	return b.s.db.ContractCode(codeHash)
 }
+
+// Slots returns the slots of the storage of addr.
+func (b *BALBase) Slots(addr common.Address) ([]common.Hash, error) {
+	var slots []common.Hash
+	b.s.ForEachStorage(addr, func(key, _ common.Hash) bool {
+		slots = append(slots, key)
+		return true
+	})
+	return slots, b.s.Error()
+}
