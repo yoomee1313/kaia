@@ -173,13 +173,29 @@ func cmdSync(args []string) error {
 	root := progress.Root
 	trieDB.ReferenceRoot(root)
 
+	// Every commit appends a line to the metrics file, which survives restarts.
+	metricsPath := filepath.Join(*out, "balsync.metrics.csv")
+	_, statErr := os.Stat(metricsPath)
+	metrics, err := os.OpenFile(metricsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer metrics.Close()
+	if errors.Is(statErr, os.ErrNotExist) {
+		fmt.Fprintln(metrics, "time,block,run_elapsed_s,interval_blocks,interval_s,interval_blocks_per_s,commit_s,prune_s,dirty_bytes,pruned_nodes_total,batch,commit_every,retention")
+	}
+
 	start, last := time.Now(), time.Now()
 	from := progress.Block
+	lastBlock, lastTime := from, start
 	var pruned uint64
 	commit := func(number uint64, root common.Hash) error {
+		commitStart := time.Now()
+		dirty, _, _ := trieDB.Size()
 		if err := trieDB.Commit(root, false, number); err != nil {
 			return err
 		}
+		pruneStart := time.Now()
 		// Committed marks of nodes obsolete for the retention are deleted.
 		if pruning && number > *retention && number-*retention >= pruneFrom {
 			limit := number - *retention
@@ -189,6 +205,14 @@ func cmdSync(args []string) error {
 			dst.WriteLastPrunedBlockNumber(limit)
 			pruneFrom, pruned = limit+1, pruned+uint64(len(marks))
 		}
+		now := time.Now()
+		interval := now.Sub(lastTime).Seconds()
+		fmt.Fprintf(metrics, "%s,%d,%.1f,%d,%.1f,%.0f,%.2f,%.2f,%d,%d,%d,%d,%d\n",
+			now.Format(time.RFC3339), number, now.Sub(start).Seconds(), number-lastBlock, interval,
+			float64(number-lastBlock)/interval, pruneStart.Sub(commitStart).Seconds(), now.Sub(pruneStart).Seconds(),
+			uint64(dirty), pruned, *batchSize, *commitEvery, *retention)
+		lastBlock, lastTime = number, now
+
 		enc, _ := json.Marshal(syncProgress{Block: number, Root: root})
 		tmp := progressFile + ".tmp"
 		if err := os.WriteFile(tmp, enc, 0o644); err != nil {
@@ -206,6 +230,7 @@ func cmdSync(args []string) error {
 			syncReadAhead(stateDB, root, batch, *workers)
 		}()
 	}
+	shown := from
 	cur, ok := <-batches
 	for ok {
 		next, more := <-batches
@@ -239,10 +264,11 @@ func cmdSync(args []string) error {
 			}
 		}
 		if time.Since(last) > 30*time.Second {
-			last = time.Now()
-			rate := float64(n-from) / time.Since(start).Seconds()
+			// The rate since the last line gives the eta: blocks get heavier.
+			rate := float64(n-shown) / time.Since(last).Seconds()
+			last, shown = time.Now(), n
 			nodes, _, _ := trieDB.Size()
-			fmt.Printf("synced %d/%d, %.0f blocks/s, dirty %s, pruned %d nodes, eta %s\n", n, end, rate, nodes, pruned,
+			fmt.Printf("%s synced %d/%d, %.0f blocks/s, dirty %s, pruned %d nodes, eta %s\n", last.Format("15:04:05"), n, end, rate, nodes, pruned,
 				(time.Duration(float64(end-n)/rate) * time.Second).Round(time.Minute))
 		}
 		cur, ok = next, more
