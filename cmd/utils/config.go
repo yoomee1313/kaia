@@ -588,6 +588,17 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 	}
 }
 
+// setFreezer applies the freezer flags. The default of --db.freezer is set per
+// node type by each binary (FreezerFlag.Value). Only an explicit setting makes
+// a database setup without freezer support fail; with the default, the node
+// runs without the freezer.
+func setFreezer(ctx *cli.Context, cfg *cn.Config) {
+	cfg.EnableFreezer = ctx.Bool(FreezerFlag.Name)
+	cfg.FreezerByDefault = cfg.EnableFreezer && !ctx.IsSet(FreezerFlag.Name)
+	cfg.FreezerThreshold = ctx.Uint64(FreezerThresholdFlag.Name)
+	cfg.AncientDir = ctx.String(AncientDirFlag.Name)
+}
+
 // SetKaiaConfig applies klay-related command line flags to the config.
 func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	// TODO-Kaia-Bootnode: better have to check conflicts about network flags when we add Kaia's `mainnet` parameter
@@ -641,9 +652,7 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	}
 	cfg.SingleDB = ctx.Bool(SingleDBFlag.Name)
 	cfg.NumStateTrieShards = ctx.Uint(NumStateTrieShardsFlag.Name)
-	cfg.EnableFreezer = ctx.Bool(FreezerFlag.Name)
-	cfg.FreezerThreshold = ctx.Uint64(FreezerThresholdFlag.Name)
-	cfg.AncientDir = ctx.String(AncientDirFlag.Name)
+	setFreezer(ctx, cfg)
 	if !database.IsPow2(cfg.NumStateTrieShards) {
 		log.Fatalf("%v should be power of 2 but %v is not!", NumStateTrieShardsFlag.Name, cfg.NumStateTrieShards)
 	}

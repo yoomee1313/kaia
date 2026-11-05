@@ -166,7 +166,7 @@ leave the key-value store. geth's ~25-hour equivalent felt too tight for that.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--db.freezer` | off | Enable the freezer and the freeze loop (experimental). |
+| `--db.freezer` | on for EN (`ken`), off for CN (`kcn`) and the service chain binaries | Enable the freezer and the freeze loop. Each binary sets its default in its `main` (`utils.FreezerFlag.Value`). With the default, a setup without freezer support (single DB, DynamoDB, MemoryDB, secondary RocksDB) runs without the freezer and logs a warning; an explicit `--db.freezer` fails there. A database whose blocks were moved can no longer be opened with `--db.freezer=false` or by earlier versions; the node logs a warning right before the first blocks are moved. |
 | `--db.freezer.threshold` | `172800` | Number of recent blocks kept in the key-value DBs. At least 128 and twice `--state.block-interval`, so that a crash recovery never has to rewind into the freezer; the node refuses to start otherwise. |
 | `--datadir.ancient` | `<chaindata>/ancient` | Freezer root. A relative path is resolved against the chaindata directory. Tables go into `<root>/chain`. |
 
@@ -223,9 +223,10 @@ between the fsync and the delete.
 
 ## Not handled yet
 
-- **`--db.single`**, **DynamoDB**, **MemoryDB**, **secondary RocksDB**: the
-  freezer is disabled with a warning. Secondary RocksDB is excluded because the
-  primary holds the freezer's exclusive file lock.
+- **`--db.single`**, **DynamoDB**, **MemoryDB**, **secondary RocksDB**: a
+  default freezer is disabled with a warning, an explicit `--db.freezer` fails.
+  Secondary RocksDB is excluded because the primary holds the freezer's
+  exclusive file lock.
 - **Reset to another genesis** (`ResetWithGenesisBlock`): the freezer keeps
   block 0, so a different genesis fails the genesis check on the next open.
 - **Dangling side chains** above the freezer head (geth deletes them) are not

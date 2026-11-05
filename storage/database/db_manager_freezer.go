@@ -73,6 +73,31 @@ var (
 	freezerReadErrorCounter = metrics.NewRegisteredCounter(dbMetricPrefix+"ancient/readerror", nil)
 )
 
+// checkFreezerSupport reports whether the freezer is to be opened. A setup
+// without freezer support disables it with a warning when it is read-only or
+// enabled by default, and fails when the user enabled it.
+func checkFreezerSupport(dbc *DBConfig, readonly bool) (bool, error) {
+	if !dbc.EnableFreezer && !readonly {
+		return false, nil
+	}
+	var reason string
+	switch {
+	case dbc.SingleDB:
+		reason = "a single database"
+	case dbc.DBType == MemoryDB || dbc.DBType == DynamoDB:
+		reason = "database type " + string(dbc.DBType)
+	case dbc.RocksDBConfig != nil && dbc.RocksDBConfig.Secondary:
+		reason = "a secondary RocksDB"
+	default:
+		return true, nil
+	}
+	if !readonly && !dbc.FreezerByDefault {
+		return false, fmt.Errorf("the freezer is not supported with %s yet, disable it with --db.freezer=false", reason)
+	}
+	logger.Warn("Freezer is not supported with " + reason + " yet, disabling it")
+	return false, nil
+}
+
 // openFreezer opens the block freezer if it is enabled and supported by the
 // configured backend. It fails on an I/O or consistency error, and if blocks
 // were frozen before but the freezer is now disabled or empty. With
@@ -84,15 +109,9 @@ func (dbm *databaseManager) openFreezer() error {
 	marker, _ := miscDB.Get(ancientDirKey)
 
 	readonly := !dbc.EnableFreezer && dbc.FreezerReadOnly && len(marker) != 0
-	enabled := dbc.EnableFreezer || readonly
-	switch {
-	case !enabled:
-	case dbc.DBType == MemoryDB || dbc.DBType == DynamoDB:
-		logger.Warn("Freezer is not supported for the database type, disabling it", "DBType", dbc.DBType)
-		enabled = false
-	case dbc.RocksDBConfig != nil && dbc.RocksDBConfig.Secondary:
-		logger.Warn("Freezer is not supported for a secondary RocksDB yet, disabling it")
-		enabled = false
+	enabled, err := checkFreezerSupport(dbc, readonly)
+	if err != nil {
+		return err
 	}
 	if !enabled {
 		if len(marker) != 0 {
@@ -466,6 +485,11 @@ func (dbm *databaseManager) freezeRange(first, last uint64) error {
 	)
 	if first > 0 {
 		parent = common.BytesToHash(dbm.readAncientHash(first - 1))
+	} else {
+		dbm.firstFreezeWarn.Do(func() {
+			logger.Warn("Moving old blocks to the freezer for the first time. Once they are moved, this database can no longer be opened by versions without the freezer or with --db.freezer=false. Start the node with --db.freezer=false to keep a database without the freezer",
+				"dir", dbm.freezerDir(), "threshold", dbm.config.FreezerThreshold)
+		})
 	}
 	_, err := dbm.freezer.ModifyAncients(func(op ancient.AncientWriteOp) error {
 		for number := first; number <= last; number++ {

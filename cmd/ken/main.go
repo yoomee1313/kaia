@@ -91,6 +91,8 @@ func init() {
 func main() {
 	// Set NodeTypeFlag to en
 	utils.NodeTypeFlag.Value = "en"
+	// Enable the block freezer by default
+	utils.FreezerFlag.Value = true
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)
