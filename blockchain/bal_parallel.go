@@ -128,7 +128,9 @@ func (p *StateProcessor) ProcessWithAccessList(block *types.Block, parentRoot co
 		} else {
 			tx := txs[phase-1]
 			sdb.SetTxContext(tx.Hash(), block.Hash(), phase-1)
-			receipt, _, err := p.bc.ApplyTransaction(p.config, &author, sdb, header, tx, &gas[phase-1], &cfg)
+			// The EVM fills in its config, so every phase has its own.
+			txCfg := cfg
+			receipt, _, err := p.bc.ApplyTransaction(p.config, &author, sdb, header, tx, &gas[phase-1], &txCfg)
 			if err != nil {
 				errs[phase] = fmt.Errorf("tx %d: %w", phase-1, err)
 				return

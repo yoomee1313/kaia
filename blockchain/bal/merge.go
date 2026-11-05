@@ -72,9 +72,9 @@ func before[T indexed](list []T, k uint32) []T {
 // lists them.
 func Merge(lists ...*BlockAccessList) *BlockAccessList {
 	type merged struct {
-		acc    AccountAccess
-		slots  map[common.Hash]int // index in acc.StorageWrites
-		reads  map[common.Hash]struct{}
+		acc   AccountAccess
+		slots map[common.Hash]int // index in acc.StorageWrites
+		reads map[common.Hash]struct{}
 	}
 	accounts := make(map[common.Address]*merged)
 	for _, list := range lists {
