@@ -437,7 +437,8 @@ func TestBlockAccessListSelfDestruct(t *testing.T) {
 
 	c := findAccess(t, lists[1], child)
 	require.Equal(t, []uint32{1}, c.Deleted)
-	require.Equal(t, []uint32{2}, c.StorageCleared)
+	// The deletion already drops the storage; the recreation records no clear.
+	require.Empty(t, c.StorageCleared)
 	require.Equal(t, uint32(2), c.AccountChanges[0].Index)
 
 	c = findAccess(t, lists[2], child)
