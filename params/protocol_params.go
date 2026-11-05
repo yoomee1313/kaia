@@ -220,6 +220,24 @@ const (
 	// The p2p message size is max 12 MiB, so a block is capped to it minus a safety margin for any metadata that may accompany the block message.
 	// MaxBlockSize (10 MiB) = ProtocolMaxMsgSize (12 MiB) - margin (2 MiB)
 	MaxBlockSize = 10_485_760 // maximum size of an RLP-encoded block
+
+	// A KaiaBFT proposal carries the block and, from the Amber hardfork, its
+	// block access list, in one p2p message. A block producer keeps the RLP
+	// sizes of both under MaxProposalSize, which leaves a margin of 1 MiB
+	// under ProtocolMaxMsgSize (12 MiB) for the rest of the message.
+	MaxProposalSize = 11_534_336
+)
+
+// Default limits of a block from the Amber hardfork, used when the chain
+// config does not set them.
+const (
+	// DefaultAmberBlockComputationCostLimit matches the KaiaBFT tx execution
+	// time limit of the proposer (400ms), as the per-tx limits do (150,000,000
+	// for 150ms, see OpcodeComputationCostLimitCancun).
+	DefaultAmberBlockComputationCostLimit = 400_000_000
+	// DefaultAmberBlockAccessListEntryLimit is above the largest block access
+	// list of Kairos up to block 143,188,913: 21,138 entries (block 100,159,749).
+	DefaultAmberBlockAccessListEntryLimit = 32_768
 )
 
 const (

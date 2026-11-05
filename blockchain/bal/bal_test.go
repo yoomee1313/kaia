@@ -203,3 +203,47 @@ func TestCheckHash(t *testing.T) {
 	otherBalance.Accounts[0].BalanceChanges[0].Balance = big.NewInt(6)
 	require.ErrorIs(t, otherBalance.CheckHash(&hash), ErrHashMismatch)
 }
+
+// TestEntryCountAndStats checks that the builder counts the entries as the list
+// does, reads and writes of a slot once, and bounds the encoded size.
+func TestEntryCountAndStats(t *testing.T) {
+	var (
+		a1    = common.HexToAddress("0x01")
+		a2    = common.HexToAddress("0x02")
+		a3    = common.HexToAddress("0x03")
+		s1    = common.HexToHash("0x11")
+		s2    = common.HexToHash("0x12")
+		s3    = common.HexToHash("0x13")
+		value = common.HexToHash("0xff")
+	)
+	b := NewBuilder()
+	b.ReadAccount(a1)
+	b.ReadSlot(a1, s1)
+	b.ReadSlot(a1, s2)
+	b.WriteSlot(a1, 1, s2, value) // read and written: one entry
+	b.WriteSlot(a1, 2, s2, value)
+	b.WriteSlot(a2, 1, s3, value)
+	b.SetBalance(a2, 1, new(big.Int).Lsh(common.Big1, 255))
+	b.SetNonce(a3, 2, 7)
+	b.SetCode(a3, 2, make([]byte, 1000))
+	b.SetAccount(a3, 2, make([]byte, 100))
+	b.Delete(a2, 3)
+	b.ClearStorage(a3, 3)
+
+	list := b.Build()
+	require.Equal(t, uint64(3+3), list.EntryCount(), "3 accounts, slots s1 and s2 of a1, s3 of a2")
+	entries, size := b.Stats()
+	require.Equal(t, list.EntryCount(), entries)
+	enc, err := list.Encode()
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, size, uint64(len(enc)))
+	require.Less(t, size, uint64(2*len(enc)), "the bound is not far off")
+
+	has, hasSlot := b.Has(a1, &s1)
+	require.True(t, has)
+	require.True(t, hasSlot)
+	_, hasSlot = b.Has(a1, &s3)
+	require.False(t, hasSlot)
+	has, _ = b.Has(common.HexToAddress("0x04"), nil)
+	require.False(t, has)
+}

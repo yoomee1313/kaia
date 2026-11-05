@@ -288,6 +288,10 @@ type ChainConfig struct {
 	PermissionlessCompatibleBlock *big.Int `json:"permissionlessCompatibleBlock,omitempty"` // PermissionlessCompatible switch block (nil = no fork)
 	AmberCompatibleBlock          *big.Int `json:"amberCompatibleBlock,omitempty"`          // AmberCompatible switch block (nil = no fork), commits the block access list hash in the header (experimental)
 
+	// Limits of a block from the Amber hardfork. Zero means the default.
+	AmberBlockComputationCostLimit uint64 `json:"amberBlockComputationCostLimit,omitempty"` // Sum of the opcode computation costs of the txs of a block
+	AmberBlockAccessListEntryLimit uint64 `json:"amberBlockAccessListEntryLimit,omitempty"` // Accounts plus storage slots, read or written, in the block access list
+
 	// Kip103 is a special purpose hardfork feature that can be executed only once
 	// Both Kip103CompatibleBlock and Kip103ContractAddress should be specified to enable KIP103
 	Kip103CompatibleBlock *big.Int       `json:"kip103CompatibleBlock,omitempty"` // Kip103Compatible activate block (nil = no fork)
@@ -566,6 +570,25 @@ func (c *ChainConfig) IsPermissionlessForkEnabled(num *big.Int) bool {
 // IsAmberForkEnabled returns whether num is either equal to the amber block or greater.
 func (c *ChainConfig) IsAmberForkEnabled(num *big.Int) bool {
 	return isForked(c.AmberCompatibleBlock, num)
+}
+
+// BlockComputationCostLimit returns the limit of the sum of the opcode
+// computation costs of the txs of a block from the Amber hardfork.
+func (c *ChainConfig) BlockComputationCostLimit() uint64 {
+	if c.AmberBlockComputationCostLimit != 0 {
+		return c.AmberBlockComputationCostLimit
+	}
+	return DefaultAmberBlockComputationCostLimit
+}
+
+// BlockAccessListEntryLimit returns the limit of the entries of the block
+// access list of a block from the Amber hardfork: its accounts plus its storage
+// slots, read or written.
+func (c *ChainConfig) BlockAccessListEntryLimit() uint64 {
+	if c.AmberBlockAccessListEntryLimit != 0 {
+		return c.AmberBlockAccessListEntryLimit
+	}
+	return DefaultAmberBlockAccessListEntryLimit
 }
 
 // IsKIP103ForkBlock returns whether num is equal to the kip103 block.

@@ -222,6 +222,81 @@ func (s *StateDB) BlockAccessList() *bal.BlockAccessList {
 	return s.blockAccess.builder.Build()
 }
 
+// wholeAccountExtraSize bounds what a whole account adds to its Kaia fields: a
+// balance, a nonce, a code hash and a storage root with their headers.
+const wholeAccountExtraSize = 33 + 9 + 33 + 40 + 4*9
+
+// BlockAccessListStats returns the entries of the block access list recorded so
+// far, as bal.BlockAccessList.EntryCount counts them, and an upper bound of its
+// encoded size. It includes the accesses of the running tx that are not
+// finalised yet, so a block producer can check a tx before it keeps it. The
+// changes not recorded yet are bounded by a change of every field of each
+// dirty account and of each written slot. It returns zeros if the recorder is
+// not enabled.
+func (s *StateDB) BlockAccessListStats() (entries, size uint64) {
+	r := s.blockAccess
+	if r == nil {
+		return 0, 0
+	}
+	entries, size = r.builder.Stats()
+	newAccounts := make(map[common.Address]struct{})
+	newSlots := make(map[common.Address]map[common.Hash]struct{})
+	addAccount := func(addr common.Address) {
+		if _, ok := newAccounts[addr]; ok {
+			return
+		}
+		if has, _ := r.builder.Has(addr, nil); !has {
+			newAccounts[addr] = struct{}{}
+			entries++
+			size += bal.MaxAccountSize
+		}
+	}
+	addSlot := func(addr common.Address, slot common.Hash) {
+		addAccount(addr)
+		if _, ok := newSlots[addr][slot]; ok {
+			return
+		}
+		if _, has := r.builder.Has(addr, &slot); !has {
+			if newSlots[addr] == nil {
+				newSlots[addr] = make(map[common.Hash]struct{})
+			}
+			newSlots[addr][slot] = struct{}{}
+			entries++
+			size += bal.MaxSlotSize
+		}
+	}
+	for addr := range r.pendingAccounts {
+		addAccount(addr)
+	}
+	for addr, slots := range r.pendingSlots {
+		for slot := range slots {
+			addSlot(addr, slot)
+		}
+	}
+	if r.journalOffset < len(s.journal.entries) {
+		for _, entry := range s.journal.entries[r.journalOffset:] {
+			if e, ok := entry.(storageChange); ok {
+				addSlot(*e.account, e.key)
+				size += bal.MaxChangeSize
+			}
+		}
+	}
+	for addr := range s.journal.dirties {
+		addAccount(addr)
+		obj := s.stateObjects[addr]
+		if obj == nil {
+			continue
+		}
+		// A balance, a nonce and the whole account, which adds a balance, a
+		// nonce, a code hash and a storage root to the Kaia fields.
+		size += 2*bal.MaxChangeSize + bal.MaxBytesChangeSize(len(kaiaFields(obj.account))+wholeAccountExtraSize)
+		if obj.dirtyCode {
+			size += bal.MaxBytesChangeSize(len(obj.code))
+		}
+	}
+	return entries, size
+}
+
 // accountLoaded takes the values of a newly loaded account as the base of its
 // changes, and records the read.
 func (r *accessRecorder) accountLoaded(addr common.Address, obj *stateObject) {
