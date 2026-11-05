@@ -17,7 +17,7 @@
 //go:build ignore
 
 // rpclatency measures the RPC read latency of old (frozen) and recent blocks
-// for the block freezer trial. See KAIROS_TRIAL.md.
+// for the block freezer trial.
 //
 // It has two steps, so that the measured reads are not warmed up by the
 // sampling:
