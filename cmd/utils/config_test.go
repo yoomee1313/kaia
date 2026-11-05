@@ -20,6 +20,8 @@ import (
 
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/networks/p2p"
+	"github.com/kaiachain/kaia/node/cn"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/assert"
 	"github.com/urfave/cli/v2"
 	"github.com/urfave/cli/v2/altsrc"
@@ -334,6 +336,44 @@ func TestSetDefaultDiscoverTypes(t *testing.T) {
 			assert.Equal(t, tt.wantCN, cfg.DiscoverTypes.CN)
 			assert.Equal(t, tt.wantPN, cfg.DiscoverTypes.PN)
 			assert.Equal(t, tt.wantEN, cfg.DiscoverTypes.EN)
+		})
+	}
+}
+
+// TestSetFreezer checks the freezer default of a node type and that only an
+// explicit setting is marked as the user's choice.
+func TestSetFreezer(t *testing.T) {
+	defer func(v bool) { FreezerFlag.Value = v }(FreezerFlag.Value)
+
+	for _, tc := range []struct {
+		name      string
+		byDefault bool // FreezerFlag.Value of the binary
+		args      []string
+		env       string
+		enabled   bool
+		defaulted bool
+	}{
+		{name: "default off", byDefault: false},
+		{name: "default on", byDefault: true, enabled: true, defaulted: true},
+		{name: "default on, disabled", byDefault: true, args: []string{"--db.freezer=false"}},
+		{name: "default on, enabled", byDefault: true, args: []string{"--db.freezer"}, enabled: true},
+		{name: "default off, enabled", byDefault: false, args: []string{"--db.freezer"}, enabled: true},
+		{name: "default on, disabled by env", byDefault: true, env: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			FreezerFlag.Value = tc.byDefault
+			if tc.env != "" {
+				t.Setenv("KAIA_DB_FREEZER", tc.env)
+			}
+			var cfg cn.Config
+			app := newAppWithAction(func(ctx *cli.Context) error {
+				setFreezer(ctx, &cfg)
+				return nil
+			})
+			assert.NoError(t, app.Run(append([]string{"kaia"}, tc.args...)))
+			assert.Equal(t, tc.enabled, cfg.EnableFreezer)
+			assert.Equal(t, tc.defaulted, cfg.FreezerByDefault)
+			assert.Equal(t, uint64(database.DefaultFreezerThreshold), cfg.FreezerThreshold)
 		})
 	}
 }

@@ -122,6 +122,7 @@ type Config struct {
 	SingleDB             bool
 	NumStateTrieShards   uint
 	EnableFreezer        bool
+	FreezerByDefault     bool `toml:"-"`
 	FreezerThreshold     uint64
 	AncientDir           string
 	EnableDBPerfMetrics  bool

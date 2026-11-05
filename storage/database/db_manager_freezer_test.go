@@ -591,3 +591,61 @@ func TestFreezer_ReadError(t *testing.T) {
 	assertBlockInKV(t, dbm, blocks[7])
 	assertBlockReadable(t, dbm, blocks[7])
 }
+
+// TestFreezer_Support checks that a setup without freezer support disables a
+// freezer that is read-only or enabled by default, and fails one that the user
+// enabled.
+func TestFreezer_Support(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		dbc      DBConfig
+		readonly bool
+		enabled  bool
+		fails    bool
+	}{
+		{name: "disabled", dbc: DBConfig{DBType: MemoryDB}},
+		{name: "leveldb", dbc: DBConfig{DBType: LevelDB, EnableFreezer: true}, enabled: true},
+		{name: "leveldb by default", dbc: DBConfig{DBType: LevelDB, EnableFreezer: true, FreezerByDefault: true}, enabled: true},
+		{name: "memory", dbc: DBConfig{DBType: MemoryDB, EnableFreezer: true}, fails: true},
+		{name: "memory by default", dbc: DBConfig{DBType: MemoryDB, EnableFreezer: true, FreezerByDefault: true}},
+		{name: "memory read-only", dbc: DBConfig{DBType: MemoryDB, FreezerReadOnly: true}, readonly: true},
+		{name: "dynamo", dbc: DBConfig{DBType: DynamoDB, EnableFreezer: true}, fails: true},
+		{name: "dynamo by default", dbc: DBConfig{DBType: DynamoDB, EnableFreezer: true, FreezerByDefault: true}},
+		{name: "single", dbc: DBConfig{DBType: LevelDB, SingleDB: true, EnableFreezer: true}, fails: true},
+		{name: "single by default", dbc: DBConfig{DBType: LevelDB, SingleDB: true, EnableFreezer: true, FreezerByDefault: true}},
+		{name: "secondary rocksdb", dbc: DBConfig{DBType: RocksDB, EnableFreezer: true, RocksDBConfig: &RocksDBConfig{Secondary: true}}, fails: true},
+		{name: "secondary rocksdb by default", dbc: DBConfig{DBType: RocksDB, EnableFreezer: true, FreezerByDefault: true, RocksDBConfig: &RocksDBConfig{Secondary: true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, err := checkFreezerSupport(&tc.dbc, tc.readonly)
+			if tc.fails {
+				assert.ErrorContains(t, err, "--db.freezer=false")
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.enabled, enabled)
+		})
+	}
+}
+
+// TestFreezer_ByDefault checks that a freezer enabled by default freezes like
+// an enabled one, and that databases without freezer support open without it.
+func TestFreezer_ByDefault(t *testing.T) {
+	dir := t.TempDir()
+	dbc := newFreezerTestConfig(dir, true, 2)
+	dbc.FreezerByDefault = true
+	dbm := openFreezerTestDBM(t, dbc)
+	writeFreezerTestChain(t, dbm, 6)
+	triggerFreeze(t, dbm)
+	assert.Equal(t, uint64(4), dbm.FrozenBlocks())
+	dbm.Close()
+
+	for _, dbc := range []*DBConfig{
+		{DBType: MemoryDB, EnableFreezer: true, FreezerByDefault: true},
+		{Dir: t.TempDir(), DBType: LevelDB, SingleDB: true, EnableFreezer: true, FreezerByDefault: true},
+	} {
+		dbm := openFreezerTestDBM(t, dbc)
+		assert.Nil(t, dbm.freezer, "DBType %s, single %v", dbc.DBType, dbc.SingleDB)
+		dbm.Close()
+	}
+}

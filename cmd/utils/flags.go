@@ -344,7 +344,7 @@ var (
 	}
 	FreezerFlag = &cli.BoolFlag{
 		Name:     "db.freezer",
-		Usage:    "(experimental) Move canonical blocks older than db.freezer.threshold from the key-value databases to the append-only freezer",
+		Usage:    "Move canonical blocks older than db.freezer.threshold from the key-value databases to the append-only freezer. Once blocks are moved, the database can no longer be opened without the freezer. The default depends on the node type (on for EN); with the default, a database setup that does not support the freezer runs without it",
 		Aliases:  []string{},
 		EnvVars:  []string{"KLAYTN_DB_FREEZER", "KAIA_DB_FREEZER"},
 		Category: "DATABASE",

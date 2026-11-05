@@ -458,6 +458,7 @@ type databaseManager struct {
 	freezerWg        sync.WaitGroup
 	freezerCloseOnce sync.Once
 	freezeLock       sync.Mutex // Held by a freeze round and by PauseFreezer
+	firstFreezeWarn  sync.Once  // Warns that the first freeze ends the compatibility with earlier versions
 }
 
 func NewMemoryDBManager() DBManager {
@@ -503,6 +504,7 @@ type DBConfig struct {
 
 	// Freezer related configurations
 	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer
+	FreezerByDefault bool   // If true, EnableFreezer is a default rather than the user's choice, and a setup without freezer support disables the freezer instead of failing
 	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
 	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
 	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer is opened for reads only
@@ -630,8 +632,8 @@ func newDatabaseManager(dbc *DBConfig) *databaseManager {
 func NewDBManager(dbc *DBConfig) DBManager {
 	if dbc.SingleDB {
 		logger.Info("Single database is used for persistent storage", "DBType", dbc.DBType)
-		if dbc.EnableFreezer {
-			logger.Warn("Freezer is not supported with a single database yet, disabling it")
+		if _, err := checkFreezerSupport(dbc, false); err != nil {
+			logger.Crit("Failed to open block freezer", "err", err)
 		}
 		if dbm, err := singleDatabaseDBManager(dbc); err != nil {
 			logger.Crit("Failed to create a single database", "DBType", dbc.DBType, "err", err)
