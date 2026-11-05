@@ -17,6 +17,7 @@
 package work
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -103,6 +104,16 @@ func produceWithLimits(t *testing.T, amber *big.Int, costLimit, entryLimit uint6
 	t.Cleanup(validator.Stop)
 	_, err = validator.InsertChain(types.Blocks{block})
 	require.NoError(t, err)
+
+	// Validators get the same computation cost from Process.
+	replayed, err := validator.StateAt(genesis.Root())
+	require.NoError(t, err)
+	_, _, _, _, stats, err := validator.Processor().Process(context.Background(), block, replayed, vm.Config{})
+	require.NoError(t, err)
+	if amber != nil && config.IsAmberForkEnabled(block.Number()) {
+		require.Equal(t, res.cost, stats.ComputationCost)
+	}
+	require.NotZero(t, stats.ComputationCost)
 	return res
 }
 

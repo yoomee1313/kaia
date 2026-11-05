@@ -51,6 +51,10 @@ type ProcessStats struct {
 	BeforeApplyTxs time.Time
 	AfterApplyTxs  time.Time
 	AfterFinalize  time.Time
+
+	// ComputationCost is the sum of the opcode computation costs of the txs,
+	// which the Amber block limit bounds.
+	ComputationCost uint64
 }
 
 // NewStateProcessor initialises a new StateProcessor.
@@ -81,6 +85,18 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 
 	// Extract author from the header
 	author, _ := p.bc.sealer.Author(header) // Ignore error, we're past header validation
+
+	// Sum the computation costs of the txs, keeping a hook the caller set.
+	hook := cfg.BeforeTxFinalise
+	cfg.BeforeTxFinalise = func(cost uint64) error {
+		if hook != nil {
+			if err := hook(cost); err != nil {
+				return err
+			}
+		}
+		processStats.ComputationCost += cost
+		return nil
+	}
 
 	processStats.BeforeApplyTxs = time.Now()
 	// Iterate over and process the individual transactions

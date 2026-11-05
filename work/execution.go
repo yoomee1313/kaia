@@ -186,6 +186,7 @@ func (e *DefaultExecutor) ProcessBlock(ctx context.Context, txs []*types.Transac
 	result.BeforeApplyTxs = procStats.BeforeApplyTxs
 	result.AfterApplyTxs = procStats.AfterApplyTxs
 	result.AfterFinalize = procStats.AfterFinalize
+	result.ComputationCost = procStats.ComputationCost
 	return result, nil
 }
 
