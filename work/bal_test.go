@@ -108,8 +108,11 @@ func TestProducerBlockAccessList(t *testing.T) {
 	statedb, err := producerChain.StateAt(genesis.Root())
 	require.NoError(t, err)
 	exec := NewDefaultExecutor(config, producerChain, addrs[0])
-	require.NoError(t, exec.ResetWithState(statedb, header))
+	// In the order of the worker: the recorder, InitializeState (EIP-2935
+	// writes the parent hash), then the executor of the consensus engine.
+	startBlockAccessRecorder(config, statedb, header)
 	require.NoError(t, producerChain.Processor().InitializeState(header, statedb))
+	require.NoError(t, exec.ResetWithState(statedb, header))
 	task := NewTask(config, signer, statedb, header)
 	task.ApplyTransactions(txs, producerChain, addrs[0], nil)
 	require.Len(t, task.Transactions(), 3, "the failing tx is left out")

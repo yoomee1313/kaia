@@ -127,6 +127,11 @@ func (s *StateDB) EnableBlockAccessRecorder() {
 	s.blockAccess = r
 }
 
+// BlockAccessRecorderEnabled reports whether the block access recorder is on.
+func (s *StateDB) BlockAccessRecorderEnabled() bool {
+	return s.blockAccess != nil
+}
+
 // copy returns a deep copy of the recorder for a copy of the StateDB, which
 // starts with an empty journal. Views in seen are replaced, never modified, so
 // they are shared.

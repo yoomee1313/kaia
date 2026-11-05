@@ -107,7 +107,8 @@ func (e *DefaultExecutor) ResetWithState(statedb *state.StateDB, header *types.H
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.config.IsAmberForkEnabled(header.Number) {
+	// The worker may have started the recorder before InitializeState; keep it.
+	if e.config.IsAmberForkEnabled(header.Number) && !statedb.BlockAccessRecorderEnabled() {
 		statedb.EnableBlockAccessRecorder()
 	}
 	e.state = statedb
@@ -211,5 +212,13 @@ func (e *DefaultExecutor) buildResult(internalTxTraces []*vm.InternalTxTrace) *c
 		UsedGas:          e.usedGas,
 		Txs:              e.txs,
 		InternalTxTraces: internalTxTraces,
+	}
+}
+
+// startBlockAccessRecorder starts recording the block access list of a block the
+// node builds, from the Amber hardfork. It must run before InitializeState.
+func startBlockAccessRecorder(config *params.ChainConfig, statedb *state.StateDB, header *types.Header) {
+	if config.IsAmberForkEnabled(header.Number) && !statedb.BlockAccessRecorderEnabled() {
+		statedb.EnableBlockAccessRecorder()
 	}
 }

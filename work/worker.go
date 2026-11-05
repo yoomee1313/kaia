@@ -452,6 +452,8 @@ func (self *worker) commitNewWork() {
 	self.current.stateMu.Lock()
 	defer self.current.stateMu.Unlock()
 
+	// The block access list must include InitializeState, as validators record it.
+	startBlockAccessRecorder(self.config, self.current.state, header)
 	self.chain.Processor().InitializeState(header, self.current.state)
 
 	// Create the current work task
