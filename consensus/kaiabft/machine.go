@@ -95,6 +95,15 @@ type machine struct {
 	pendingRequest        *bft.Request
 	waitingForRoundChange bool
 
+	// Amber: the proposals of this sequence this node executed and found
+	// valid, with the RLP of the BAL of its execution, and the ones it found
+	// invalid. commitPending is set while a COMMIT waits for the execution,
+	// and reproposeOnVerify while a locked block waits for it to be proposed.
+	verified          map[common.Hash][]byte
+	rejected          map[common.Hash]struct{}
+	commitPending     bool
+	reproposeOnVerify bool
+
 	// Backlog
 	backlogs           map[common.Address]*prque.Prque
 	backlogCounts      map[common.Address]int               // queued PREPARE, COMMIT and ROUND CHANGE per sender
@@ -124,6 +133,8 @@ func newMachine(b *backend) *machine {
 		backlogCounts:      make(map[common.Address]int),
 		backlogPreprepares: make(map[common.Address]backlogPreprepare),
 		roundChangeSets:    make(map[uint64]*messageSet),
+		verified:           make(map[common.Hash][]byte),
+		rejected:           make(map[common.Hash]struct{}),
 		metrics:            bft.NewCoreMetrics("consensus/istanbul/core"),
 	}
 }
@@ -137,6 +148,7 @@ func (m *machine) start() error {
 		requestEvent{},
 		messageEvent{},
 		backlogEvent{},
+		execResultEvent{},
 	)
 	m.timeoutSub = m.b.eventMux.Subscribe(timeoutEvent{})
 	m.chainHead = m.b.eventMux.Subscribe(chainHeadEvent{})
@@ -174,9 +186,12 @@ func (m *machine) runLoop() {
 			}
 			switch e := ev.Data.(type) {
 			case requestEvent:
-				if err := m.handleRequest(&bft.Request{Proposal: e.Proposal}); err == errFutureMessage {
-					m.storePendingRequest(&bft.Request{Proposal: e.Proposal})
+				request := &bft.Request{Proposal: e.Proposal, AccessList: e.AccessList}
+				if err := m.handleRequest(request); err == errFutureMessage {
+					m.storePendingRequest(request)
 				}
+			case execResultEvent:
+				m.handleExecResult(e)
 			case messageEvent:
 				if err := m.handleMsg(e.Payload); err == nil {
 					m.b.gossipSubPeer(e.Hash, e.Payload)
@@ -327,6 +342,15 @@ func (m *machine) handlePreprepare(msg *bft.Message, src common.Address) error {
 		return errNotFromProposer
 	}
 
+	if m.isRejected(pp.Proposal.Hash()) {
+		m.sendNextRoundChange("handlePreprepare: rejected proposal")
+		return errRejectedProposal
+	}
+	if err := checkProposalAccessList(m.b.chain.Config(), pp); err != nil {
+		m.sendNextRoundChange("handlePreprepare: invalid block access list")
+		return err
+	}
+
 	// The cheap, stateless checks (bad-block blacklist and the import body
 	// rules) run first, so a body-invalid proposal is rejected before any
 	// speculative work, as dev keeps them at the top of istanbul's Verify.
@@ -338,7 +362,10 @@ func (m *machine) handlePreprepare(msg *bft.Message, src common.Address) error {
 	// Start speculative execution before the header verification so the
 	// header validation below overlaps execution; the result is consumed only
 	// after the full InsertChain validation.
-	if m.state == stateAcceptRequest && !m.isHashLocked() && !m.isProposer() {
+	// From Amber a hash-locked node still executes a locked block it has not
+	// verified yet, as it commits only after execution.
+	if m.state == stateAcceptRequest && !m.isProposer() &&
+		(!m.isHashLocked() || (pp.Proposal.Hash() == m.lockedHash && m.needsExecution(m.lockedHash))) {
 		m.b.startSpeculativeExecution(pp.Proposal)
 	}
 
@@ -367,7 +394,7 @@ func (m *machine) handlePreprepare(msg *bft.Message, src common.Address) error {
 					"seq", m.sequence, "round", m.round, "hash", pp.Proposal.Hash())
 				m.acceptPreprepare(pp)
 				m.setState(statePrepared)
-				m.sendCommit()
+				m.trySendCommit()
 			} else {
 				logger.Warn("[RC] Hash locked but received different proposal hash",
 					"seq", m.sequence, "round", m.round,
@@ -410,7 +437,7 @@ func (m *machine) handlePrepare(msg *bft.Message, src common.Address) error {
 			logger.Info("Received prepare matching hash-locked proposal, moving to Prepared",
 				"seq", m.sequence, "round", m.round, "from", src)
 			m.setState(statePrepared)
-			m.sendCommit()
+			m.trySendCommit()
 		} else if m.getPrepareOrCommitSize() >= m.requiredMessageCount {
 			logger.Info("Received quorum of prepare/commit messages, moving to Prepared",
 				"seq", m.sequence, "round", m.round,
@@ -418,7 +445,7 @@ func (m *machine) handlePrepare(msg *bft.Message, src common.Address) error {
 				"required", m.requiredMessageCount)
 			m.lockHash()
 			m.setState(statePrepared)
-			m.sendCommit()
+			m.trySendCommit()
 		}
 	}
 	return nil
@@ -457,7 +484,7 @@ func (m *machine) handleCommit(msg *bft.Message, src common.Address) error {
 			logger.Info("Received commit matching hash-locked proposal, moving to Prepared",
 				"seq", m.sequence, "round", m.round, "from", src)
 			m.setState(statePrepared)
-			m.sendCommit()
+			m.trySendCommit()
 		} else if m.getPrepareOrCommitSize() >= m.requiredMessageCount {
 			logger.Info("Received quorum of prepare/commit messages (via commit), moving to Prepared",
 				"seq", m.sequence, "round", m.round,
@@ -465,7 +492,7 @@ func (m *machine) handleCommit(msg *bft.Message, src common.Address) error {
 				"required", m.requiredMessageCount)
 			m.lockHash()
 			m.setState(statePrepared)
-			m.sendCommit()
+			m.trySendCommit()
 		}
 	}
 
@@ -640,8 +667,14 @@ func (m *machine) startNewRound(round *big.Int) {
 
 	m.b.currentView.Store(newView)
 
-	// Cancel any in-flight speculative execution from the previous round.
-	m.b.cancelSpeculativeExecution()
+	// Cancel any in-flight speculative execution from the previous round. A
+	// round change keeps the execution of the locked block, which this node
+	// needs from Amber to commit it.
+	if roundChange && m.isHashLocked() {
+		m.b.cancelSpeculativeExecutionExcept(m.lockedHash)
+	} else {
+		m.b.cancelSpeculativeExecution()
+	}
 
 	// Reset round state.
 	m.sequence = newView.Sequence
@@ -684,13 +717,19 @@ func (m *machine) startNewRound(round *big.Int) {
 	m.resetRoundChangeSets()
 	m.waitingForRoundChange = false
 	m.state = stateAcceptRequest
+	m.commitPending = false
+	if !roundChange {
+		m.verified = make(map[common.Hash][]byte)
+		m.rejected = make(map[common.Hash]struct{})
+		m.reproposeOnVerify = false
+	}
 
 	m.processPendingRequests()
 	m.processBacklog()
 
 	if roundChange && m.isProposer() {
 		if m.isHashLocked() && m.preprepare != nil {
-			m.sendPreprepare(&bft.Request{Proposal: m.preprepare.Proposal})
+			m.reproposeLocked()
 		} else if m.pendingRequest != nil {
 			m.sendPreprepare(m.pendingRequest)
 		} else {
@@ -734,6 +773,7 @@ func (m *machine) catchUpRound(view *bft.View) {
 	m.round = view.Round
 	m.prepares = newMessageSet(m.qualified)
 	m.commits = newMessageSet(m.qualified)
+	m.commitPending = false
 
 	if !common.EmptyHash(oldLockedHash) {
 		m.preprepare = oldPreprepare
@@ -783,8 +823,13 @@ func (m *machine) sendPreprepare(request *bft.Request) {
 	if m.sequence.Cmp(request.Proposal.Number()) != 0 || !m.isProposer() {
 		return
 	}
+	// This node proposes only blocks it built or verified, with the BAL of its
+	// own execution.
+	if m.b.isAmberAt(m.sequence.Uint64()) {
+		m.verified[request.Proposal.Hash()] = request.AccessList
+	}
 	curView := m.currentView()
-	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal}
+	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal, AccessList: request.AccessList}
 	encoded, err := bft.Encode(pp)
 	if err != nil {
 		return
@@ -1041,7 +1086,7 @@ func (m *machine) isHashLocked() bool {
 	if common.EmptyHash(m.lockedHash) {
 		return false
 	}
-	return !m.b.hasBadProposal(m.lockedHash)
+	return !m.b.hasBadProposal(m.lockedHash) && !m.isRejected(m.lockedHash)
 }
 
 func (m *machine) getPrepareOrCommitSize() int {

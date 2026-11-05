@@ -145,6 +145,8 @@ type backend struct {
 	// Speculative execution (cache set in Start from chain type assertion;
 	// cancel/wg track the in-flight goroutine launched by the machine).
 	specCache  *blockchain.SpeculativeResultCache
+	validator  blockchain.Validator // checks a speculative result from Amber
+	specHash   common.Hash          // proposal of the in-flight execution
 	specCancel context.CancelFunc
 	specWg     sync.WaitGroup
 	specMu     sync.Mutex
@@ -188,6 +190,7 @@ func (b *backend) Start(chain consensus.ChainReader, executor consensus.Executor
 	// Grab the speculative cache from the concrete BlockChain if available.
 	if bc, ok := chain.(*blockchain.BlockChain); ok {
 		b.specCache = bc.SpeculativeCache()
+		b.validator = bc.Validator()
 	}
 
 	b.startPrepreparedRelay()
@@ -288,6 +291,16 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 		result.FinalizeTime = time.Since(finalizeStart)
 		result.Block = block
 
+		// From Amber the proposal carries its BAL, reads included.
+		var accessList []byte
+		if b.isAmberAt(block.NumberU64()) {
+			if accessList, err = encodeAccessList(result.State); err != nil {
+				logger.Error("Failed to encode the block access list of the proposal", "number", block.Number(), "err", err)
+				resultCh <- nil
+				return
+			}
+		}
+
 		// Log block preparation completion (all validators log this, before seal)
 		logger.Info("Prepared new block",
 			"number", result.Block.Number(),
@@ -298,7 +311,7 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 			"finalizeTime", common.PrettyDuration(result.FinalizeTime))
 
 		sealStart := time.Now()
-		sealedBlock, err := b.seal(block)
+		sealedBlock, err := b.seal(block, accessList)
 		result.SealTime = time.Since(sealStart)
 
 		if err != nil {
@@ -471,7 +484,7 @@ func (b *backend) SignalPeerRegistrable() {
 // Seal — triggers BFT consensus on a proposed block
 // ---------------------------------------------------------------------------
 
-func (b *backend) seal(block *types.Block) (*types.Block, error) {
+func (b *backend) seal(block *types.Block, accessList []byte) (*types.Block, error) {
 	header := block.Header()
 	number := header.Number.Uint64()
 
@@ -486,7 +499,7 @@ func (b *backend) seal(block *types.Block) (*types.Block, error) {
 	}
 	defer b.cleanupSealState(commitCh)
 
-	go b.eventMux.Post(requestEvent{Proposal: block})
+	go b.eventMux.Post(requestEvent{Proposal: block, AccessList: accessList})
 
 	for result := range commitCh {
 		if result == nil {
@@ -835,16 +848,28 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	b.specCancel = cancel
+	b.specHash = blockHash
 	b.specMu.Unlock()
 
 	entry := b.specCache.Reserve(blockHash)
+
+	// From Amber the machine waits for the outcome to send its COMMIT.
+	amber := b.isAmberAt(block.NumberU64())
+	report := func(ev execResultEvent) {
+		if amber {
+			ev.Number, ev.Hash = block.NumberU64(), blockHash
+			go b.eventMux.Post(ev)
+		}
+	}
 
 	signer := types.MakeSigner(b.chain.Config(), block.Number())
 	executor := b.executor.Clone()
 
 	parentHeader := b.chain.GetHeader(block.ParentHash(), block.NumberU64()-1)
 	if parentHeader == nil {
-		entry.Complete(nil, errors.New("parent header not found"))
+		err := errors.New("parent header not found")
+		entry.Complete(nil, err)
+		report(execResultEvent{Err: err, Local: true})
 		cancel()
 		return
 	}
@@ -871,11 +896,13 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 		parentState, err := b.chain.PrunableStateAt(parentHeader.Root, parentHeader.Number.Uint64())
 		if err != nil {
 			entry.Complete(nil, err)
+			report(execResultEvent{Err: err, Local: true})
 			return
 		}
 
 		if err := executor.ResetWithState(parentState, block.Header()); err != nil {
 			entry.Complete(nil, err)
+			report(execResultEvent{Err: err, Local: true})
 			return
 		}
 
@@ -892,6 +919,11 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 		result, err := executor.ProcessBlock(ctx, block.Transactions())
 		if err != nil {
 			entry.Complete(nil, err)
+			// A cancelled execution has no outcome. A failed one is a bad
+			// block unless the state could not be read.
+			if ctx.Err() == nil {
+				report(execResultEvent{Err: err, Local: parentState.Error() != nil})
+			}
 			return
 		}
 
@@ -901,20 +933,26 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 		bloom := types.CreateBloom(result.Receipts)
 		receiptHash := types.DeriveReceiptsRoot(result.Receipts, block.Number())
 
-		entry.Complete(&blockchain.SpeculativeResult{
+		specResult := &blockchain.SpeculativeResult{
 			State:            result.State,
 			Receipts:         result.Receipts,
 			Logs:             result.Logs,
 			UsedGas:          result.UsedGas,
 			InternalTxTraces: result.InternalTxTraces,
 			ProcessStats: blockchain.ProcessStats{
-				BeforeApplyTxs: result.BeforeApplyTxs,
-				AfterApplyTxs:  result.AfterApplyTxs,
-				AfterFinalize:  result.AfterFinalize,
+				BeforeApplyTxs:  result.BeforeApplyTxs,
+				AfterApplyTxs:   result.AfterApplyTxs,
+				AfterFinalize:   result.AfterFinalize,
+				ComputationCost: result.ComputationCost,
 			},
 			Bloom:       bloom,
 			ReceiptHash: receiptHash,
-		}, nil)
+		}
+		if amber {
+			accessList, local, err := verifyExecution(b.chain.Config(), b.validator, block, specResult)
+			report(execResultEvent{AccessList: accessList, Err: err, Local: local})
+		}
+		entry.Complete(specResult, nil)
 
 		logger.Info("Speculative execution completed",
 			"number", block.NumberU64(), "hash", blockHash, "txs", len(block.Transactions()))
@@ -924,8 +962,17 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 // cancelSpeculativeExecution signals any in-flight speculative execution to
 // abort. Safe to call when nothing is running.
 func (b *backend) cancelSpeculativeExecution() {
+	b.cancelSpeculativeExecutionExcept(common.Hash{})
+}
+
+// cancelSpeculativeExecutionExcept cancels the in-flight execution unless it
+// executes the proposal keep.
+func (b *backend) cancelSpeculativeExecutionExcept(keep common.Hash) {
 	b.specMu.Lock()
 	defer b.specMu.Unlock()
+	if !common.EmptyHash(keep) && b.specHash == keep {
+		return
+	}
 	if b.specCancel != nil {
 		b.specCancel()
 		b.specCancel = nil
@@ -937,7 +984,8 @@ func (b *backend) cancelSpeculativeExecution() {
 // ---------------------------------------------------------------------------
 
 type requestEvent struct {
-	Proposal bft.Proposal
+	Proposal   bft.Proposal
+	AccessList []byte // RLP of the BAL of the proposal, from Amber
 }
 
 type messageEvent struct {
