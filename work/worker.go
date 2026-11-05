@@ -428,6 +428,8 @@ func (self *worker) commitNewWork() {
 	self.current.stateMu.Lock()
 	defer self.current.stateMu.Unlock()
 
+	// The block access list must include InitializeState, as validators record it.
+	startBlockAccessRecorder(self.config, self.current.state, header)
 	if err := self.chain.Processor().InitializeState(header, self.current.state); err != nil {
 		logger.Error("Failed to initialize state for mining", "number", header.Number, "err", err)
 		return

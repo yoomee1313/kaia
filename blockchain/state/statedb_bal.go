@@ -127,6 +127,47 @@ func (s *StateDB) EnableBlockAccessRecorder() {
 	s.blockAccess = r
 }
 
+// EnableBlockAccessRecorderAt starts recording at phase idx on a state that
+// holds the start of that phase, built with ApplyBlockAccessListBefore: the
+// current values are the base of the changes, so the list holds the changes
+// of the phases from idx on.
+func (s *StateDB) EnableBlockAccessRecorderAt(idx int) {
+	r := &accessRecorder{
+		index:           uint32(idx),
+		builder:         bal.NewBuilder(),
+		seen:            make(map[common.Address]*accessView, len(s.stateObjects)),
+		pendingAccounts: make(map[common.Address]struct{}),
+		pendingSlots:    make(map[common.Address]map[common.Hash]struct{}),
+	}
+	for addr, obj := range s.stateObjects {
+		if obj.deleted {
+			r.seen[addr] = newAccessView(nil)
+		} else {
+			r.seen[addr] = newAccessView(obj)
+		}
+	}
+	s.blockAccess = r
+}
+
+// ApplyBlockAccessListBefore writes the values of the phases below k of a
+// block access list, which gives the state at the start of phase k when the
+// state is opened at the parent root, and finalises them like the end of a tx.
+func (s *StateDB) ApplyBlockAccessListBefore(list *bal.BlockAccessList, k int) error {
+	for i := range list.Accounts {
+		a := list.Accounts[i].Before(uint32(k))
+		if err := s.applyAccountAccess(&a); err != nil {
+			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.Finalise(true, false)
+	return nil
+}
+
+// BlockAccessRecorderEnabled reports whether the block access recorder is on.
+func (s *StateDB) BlockAccessRecorderEnabled() bool {
+	return s.blockAccess != nil
+}
+
 // copy returns a deep copy of the recorder for a copy of the StateDB, which
 // starts with an empty journal. Views in seen are replaced, never modified, so
 // they are shared.
@@ -287,7 +328,11 @@ func (r *accessRecorder) captureAccount(s *StateDB, addr common.Address, obj *st
 	}
 
 	cur := newAccessView(obj)
-	if recreated {
+	// Only an account that existed has a storage to drop. One that comes into
+	// existence after being touched and removed as empty earlier in the block
+	// has none, and the list must not depend on that history: a phase executed
+	// from the list alone does not see it.
+	if recreated && (prev == nil || prev.exists) {
 		r.builder.ClearStorage(addr, idx)
 	}
 	if prev == nil || !prev.exists || recreated || !bytes.Equal(prev.fields, cur.fields) {
