@@ -258,6 +258,10 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	// latest values will be applied to chainConfig after NewMixedEngine call
 	logger.Info("Initialised chain configuration", "config", chainConfig)
 
+	if err := engine.CheckEngine(engine.EngineType(config.ConsensusEngine), chainConfig); err != nil {
+		return nil, err
+	}
+
 	var (
 		mGov     = gov_impl.NewGovModule()
 		mValset  = valset_impl.NewValsetModule()
