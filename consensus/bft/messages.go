@@ -50,9 +50,11 @@ type Proposal interface {
 	WithSeal(header *types.Header) *types.Block
 }
 
-// Request wraps a proposal to be processed by a BFT engine.
+// Request wraps a proposal to be processed by a BFT engine. From the Amber
+// hardfork a block producer adds the block access list of the proposal.
 type Request struct {
-	Proposal Proposal
+	Proposal   Proposal
+	AccessList []byte
 }
 
 // View includes a round number and a sequence number.
@@ -107,14 +109,24 @@ func (v *View) Cmp(y *View) int {
 }
 
 // Preprepare is the message sent by the proposer to propose a new block.
+//
+// From the Amber hardfork it carries AccessList, the RLP of the block access
+// list of the proposal with its reads. It is not part of the block: only the
+// hash of the writes is in the header. It is covered by the signature of the
+// message, so the proposer answers for it. Before Amber it is empty and is not
+// encoded, so the message is the same as before.
 type Preprepare struct {
-	View     *View
-	Proposal Proposal
+	View       *View
+	Proposal   Proposal
+	AccessList []byte
 }
 
 // EncodeRLP serializes a Preprepare into the Kaia RLP format.
 func (b *Preprepare) EncodeRLP(w io.Writer) error {
-	return rlp.Encode(w, []any{b.View, b.Proposal})
+	if len(b.AccessList) == 0 {
+		return rlp.Encode(w, []any{b.View, b.Proposal})
+	}
+	return rlp.Encode(w, []any{b.View, b.Proposal, b.AccessList})
 }
 
 // DecodeRLP deserializes a Preprepare from a Kaia RLP stream.
@@ -122,13 +134,14 @@ func (b *Preprepare) EncodeRLP(w io.Writer) error {
 // implementation exchanged on the wire.
 func (b *Preprepare) DecodeRLP(s *rlp.Stream) error {
 	var preprepare struct {
-		View     *View
-		Proposal *types.Block
+		View       *View
+		Proposal   *types.Block
+		AccessList []byte `rlp:"optional"`
 	}
 	if err := s.Decode(&preprepare); err != nil {
 		return err
 	}
-	b.View, b.Proposal = preprepare.View, preprepare.Proposal
+	b.View, b.Proposal, b.AccessList = preprepare.View, preprepare.Proposal, preprepare.AccessList
 	return nil
 }
 
