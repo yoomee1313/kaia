@@ -140,6 +140,12 @@ type Config struct {
 	SnapshotAsyncGen     bool
 	BALRecordDir         string
 
+	// History conversion: record and regenerate block access lists on a node
+	// without live pruning (experimental).
+	HistoryConvert        bool
+	HistoryConvertMemory  uint64
+	HistoryConvertWorkers int
+
 	CheckpointDir           string
 	CheckpointTime          string
 	CheckpointBlockInterval uint64

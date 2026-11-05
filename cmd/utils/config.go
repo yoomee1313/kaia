@@ -805,6 +805,9 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
 	cfg.BALRecordDir = ctx.String(BALRecordDirFlag.Name)
+	cfg.HistoryConvert = ctx.Bool(HistoryConvertFlag.Name)
+	cfg.HistoryConvertMemory = ctx.Uint64(HistoryConvertMemoryFlag.Name) << 20
+	cfg.HistoryConvertWorkers = ctx.Int(HistoryConvertWorkersFlag.Name)
 	cfg.CheckpointDir = ctx.String(StateCheckpointDirFlag.Name)
 	cfg.CheckpointTime = ctx.String(StateCheckpointTimeFlag.Name)
 	cfg.CheckpointBlockInterval = ctx.Uint64(StateCheckpointBlockIntervalFlag.Name)

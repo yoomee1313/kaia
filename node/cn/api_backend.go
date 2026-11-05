@@ -202,8 +202,20 @@ func (b *CNAPIBackend) StateAndHeaderByNumber(ctx context.Context, blockNr rpc.B
 	if header == nil || err != nil {
 		return nil, nil, err
 	}
+	return b.stateAndHeader(header)
+}
+
+// stateAndHeader returns the state of a block; a missing state before the BAL
+// history of the node is reported as such.
+func (b *CNAPIBackend) stateAndHeader(header *types.Header) (*state.StateDB, *types.Header, error) {
 	stateDb, err := b.cn.BlockChain().StateAt(header.Root)
-	return stateDb, header, err
+	if err != nil {
+		if h, ok := b.cn.BlockChain().(interface{ HistoryError(uint64, error) error }); ok {
+			err = h.HistoryError(header.Number.Uint64(), err)
+		}
+		return nil, header, err
+	}
+	return stateDb, header, nil
 }
 
 func (b *CNAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*state.StateDB, *types.Header, error) {
@@ -215,8 +227,7 @@ func (b *CNAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockNr
 		if header == nil {
 			return nil, nil, fmt.Errorf("header for hash not found")
 		}
-		stateDb, err := b.cn.BlockChain().StateAt(header.Root)
-		return stateDb, header, err
+		return b.stateAndHeader(header)
 	}
 	return nil, nil, fmt.Errorf("invalid arguments; neither block nor hash specified")
 }

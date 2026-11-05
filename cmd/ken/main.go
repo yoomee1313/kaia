@@ -91,6 +91,8 @@ func init() {
 func main() {
 	// Set NodeTypeFlag to en
 	utils.NodeTypeFlag.Value = "en"
+	// Keep the history of a node without live pruning as block access lists
+	utils.HistoryConvertFlag.Value = true
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

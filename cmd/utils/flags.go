@@ -524,6 +524,26 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	HistoryConvertFlag = &cli.BoolFlag{
+		Name:     "history.convert",
+		Usage:    "On a node without live pruning, record block access lists under <datadir>/bal unless --bal.record-dir is set, and regenerate the lists of the blocks since its first stored state (experimental). The default depends on the node type (on for EN)",
+		Value:    false,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT"},
+		Category: "MISC",
+	}
+	HistoryConvertMemoryFlag = &cli.Uint64Flag{
+		Name:     "history.convert.memory",
+		Usage:    "MiB the regeneration of block access lists may use",
+		Value:    4096,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_MEMORY"},
+		Category: "MISC",
+	}
+	HistoryConvertWorkersFlag = &cli.IntFlag{
+		Name:     "history.convert.workers",
+		Usage:    "Goroutines regenerating block access lists (0 = from the memory and the cores)",
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_WORKERS"},
+		Category: "MISC",
+	}
 	BALRecordDirFlag = &cli.StringFlag{
 		Name:     "bal.record-dir",
 		Usage:    "Appends the block access list of every inserted block to a BAL freezer in the given directory, after checking it reproduces the state root (experimental)",

@@ -178,8 +178,10 @@ type BlockChain struct {
 	triegc *prque.Prque       // Priority queue mapping block numbers to tries to gc
 
 	checkpoints *stateCheckpointer // State checkpoint writer, nil unless enabled
-	chBlock     chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
-	chPrune     chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
+	balRegenMu  sync.Mutex
+	balRegen    *balRegen    // last BAL regeneration, nil if none
+	chBlock     chan gcBlock // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
+	chPrune     chan uint64  // chPrune is a channel for delivering the current block number for pruning loop.
 
 	hc            *HeaderChain
 	rmLogsFeed    event.Feed

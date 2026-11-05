@@ -255,3 +255,39 @@ func (api *AdminChainCNAPI) GetSpamThrottlerCandidateList(ctx context.Context) (
 func (s *AdminChainCNAPI) NodeConfig(ctx context.Context) interface{} {
 	return *s.cn.config
 }
+
+// StartBALRegen starts regenerating the block access lists of blocks from to to
+// (experimental). Zero takes the next block of the freezer and the head, or,
+// for the genesis and import sources, the blocks before the freezer; opts sets
+// the source (local, genesis, import with importDir), mode (write, verify),
+// memory and workers.
+func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *blockchain.BALRegenConfig) error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	cfg := blockchain.BALRegenConfig{}
+	if opts != nil {
+		cfg = *opts
+	}
+	cfg.From, cfg.To = from, to
+	return bc.StartBALRegen(cfg)
+}
+
+// StopBALRegen stops the running regeneration of block access lists.
+func (api *AdminChainCNAPI) StopBALRegen() error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	return bc.StopBALRegen()
+}
+
+// BalRegenStatus reports the last regeneration of block access lists.
+func (api *AdminChainCNAPI) BalRegenStatus() (blockchain.BALRegenStatus, error) {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return blockchain.BALRegenStatus{}, errors.New("not supported by this chain")
+	}
+	return bc.BALRegenStatus(), nil
+}
