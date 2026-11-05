@@ -25,6 +25,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -89,4 +90,29 @@ func TestProcessWithAccessList(t *testing.T) {
 	require.ErrorIs(t, err, ErrAccessListMismatch)
 	_, _, _, _, err = chain.Processor().(*StateProcessor).ProcessWithAccessList(blocks[1], blocks[0].Root(), extra, vm.Config{}, 4, false)
 	require.NoError(t, err)
+}
+
+// TestBenchmarkAccessList runs the benchmark on blocks whose lists the chain
+// recorded while inserting them.
+func TestBenchmarkAccessList(t *testing.T) {
+	env := newBALTestEnv(t, "prague", 2)
+	chain, blocks := env.generateWithCache(&CacheConfig{
+		CacheSize:           512,
+		BlockInterval:       DefaultBlockInterval,
+		TriesInMemory:       DefaultTriesInMemory,
+		TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
+		BALRecordDir:        t.TempDir(),
+	}, 3, func(i int, b *BlockGen) {
+		b.AddTx(env.legacyTx(b, 0, &balStoreAddr, common.Big0, balSlotData(byte(i), 1)))
+		b.AddTx(env.legacyTx(b, 1, &env.addrs[0], common.Big1, nil))
+	})
+	for _, block := range blocks {
+		res, err := chain.BenchmarkAccessList(block.NumberU64(), 4)
+		require.NoError(t, err)
+		require.Empty(t, res.Error)
+		require.True(t, res.RootMatch, "block %d", block.NumberU64())
+		require.True(t, res.WritesMatch)
+		require.True(t, res.ReadsMatch)
+		require.Equal(t, 2, res.Txs)
+	}
 }

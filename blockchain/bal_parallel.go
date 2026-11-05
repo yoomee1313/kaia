@@ -18,10 +18,12 @@ package blockchain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -218,4 +220,87 @@ func firstDifference(got, want *bal.BlockAccessList) string {
 		}
 	}
 	return "same accounts"
+}
+
+// AccessListBenchmark compares executing a block in order and in parallel with
+// its recorded block access list.
+type AccessListBenchmark struct {
+	Number      uint64 `json:"number"`
+	Txs         int    `json:"txs"`
+	Sequential  string `json:"sequential"`
+	Prefetch    string `json:"prefetch"`
+	Parallel    string `json:"parallel"`
+	RootMatch   bool   `json:"rootMatch"`
+	WritesMatch bool   `json:"writesMatch"`
+	ReadsMatch  bool   `json:"readsMatch"`
+	Error       string `json:"error,omitempty"`
+}
+
+// BenchmarkAccessList executes a block whose list was recorded by this node,
+// once in order to warm the caches, then in order and in parallel, and
+// compares the results. The state of the parent must be available.
+func (bc *BlockChain) BenchmarkAccessList(number uint64, workers int) (*AccessListBenchmark, error) {
+	if bc.bal == nil {
+		return nil, errors.New("block access lists are not recorded (--bal.record-dir)")
+	}
+	block := bc.GetBlockByNumber(number)
+	if block == nil || number == 0 {
+		return nil, fmt.Errorf("no block %d", number)
+	}
+	parent := bc.GetHeaderByHash(block.ParentHash())
+	if parent == nil {
+		return nil, fmt.Errorf("no parent of block %d", number)
+	}
+	list, err := bc.bal.freezer.Read(number)
+	if err != nil {
+		return nil, err
+	}
+	sequential := func() (time.Duration, *state.StateDB, error) {
+		sdb, err := bc.StateAt(parent.Root)
+		if err != nil {
+			return 0, nil, err
+		}
+		sdb.EnableBlockAccessRecorder()
+		start := time.Now()
+		if _, _, _, _, _, err := bc.processor.Process(context.Background(), block, sdb, bc.vmConfig); err != nil {
+			return 0, nil, err
+		}
+		sdb.IntermediateRoot(true)
+		return time.Since(start), sdb, nil
+	}
+	if _, _, err := sequential(); err != nil {
+		return nil, err
+	}
+	seqTime, seq, err := sequential()
+	if err != nil {
+		return nil, err
+	}
+	res := &AccessListBenchmark{Number: number, Txs: len(block.Transactions()), Sequential: seqTime.String()}
+
+	start := time.Now()
+	bc.PrefetchAccessList(parent.Root, list, workers)
+	res.Prefetch = time.Since(start).String()
+	sp, ok := bc.processor.(*StateProcessor)
+	if !ok {
+		return nil, errors.New("no state processor")
+	}
+	start = time.Now()
+	final, _, _, _, err := sp.ProcessWithAccessList(block, parent.Root, list, bc.vmConfig, workers, false)
+	res.Parallel = time.Since(start).String()
+	if err != nil {
+		res.Error = err.Error()
+		return res, nil
+	}
+	res.WritesMatch = true
+	res.RootMatch = final.IntermediateRoot(true) == block.Root() && seq.IntermediateRoot(true) == block.Root()
+	recorded, err := seq.BlockAccessList().Encode()
+	if err != nil {
+		return nil, err
+	}
+	stored, err := list.Encode()
+	if err != nil {
+		return nil, err
+	}
+	res.ReadsMatch = bytes.Equal(recorded, stored)
+	return res, nil
 }

@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
@@ -280,4 +281,31 @@ func (api *DebugCNAPI) getModifiedStorageNodes(contractAddr common.Address, star
 	logger.Info("Finished collecting the modified storage nodes", "contractAddr", contractAddr.String(),
 		"startBlock", startBlock.NumberU64(), "endBlock", endBlock.NumberU64(), "numModifiedNodes", numModifiedNodes, "elapsed", time.Since(start))
 	return numModifiedNodes, nil
+}
+
+// BenchmarkAccessList executes count blocks from block from, whose block access
+// lists this node recorded, in order and in parallel with the lists, and
+// reports the times and whether the results match (experimental). Blocks
+// whose parent state is gone are skipped.
+func (api *DebugCNAPI) BenchmarkAccessList(ctx context.Context, from, count uint64, workers int) ([]*blockchain.AccessListBenchmark, error) {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return nil, errors.New("not supported by this chain")
+	}
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	var out []*blockchain.AccessListBenchmark
+	for n := from; n < from+count; n++ {
+		if err := ctx.Err(); err != nil {
+			return out, err
+		}
+		res, err := bc.BenchmarkAccessList(n, workers)
+		if err != nil {
+			out = append(out, &blockchain.AccessListBenchmark{Number: n, Error: err.Error()})
+			continue
+		}
+		out = append(out, res)
+	}
+	return out, nil
 }
