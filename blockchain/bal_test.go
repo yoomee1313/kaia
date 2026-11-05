@@ -17,6 +17,7 @@
 package blockchain
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
@@ -52,11 +53,10 @@ type balTestSealer struct {
 	initAddr common.Address // gets 1 peb in InitializeState
 }
 
-func (s balTestSealer) InitializeState(header *types.Header, statedb *state.StateDB) error {
+func (s balTestSealer) InitializeState(header *types.Header, statedb *state.StateDB) {
 	// Not finalised on purpose: the recorder must keep these changes out of tx 1.
 	statedb.SetState(balSystemAddr, common.BigToHash(header.Number), header.ParentHash)
 	statedb.AddBalance(s.initAddr, common.Big1)
-	return nil
 }
 
 func (s balTestSealer) FinalizeState(header *types.Header, statedb *state.StateDB, txs []*types.Transaction, receipts []*types.Receipt) error {
@@ -234,7 +234,7 @@ func checkBAL(t *testing.T, chain *BlockChain, blocks []*types.Block) []*bal.Blo
 			if record {
 				statedb.EnableBlockAccessRecorder()
 			}
-			receipts, _, usedGas, _, _, err := chain.Processor().Process(block, statedb, vm.Config{})
+			receipts, _, usedGas, _, _, err := chain.Processor().Process(context.Background(), block, statedb, vm.Config{})
 			require.NoError(t, err)
 			return receipts, usedGas, statedb.IntermediateRoot(true), statedb
 		}

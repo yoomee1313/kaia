@@ -17,6 +17,7 @@
 package work
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
@@ -107,11 +108,11 @@ func TestProducerBlockAccessList(t *testing.T) {
 
 	statedb, err := producerChain.StateAt(genesis.Root())
 	require.NoError(t, err)
-	exec := NewDefaultExecutor(config, producerChain, addrs[0])
+	exec := NewDefaultExecutor(config, producerChain, addrs[0], vm.Config{})
 	// In the order of the worker: the recorder, InitializeState (EIP-2935
 	// writes the parent hash), then the executor of the consensus engine.
 	startBlockAccessRecorder(config, statedb, header)
-	require.NoError(t, producerChain.Processor().InitializeState(header, statedb))
+	producerChain.Processor().InitializeState(header, statedb)
 	require.NoError(t, exec.ResetWithState(statedb, header))
 	task := NewTask(config, signer, statedb, header)
 	task.ApplyTransactions(txs, producerChain, addrs[0], nil)
@@ -131,7 +132,7 @@ func TestProducerBlockAccessList(t *testing.T) {
 	validated, err := validatorChain.StateAt(genesis.Root())
 	require.NoError(t, err)
 	validated.EnableBlockAccessRecorder()
-	_, _, _, _, _, err = validatorChain.Processor().Process(block, validated, vm.Config{})
+	_, _, _, _, _, err = validatorChain.Processor().Process(context.Background(), block, validated, vm.Config{})
 	require.NoError(t, err)
 	validated.IntermediateRoot(true)
 	replayed, err := validated.BlockAccessList().Encode()
