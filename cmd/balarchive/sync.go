@@ -56,21 +56,24 @@ type syncItem struct {
 // in the header of their last block; a batch of 1 checks every block, and a
 // failed batch is replayed block by block to find the first wrong block.
 // Storage tries are hashed in parallel, and the trie nodes of the next batch
-// are read ahead while a batch is applied.
+// are read ahead while a batch is applied. A new database gets live pruning:
+// trie nodes are deleted once they have been obsolete for -retention blocks, as
+// a node does with --state.live-pruning-retention.
 //
-//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-batch N] [-workers N]
+//	balarchive sync -bal DIR -chaindata DIR -out DIR [-to N] [-batch N] [-workers N] [-retention N]
 func cmdSync(args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	balDir := fs.String("bal", "", "BAL freezer directory")
 	chaindata := fs.String("chaindata", "", "chaindata with the headers to check against")
 	out := fs.String("out", "", "directory of the new state database")
 	to := fs.Uint64("to", 0, "last block (0 = last in the freezer)")
-	commitEvery := fs.Uint64("commit", 10000, "blocks between commits to disk")
+	commitEvery := fs.Uint64("commit", 7200, "commits to disk at every multiple of this block number")
 	dirtyMiB := fs.Int("dirty", 2048, "MiB of trie nodes held in memory before flushing")
 	cacheMiB := fs.Int("cache", 4096, "MiB of the trie node cache")
-	batchSize := fs.Uint64("batch", 1000, "blocks applied before one root check")
+	batchSize := fs.Uint64("batch", 720, "blocks applied before one root check, at multiples of this block number")
 	workers := fs.Int("workers", 8, "goroutines hashing storage tries and reading ahead")
 	prefetch := fs.Bool("prefetch", true, "read the trie nodes of the next batch ahead")
+	retention := fs.Uint64("retention", blockchain.DefaultLivePruningRetention, "blocks an obsolete trie node is kept, 0 = no pruning (only for a new database)")
 	fs.Parse(args)
 
 	freezer, err := bal.OpenFreezer(*balDir, true)
@@ -99,9 +102,23 @@ func cmdSync(args []string) error {
 			return fmt.Errorf("genesis root %x, chaindata has %x: only Kairos is supported", genesis.Root(), want)
 		}
 		progress.Root = genesis.Root()
+		if *retention > 0 {
+			dst.WritePruningEnabled()
+		}
 	} else {
 		return err
 	}
+	// Batches line up with commits and with the retention, so that nodes are
+	// pruned exactly when the retention has passed at the end of a batch.
+	if *commitEvery%*batchSize != 0 || (*retention > 0 && *retention%*batchSize != 0) {
+		fmt.Printf("warning: batch %d does not divide commit %d and retention %d\n", *batchSize, *commitEvery, *retention)
+	}
+	pruning := dst.ReadPruningEnabled() && *retention > 0
+	pruneFrom := uint64(1)
+	if last, err := dst.ReadLastPrunedBlockNumber(); err == nil {
+		pruneFrom = last + 1
+	}
+	fmt.Printf("live pruning: %v, retention %d blocks\n", pruning, *retention)
 
 	end := freezer.Next() - 1
 	if *to != 0 && *to < end {
@@ -156,12 +173,46 @@ func cmdSync(args []string) error {
 	root := progress.Root
 	trieDB.ReferenceRoot(root)
 
+	// Every commit appends a line to the metrics file, which survives restarts.
+	metricsPath := filepath.Join(*out, "balsync.metrics.csv")
+	_, statErr := os.Stat(metricsPath)
+	metrics, err := os.OpenFile(metricsPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer metrics.Close()
+	if errors.Is(statErr, os.ErrNotExist) {
+		fmt.Fprintln(metrics, "time,block,run_elapsed_s,interval_blocks,interval_s,interval_blocks_per_s,commit_s,prune_s,dirty_bytes,pruned_nodes_total,batch,commit_every,retention")
+	}
+
 	start, last := time.Now(), time.Now()
 	from := progress.Block
+	lastBlock, lastTime := from, start
+	var pruned uint64
 	commit := func(number uint64, root common.Hash) error {
+		commitStart := time.Now()
+		dirty, _, _ := trieDB.Size()
 		if err := trieDB.Commit(root, false, number); err != nil {
 			return err
 		}
+		pruneStart := time.Now()
+		// Committed marks of nodes obsolete for the retention are deleted.
+		if pruning && number > *retention && number-*retention >= pruneFrom {
+			limit := number - *retention
+			marks := dst.ReadPruningMarks(pruneFrom, limit+1)
+			dst.PruneTrieNodes(marks)
+			dst.DeletePruningMarks(marks)
+			dst.WriteLastPrunedBlockNumber(limit)
+			pruneFrom, pruned = limit+1, pruned+uint64(len(marks))
+		}
+		now := time.Now()
+		interval := now.Sub(lastTime).Seconds()
+		fmt.Fprintf(metrics, "%s,%d,%.1f,%d,%.1f,%.0f,%.2f,%.2f,%d,%d,%d,%d,%d\n",
+			now.Format(time.RFC3339), number, now.Sub(start).Seconds(), number-lastBlock, interval,
+			float64(number-lastBlock)/interval, pruneStart.Sub(commitStart).Seconds(), now.Sub(pruneStart).Seconds(),
+			uint64(dirty), pruned, *batchSize, *commitEvery, *retention)
+		lastBlock, lastTime = number, now
+
 		enc, _ := json.Marshal(syncProgress{Block: number, Root: root})
 		tmp := progressFile + ".tmp"
 		if err := os.WriteFile(tmp, enc, 0o644); err != nil {
@@ -179,7 +230,7 @@ func cmdSync(args []string) error {
 			syncReadAhead(stateDB, root, batch, *workers)
 		}()
 	}
-	lastCommit := from
+	shown := from
 	cur, ok := <-batches
 	for ok {
 		next, more := <-batches
@@ -189,7 +240,11 @@ func cmdSync(args []string) error {
 		if err := cur[len(cur)-1].err; err != nil {
 			return fmt.Errorf("block %d: %w", cur[len(cur)-1].number, err)
 		}
-		nextRoot, err := syncApply(stateDB, root, cur, *workers)
+		var opts *statedb.TrieOpts
+		if pruning {
+			opts = &statedb.TrieOpts{PruningBlockNumber: cur[len(cur)-1].number}
+		}
+		nextRoot, err := syncApply(stateDB, root, cur, *workers, opts)
 		if err != nil {
 			return err
 		}
@@ -203,17 +258,17 @@ func cmdSync(args []string) error {
 				return err
 			}
 		}
-		if n-lastCommit >= *commitEvery || n == end {
+		if n%*commitEvery == 0 || n == end {
 			if err := commit(n, root); err != nil {
 				return err
 			}
-			lastCommit = n
 		}
 		if time.Since(last) > 30*time.Second {
-			last = time.Now()
-			rate := float64(n-from) / time.Since(start).Seconds()
+			// The rate since the last line gives the eta: blocks get heavier.
+			rate := float64(n-shown) / time.Since(last).Seconds()
+			last, shown = time.Now(), n
 			nodes, _, _ := trieDB.Size()
-			fmt.Printf("synced %d/%d, %.0f blocks/s, dirty %s, eta %s\n", n, end, rate, nodes,
+			fmt.Printf("%s synced %d/%d, %.0f blocks/s, dirty %s, pruned %d nodes, eta %s\n", last.Format("15:04:05"), n, end, rate, nodes, pruned,
 				(time.Duration(float64(end-n)/rate) * time.Second).Round(time.Minute))
 		}
 		cur, ok = next, more
@@ -226,9 +281,9 @@ func cmdSync(args []string) error {
 // syncApply applies a batch of lists to the state at root and returns the new
 // root, committed to the trie database. If the root of the batch does not match
 // the header of its last block, the batch is replayed block by block from root
-// to report the first wrong block.
-func syncApply(stateDB state.Database, root common.Hash, batch []syncItem, workers int) (common.Hash, error) {
-	sdb, err := state.New(root, stateDB, nil, nil)
+// to report the first wrong block. opts marks obsolete nodes for pruning.
+func syncApply(stateDB state.Database, root common.Hash, batch []syncItem, workers int, opts *statedb.TrieOpts) (common.Hash, error) {
+	sdb, err := state.New(root, stateDB, nil, opts)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("block %d: %w", batch[0].number, err)
 	}
