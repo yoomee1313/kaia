@@ -75,6 +75,7 @@ type benchBlockSpec struct {
 	tokens   int    // token transfers
 	hot      bool   // every token transfer goes to one receiver
 	payments int    // plain value transfers
+	known    bool   // payments go to existing accounts, the next sender, not new ones
 	loops    int    // calls of the keccak loop
 	iters    uint64 // iterations of each loop call
 }
@@ -147,6 +148,8 @@ func makeBenchBlock(b *testing.B, spec benchBlockSpec) *benchBlock {
 			}
 			to = benchTokenAddr
 			data = append(common.LeftPadBytes(receiver[:], 32), common.LeftPadBytes([]byte{1}, 32)...)
+		} else if spec.known {
+			to, amount = crypto.PubkeyToAddress(keys[(i+1)%len(keys)].PublicKey), big.NewInt(1)
 		} else {
 			to, amount = randomAddr(), big.NewInt(1)
 		}
