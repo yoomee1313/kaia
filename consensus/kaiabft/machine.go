@@ -407,7 +407,8 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		}
 	}
 
-	if _, err := checkProposalAccessList(m.b.chain.Config(), pp); err != nil {
+	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp)
+	if err != nil {
 		m.sendNextRoundChange("handlePreprepare: invalid block access list")
 		return err
 	}
@@ -419,6 +420,9 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		m.sendNextRoundChange("handlePreprepare: verification failure")
 		return err
 	}
+	if accessList != nil {
+		m.b.provideAccessList(pp.Proposal.Hash(), accessList)
+	}
 
 	// Start speculative execution before the header verification so the
 	// header validation below overlaps execution; the result is consumed only
@@ -427,7 +431,7 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 	// verified yet, as it commits only after execution.
 	if m.state == stateAcceptRequest && !m.isProposer() &&
 		(!m.isHashLocked() || (pp.Proposal.Hash() == m.lockedHash && m.needsExecution(m.lockedHash))) {
-		m.b.startSpeculativeExecution(pp.Proposal)
+		m.b.startSpeculativeExecution(pp.Proposal, accessList)
 	}
 
 	if duration, err := m.b.verifyHeader(pp.Proposal); err != nil {

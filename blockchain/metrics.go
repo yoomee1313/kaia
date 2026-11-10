@@ -41,6 +41,10 @@ var (
 	blockTxCountsCounter = metrics.NewRegisteredCounter("blockchain/block/tx/counter", nil)
 	// the counter to record a bad block, increases 1 if bad block occurs
 	badBlockCounter = metrics.NewRegisteredCounter("blockchain/bad/block/counter", nil)
+	// blocks inserted in parallel with their block access list, and blocks
+	// whose list failed so they were executed in order
+	parallelBlockCounter  = metrics.NewRegisteredCounter("blockchain/block/parallel/counter", nil)
+	parallelFailedCounter = metrics.NewRegisteredCounter("blockchain/block/parallel/failed/counter", nil)
 
 	txPoolPendingGauge = metrics.NewRegisteredGauge("tx/pool/pending/gauge", nil)
 	txPoolQueueGauge   = metrics.NewRegisteredGauge("tx/pool/queue/gauge", nil)

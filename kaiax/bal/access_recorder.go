@@ -62,6 +62,10 @@ type accessRecorder struct {
 
 	// journalOffset is where the next flush starts reading journal entries.
 	journalOffset int
+
+	// merged, if set, is the list of the whole block that Recorded returns,
+	// see SetMerged.
+	merged *BlockAccessList
 }
 
 type accessView struct {
@@ -160,7 +164,19 @@ func Recorded(s *state.StateDB) *BlockAccessList {
 	if !ok {
 		return nil
 	}
+	if r.merged != nil {
+		return r.merged
+	}
 	return r.builder.Build()
+}
+
+// SetMerged makes Recorded return list for s, the list of a whole block whose
+// phases were executed on states of their own and merged. s must have a
+// recorder.
+func SetMerged(s *state.StateDB, list *BlockAccessList) {
+	if r, ok := s.AccessRecorder().(*accessRecorder); ok {
+		r.merged = list
+	}
 }
 
 // Copy returns a deep copy of the recorder for a copy of the StateDB, which
@@ -177,6 +193,7 @@ func (r *accessRecorder) Copy() state.AccessRecorder {
 		seen:            maps.Clone(r.seen),
 		pendingAccounts: maps.Clone(r.pendingAccounts),
 		pendingSlots:    slots,
+		merged:          r.merged,
 	}
 }
 
