@@ -41,6 +41,7 @@ import (
 	"github.com/kaiachain/kaia/accounts/keystore"
 	"github.com/kaiachain/kaia/api/debug"
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/fdlimit"
 	"github.com/kaiachain/kaia/crypto"
@@ -819,6 +820,13 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	cfg.HistoryConvert = ctx.Bool(HistoryConvertFlag.Name)
 	cfg.HistoryConvertMemory = ctx.Uint64(HistoryConvertMemoryFlag.Name) << 20
 	cfg.HistoryConvertWorkers = ctx.Int(HistoryConvertWorkersFlag.Name)
+	cfg.HistoryMode = ctx.String(HistoryModeFlag.Name)
+	cfg.LightDays = ctx.Uint64(HistoryLightDaysFlag.Name)
+	cfg.SyncApplyBALs = ctx.Bool(SyncApplyBALsFlag.Name)
+	if !ctx.IsSet(SyncApplyBALsFlag.Name) && (cfg.HistoryMode == bal.HistoryModeHistory || cfg.HistoryMode == bal.HistoryModeLight) {
+		cfg.SyncApplyBALs = true
+	}
+	cfg.BALHashChain = ctx.String(BALHashChainFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

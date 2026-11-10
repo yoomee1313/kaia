@@ -274,6 +274,21 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			return nil, err
 		}
 	}
+	// A history or light node keeps its state with live pruning, set on its
+	// new database.
+	keepsHistory := config.HistoryMode == bal.HistoryModeHistory || config.HistoryMode == bal.HistoryModeLight
+	if err := bal.CheckHistoryMode(chainDB, config.HistoryMode); err != nil {
+		if keepsHistory && ctx.NodeType() == common.CONSENSUSNODE && chainDB.ReadHistoryMode() != config.HistoryMode {
+			return nil, fmt.Errorf("%w: a consensus node runs in the history or light mode, and a database keeps its mode; start the node on a new data directory, which it syncs from genesis, or on the chaindata of a %s node", err, config.HistoryMode)
+		}
+		return nil, err
+	}
+	if keepsHistory {
+		if config.NoPruning {
+			return nil, fmt.Errorf("a %s node keeps its state with live pruning, not as an archive", config.HistoryMode)
+		}
+		config.LivePruning = true
+	}
 	var (
 		sealer      = engine.NewSealer(chainConfig, ctx.NodeKey())
 		vmConfig    = config.getVMConfig()
@@ -295,6 +310,14 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	// A node without live pruning keeps its history as block access lists.
 	if config.HistoryConvert && !config.LivePruning && !chainDB.ReadPruningEnabled() {
 		cacheConfig.BALRecord = true
+	}
+	if keepsHistory {
+		cacheConfig.BALRecord = true
+		cacheConfig.HeaderSegmentRoots = true
+	}
+	if config.HistoryMode == bal.HistoryModeLight {
+		cacheConfig.BALNoIndex = true
+		cacheConfig.HistoryRetention = time.Duration(config.LightDays) * 24 * time.Hour
 	}
 	bc, err := blockchain.NewBlockChain(chainDB, cacheConfig, cn.chainConfig, sealer, vmConfig)
 	if err != nil {
@@ -900,8 +923,14 @@ func (s *CN) ChainDB() database.DBManager             { return s.chainDB }
 func (s *CN) IsListening() bool                       { return true } // Always listening
 func (s *CN) ProtocolVersion() int                    { return s.protocolManager.ProtocolVersion() }
 func (s *CN) NetVersion() uint64                      { return s.networkId }
-func (s *CN) Progress() kaia.SyncProgress             { return s.protocolManager.Downloader().Progress() }
 func (s *CN) GovModule() gov.GovModule                { return s.govModule }
+
+func (s *CN) Progress() kaia.SyncProgress {
+	if pm, ok := s.protocolManager.(*ProtocolManager); ok {
+		return pm.SyncProgress()
+	}
+	return s.protocolManager.Downloader().Progress()
+}
 
 func (s *CN) ReBroadcastTxs(transactions types.Transactions) {
 	s.protocolManager.ReBroadcastTxs(transactions)

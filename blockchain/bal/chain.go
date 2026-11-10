@@ -23,7 +23,6 @@ import (
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
-	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/storage/database"
@@ -34,8 +33,8 @@ func init() {
 }
 
 // chain keeps the block access lists of a BlockChain, see
-// blockchain.BALHooks: it records them, serves past states from them and
-// regenerates lists.
+// blockchain.BALHooks: it records them, serves past states from them, prunes
+// the blocks of a light node, regenerates lists and builds past state tries.
 type chain struct {
 	bc       *blockchain.BlockChain
 	db       database.DBManager
@@ -44,21 +43,34 @@ type chain struct {
 	quit     chan struct{}
 	wg       sync.WaitGroup
 
-	rec     *recorder     // nil unless recording
-	archive *chainArchive // serves past states from the lists, nil unless indexed
+	rec      *recorder     // nil unless recording
+	archive  *chainArchive // serves past states from the lists, nil unless indexed
+	hsegDone atomic.Uint64 // segments from the first one whose header segment roots are stored
+	inserted sync.Map      // block hash -> *Block, blocks inserted by InsertChain
 
 	genesis atomic.Pointer[blockchain.Genesis]
 	regenMu sync.Mutex
 	regen   *regen // last regeneration, nil if none
+	tries   tries
 }
 
 func newChain(bc *blockchain.BlockChain, ctx blockchain.BALContext) (blockchain.BALHooks, error) {
 	c := &chain{bc: bc, db: ctx.DB, cfg: ctx.CacheConfig, vmConfig: ctx.VMConfig, quit: make(chan struct{})}
 	if c.cfg.BALRecord {
 		c.rec = newRecorder(c.db, c.cfg.BALSkipReads)
-		if err := c.openArchive(); err != nil {
-			return nil, err
+		if !c.cfg.BALNoIndex {
+			if err := c.openArchive(); err != nil {
+				return nil, err
+			}
 		}
+	}
+	if c.cfg.HistoryRetention > 0 {
+		c.wg.Add(1)
+		go c.historyPruneLoop()
+	}
+	if c.cfg.HeaderSegmentRoots {
+		c.wg.Add(1)
+		go c.headerSegmentLoop()
 	}
 	return c, nil
 }
@@ -69,16 +81,14 @@ func of(bc *blockchain.BlockChain) *chain {
 	return c
 }
 
+func (c *chain) Inserted(hash common.Hash) bool {
+	_, ok := c.inserted.Load(hash)
+	return ok
+}
+
 func (c *chain) Executing(statedb *state.StateDB) {
 	if c.rec != nil {
 		access.EnableRecorder(statedb)
-	}
-}
-
-// Record stores the list recorded while a block was executed.
-func (c *chain) Record(block *types.Block, parentRoot common.Hash, statedb *state.StateDB) {
-	if c.rec != nil {
-		c.rec.record(c, block, parentRoot, statedb)
 	}
 }
 

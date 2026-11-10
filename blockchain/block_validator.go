@@ -563,6 +563,22 @@ func (v *BlockValidator) ValidateStateWithCache(block *types.Block, cached *Spec
 }
 
 func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, receiptHash, root common.Hash, usedGas uint64) error {
+	if err := checkReceipts(block, bloom, receiptHash, usedGas); err != nil {
+		return err
+	}
+	if header := block.Header(); root != header.Root {
+		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
+	}
+	return nil
+}
+
+// validateReceipts checks the gas used, bloom and receipts root of a block
+// against its receipts.
+func validateReceipts(block *types.Block, receipts types.Receipts, usedGas uint64) error {
+	return checkReceipts(block, types.CreateBloom(receipts), types.DeriveReceiptsRoot(receipts, block.Number()), usedGas)
+}
+
+func checkReceipts(block *types.Block, bloom types.Bloom, receiptHash common.Hash, usedGas uint64) error {
 	header := block.Header()
 	if block.GasUsed() != usedGas {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), usedGas)
@@ -572,9 +588,6 @@ func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, re
 	}
 	if receiptHash != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptHash)
-	}
-	if root != header.Root {
-		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
 	}
 	return nil
 }

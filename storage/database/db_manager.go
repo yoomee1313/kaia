@@ -143,6 +143,15 @@ type DBManager interface {
 	ReadBALRange() (first, next uint64)
 	WriteBALRange(first, next uint64) error
 
+	// History mode operations (experimental)
+	ReadHistoryMode() string
+	WriteHistoryMode(mode string) error
+	ReadHistoryFirst() uint64
+	WriteHistoryFirst(number uint64) error
+	ReadHeaderSegmentRoot(segment uint64) (common.Hash, bool)
+	WriteHeaderSegmentRoot(segment uint64, root common.Hash) error
+	DeleteBloomBits(bloomBitsKey []byte)
+
 	ReadBlock(hash common.Hash, number uint64) *types.Block
 	ReadBlockByHash(hash common.Hash) *types.Block
 	ReadBlockByNumber(number uint64) *types.Block
@@ -2413,6 +2422,59 @@ func (dbm *databaseManager) ReadTxHashFromSenderTxHash(senderTxHash common.Hash)
 	txHash := common.BytesToHash(data)
 	dbm.cm.writeSenderTxHashToTxHashCache(senderTxHash, txHash)
 	return txHash
+}
+
+// ReadHistoryMode returns the history mode the database was made for, or ""
+// for a database made before the modes.
+func (dbm *databaseManager) ReadHistoryMode() string {
+	enc, _ := dbm.getDatabase(MiscDB).Get(historyModeKey)
+	return string(enc)
+}
+
+// WriteHistoryMode stores the history mode of the database.
+func (dbm *databaseManager) WriteHistoryMode(mode string) error {
+	return dbm.getDatabase(MiscDB).Put(historyModeKey, []byte(mode))
+}
+
+// ReadHistoryFirst returns the first block whose header, body and receipts
+// are held; the data of earlier blocks but the genesis block was deleted.
+func (dbm *databaseManager) ReadHistoryFirst() uint64 {
+	enc, err := dbm.getDatabase(MiscDB).Get(historyFirstKey)
+	if err != nil || len(enc) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(enc)
+}
+
+// WriteHistoryFirst stores the first block whose data is held.
+func (dbm *databaseManager) WriteHistoryFirst(number uint64) error {
+	return dbm.getDatabase(MiscDB).Put(historyFirstKey, binary.BigEndian.AppendUint64(nil, number))
+}
+
+func headerSegmentRootKey(segment uint64) []byte {
+	return binary.BigEndian.AppendUint64(append([]byte{}, headerSegmentRootPrefix...), segment)
+}
+
+// ReadHeaderSegmentRoot returns the root of the block hashes of a segment
+// whose blocks were deleted.
+func (dbm *databaseManager) ReadHeaderSegmentRoot(segment uint64) (common.Hash, bool) {
+	enc, err := dbm.getDatabase(MiscDB).Get(headerSegmentRootKey(segment))
+	if err != nil || len(enc) != common.HashLength {
+		return common.Hash{}, false
+	}
+	return common.BytesToHash(enc), true
+}
+
+// WriteHeaderSegmentRoot stores the root of the block hashes of a segment.
+func (dbm *databaseManager) WriteHeaderSegmentRoot(segment uint64, root common.Hash) error {
+	return dbm.getDatabase(MiscDB).Put(headerSegmentRootKey(segment), root[:])
+}
+
+// DeleteBloomBits deletes a bloom bits vector.
+func (dbm *databaseManager) DeleteBloomBits(bloomBitsKey []byte) {
+	if err := dbm.getDatabase(MiscDB).Delete(bloomBitsKey); err != nil {
+		logger.Error("Failed to delete bloom bits", "err", err)
+	}
 }
 
 // BloomBits operations.

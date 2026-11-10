@@ -220,3 +220,20 @@ func (r *recorder) close(number uint64) {
 		r.logStats(number)
 	}
 }
+
+// trimFront drops the blocks before number from the range, whose lists were
+// deleted.
+func (r *recorder) trimFront(number uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if number <= r.first || r.first == r.next {
+		return
+	}
+	r.first = min(number, r.next)
+	if r.first == r.next {
+		r.first, r.next = 0, 0
+	}
+	if err := r.db.WriteBALRange(r.first, r.next); err != nil {
+		logger.Error("Failed to write the block access list range", "err", err)
+	}
+}

@@ -103,7 +103,7 @@ func (c *loopConn) Send(code uint64, data interface{}) error {
 	if c.tamper != nil {
 		data = c.tamper(code, data)
 	}
-	if code == BALsRequestMsg || code == BALProofRequestMsg || code == SlimReceiptsRequestMsg {
+	if code == BALsRequestMsg || code == BALProofRequestMsg || code == SlimReceiptsRequestMsg || code == BlocksRequestMsg {
 		c.mu.Lock()
 		c.requests++
 		c.mu.Unlock()
@@ -404,6 +404,11 @@ func TestHistoryRangeAnnounce(t *testing.T) {
 	connect(client, server, "server", nil)
 	waitRanges(t, client, 1)
 	require.Equal(t, HistoryRange{BAL: 1, BALNext: 11}, client.PeerRanges()["server"])
+
+	require.NoError(t, src.db.WriteHistoryFirst(4))
+	server.announce(server.LocalRange())
+	require.Eventually(t, func() bool { return client.PeerRanges()["server"].Receipt == 4 }, time.Second, time.Millisecond)
+	require.Equal(t, HistoryRange{Header: 4, Body: 4, Receipt: 4, BAL: 1, BALNext: 11}, client.PeerRanges()["server"])
 
 	require.NoError(t, src.db.WriteBALRange(1, 12))
 	server.announce(server.LocalRange())

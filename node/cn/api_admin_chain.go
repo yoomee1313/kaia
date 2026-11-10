@@ -263,7 +263,7 @@ func (s *AdminChainCNAPI) NodeConfig(ctx context.Context) interface{} {
 // lists; opts sets the source (local, genesis, import with importDir, peers),
 // mode (write, verify, reads), memory, workers and skipReads. The import and
 // peers sources stop at the last block of the signed BAL hash chain, the
-// hashChain file or package directory.
+// hashChain file or package directory or else the one of --bal.hash-chain.
 func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *bal.RegenConfig) error {
 	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
 	if !ok {
@@ -274,8 +274,13 @@ func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *bal.RegenConfig
 		cfg = *opts
 	}
 	cfg.From, cfg.To = from, to
-	if pm, ok := api.cn.protocolManager.(*ProtocolManager); ok && pm.balSync != nil && cfg.Source == bal.RegenPeers {
-		cfg.Fetcher = pm.balSync
+	if pm, ok := api.cn.protocolManager.(*ProtocolManager); ok && pm.balSync != nil {
+		if cfg.Source == bal.RegenPeers {
+			cfg.Fetcher = pm.balSync
+		}
+		if (cfg.Source == bal.RegenImport || cfg.Source == bal.RegenPeers) && cfg.HashChainFile == "" {
+			cfg.HashChain = pm.balSync.HashChain()
+		}
 	}
 	return bal.StartRegen(bc, cfg)
 }
@@ -306,4 +311,34 @@ func (api *AdminChainCNAPI) BalRegenStatus() (bal.RegenStatus, error) {
 		return bal.RegenStatus{}, errors.New("not supported by this chain")
 	}
 	return bal.GetRegenStatus(bc), nil
+}
+
+// BuildStateTrie builds the state trie of a past block on a history node in
+// the background, from a later stored trie and the BAL history, and keeps it
+// from live pruning, so that proofs, dumps and storage iteration work at the
+// block.
+func (api *AdminChainCNAPI) BuildStateTrie(number uint64) error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	return bal.StartTrieBuild(bc, number)
+}
+
+// StopStateTrieBuild stops the running state trie build.
+func (api *AdminChainCNAPI) StopStateTrieBuild() error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	return bal.StopTrieBuild(bc)
+}
+
+// StateTrieBuildStatus reports the last state trie build.
+func (api *AdminChainCNAPI) StateTrieBuildStatus() (bal.TrieBuildStatus, error) {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return bal.TrieBuildStatus{}, errors.New("not supported by this chain")
+	}
+	return bal.GetTrieBuildStatus(bc), nil
 }

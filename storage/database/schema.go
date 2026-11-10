@@ -92,6 +92,10 @@ var (
 	blockAccessReadsPrefix  = []byte("J")               // blockAccessReadsPrefix + num (uint64 big endian) + hash -> reads of the block access list
 	blockAccessListRangeKey = []byte("AccessListRange") // first and next block of the stored block access lists
 
+	historyModeKey          = []byte("HistoryMode")  // full, history or light
+	historyFirstKey         = []byte("HistoryFirst") // first block whose header, body and receipts are held
+	headerSegmentRootPrefix = []byte("hseg")         // headerSegmentRootPrefix + segment (uint64 big endian) -> root of its block hashes
+
 	txLookupPrefix        = []byte("l") // txLookupPrefix + hash -> transaction/receipt lookup metadata
 	SnapshotAccountPrefix = []byte("a") // SnapshotAccountPrefix + account hash -> account trie value
 	SnapshotStoragePrefix = []byte("o") // SnapshotStoragePrefix + account hash + storage hash -> storage trie value

@@ -18,13 +18,61 @@ package cn
 
 import (
 	"math/big"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/golang/mock/gomock"
+	"github.com/kaiachain/kaia"
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/networks/p2p"
+	"github.com/kaiachain/kaia/node/cn/mocks"
+	"github.com/kaiachain/kaia/storage/database"
+	workmocks "github.com/kaiachain/kaia/work/mocks"
 	"github.com/stretchr/testify/require"
 )
+
+// TestMarkSyncedWaitsForHeaderSegments keeps a history or light node syncing
+// until every finished segment has the root of its block hashes.
+func TestMarkSyncedWaitsForHeaderSegments(t *testing.T) {
+	defer func(d time.Duration) { historyFilledPoll = d }(historyFilledPoll)
+	historyFilledPoll = time.Millisecond
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	downloader := mocks.NewMockProtocolManagerDownloader(ctrl)
+	downloader.EXPECT().Progress().Return(kaia.SyncProgress{CurrentBlock: 10, HighestBlock: 10}).AnyTimes()
+	chain := workmocks.NewMockBlockChain(ctrl)
+	var filled atomic.Bool
+
+	pm := &ProtocolManager{blockchain: chain, downloader: downloader, quitSync: make(chan struct{}), segmentsFilled: filled.Load}
+	pm.markSynced()
+	pm.markSynced()
+	time.Sleep(10 * time.Millisecond)
+	require.Zero(t, pm.acceptTxs.Load())
+	require.Equal(t, uint64(11), pm.SyncProgress().HighestBlock)
+
+	filled.Store(true)
+	require.Eventually(t, func() bool { return pm.acceptTxs.Load() == 1 }, time.Second, time.Millisecond)
+	require.Equal(t, uint64(10), pm.SyncProgress().HighestBlock)
+
+	// A full node is synced at once.
+	filled.Store(false)
+	full := &ProtocolManager{blockchain: chain, downloader: downloader, quitSync: make(chan struct{})}
+	full.markSynced()
+	require.Equal(t, uint32(1), full.acceptTxs.Load())
+	require.Equal(t, uint64(10), full.SyncProgress().HighestBlock)
+}
+
+// versionConn is a kaia/69 peer to a bal.Sync that sends nothing.
+type versionConn struct {
+	id      string
+	version int
+}
+
+func (c *versionConn) GetID() string                  { return c.id }
+func (c *versionConn) GetVersion() int                { return c.version }
+func (c *versionConn) Send(uint64, interface{}) error { return nil }
 
 // TestHistoryRangeHandshake exchanges the history ranges in the kaia/69
 // handshake only.
@@ -63,4 +111,36 @@ func TestHistoryRangeHandshake(t *testing.T) {
 		p2p.Send(rw2, StatusMsg, &statusData{ProtocolVersion: kaia69, NetworkId: 1, TD: td, CurrentBlock: common.Hash{3}, GenesisBlock: genesis, ChainID: chainID})
 	}()
 	require.ErrorContains(t, p1.Handshake(1, chainID, td, common.Hash{2}, genesis, &bal.HistoryRange{BAL: bal.NoHistory}), "no history range")
+}
+
+// TestHoldsBlocksFrom picks a peer for the downloader by the headers, bodies
+// and receipts its announced range holds.
+func TestHoldsBlocksFrom(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+	peer := func(id string, td int64, rng *bal.HistoryRange) *MockPeer {
+		p := NewMockPeer(ctrl)
+		p.EXPECT().GetID().Return(id).AnyTimes()
+		p.EXPECT().HistoryRange().Return(rng).AnyTimes()
+		p.EXPECT().Head().Return(common.Hash{}, big.NewInt(td)).AnyTimes()
+		return p
+	}
+	light := peer("light", 30, &bal.HistoryRange{Header: 100, Body: 100, Receipt: 100, BAL: 100, BALNext: 200})
+	full := peer("full", 20, &bal.HistoryRange{BAL: bal.NoHistory})
+	old := peer("old", 10, nil)
+	peers := NewMockPeerSet(ctrl)
+	peers.EXPECT().Peers().Return(map[string]Peer{"light": light, "full": full, "old": old}).AnyTimes()
+	pm := &ProtocolManager{peers: peers, balSync: bal.NewSync(database.NewMemoryDBManager(), nil, nil)}
+
+	require.True(t, pm.holdsBlocksFrom(light, 100))
+	require.False(t, pm.holdsBlocksFrom(light, 99))
+	require.True(t, pm.holdsBlocksFrom(old, 0), "a peer before kaia/69 holds all")
+	require.Equal(t, Peer(light), pm.bestPeerHoldingBlocks(150))
+	require.Equal(t, Peer(full), pm.bestPeerHoldingBlocks(50))
+
+	// A range announced later counts over the handshake one.
+	lightConn := &versionConn{id: "light", version: kaia69}
+	pm.balSync.AddPeer(lightConn, &bal.HistoryRange{BAL: bal.NoHistory}, &bal.HistoryRange{Header: 40, Body: 40, Receipt: 40, BAL: bal.NoHistory})
+	require.True(t, pm.holdsBlocksFrom(light, 50))
+	require.Equal(t, Peer(light), pm.bestPeerHoldingBlocks(50))
 }

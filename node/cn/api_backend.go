@@ -121,6 +121,9 @@ func (b *CNAPIBackend) HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumb
 	}
 	header := b.cn.blockchain.GetHeaderByNumber(uint64(blockNr))
 	if header == nil {
+		if err := b.prunedError(uint64(blockNr)); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("the header does not exist (block number: %d)", blockNr)
 	}
 	return header, nil
@@ -163,6 +166,9 @@ func (b *CNAPIBackend) BlockByNumber(ctx context.Context, blockNr rpc.BlockNumbe
 	}
 	block := b.cn.blockchain.GetBlockByNumber(uint64(blockNr))
 	if block == nil {
+		if err := b.prunedError(uint64(blockNr)); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("the block does not exist (block number: %d)", blockNr)
 	}
 	return block, nil
@@ -204,6 +210,14 @@ func (b *CNAPIBackend) StateAndHeaderByNumber(ctx context.Context, blockNr rpc.B
 		return nil, nil, err
 	}
 	return b.stateAndHeader(header)
+}
+
+// prunedError reports a block whose data a light node deleted.
+func (b *CNAPIBackend) prunedError(number uint64) error {
+	if bc, ok := b.cn.BlockChain().(*blockchain.BlockChain); ok {
+		return bal.PrunedError(bc, number)
+	}
+	return nil
 }
 
 // stateAndHeader returns the state of a block; a missing state before the BAL

@@ -64,7 +64,7 @@ type Protocol struct {
 var ConsensusProtocol = Protocol{
 	Name:     "istanbul",
 	Versions: []uint{kaia69, kaia68, kaia67, kaia66, kaia65, kaia64},
-	Lengths:  []uint64{36, 28, 26, 24, 23, 21},
+	Lengths:  []uint64{38, 28, 26, 24, 23, 21},
 }
 
 const (
@@ -116,9 +116,9 @@ const (
 
 	// Protocol messages belonging to kaia/69, see bal.Sync
 	HistoryRangeMsg = bal.HistoryRangeMsg
-	NewBlockBALMsg  = bal.NewBlockBALMsg
+	BlocksMsg       = bal.BlocksMsg
 
-	MsgCodeEnd = 0x21
+	MsgCodeEnd = 0x23
 )
 
 type errCode int

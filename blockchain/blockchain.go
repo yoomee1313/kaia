@@ -141,6 +141,9 @@ type CacheConfig struct {
 	SnapshotAsyncGen     bool                         // Enables snapshot data generation asynchronously
 	BALRecord            bool                         // Records the block access lists of inserted blocks in the database (experimental)
 	BALSkipReads         bool                         // Records the writes of the block access lists only, without their reads
+	BALNoIndex           bool                         // Does not index the recorded lists, so past states are not read from them
+	HistoryRetention     time.Duration                // A light node deletes the blocks older than this; 0 keeps them
+	HeaderSegmentRoots   bool                         // Stores the root of the block hashes of every finished segment
 }
 
 // gcBlock is used for priority queue for GC.
@@ -226,6 +229,8 @@ type BlockChain struct {
 	// Warm up
 	lastCommittedBlock uint64
 	quitWarmUp         chan struct{}
+
+	balBatch atomic.Pointer[balBatch]
 
 	// kaiax modules
 	headerModules     []kaiax.HeaderModule
@@ -518,7 +523,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bool) (uint64, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	return bc.setHeadBeyondRootLocked(head, root, repair)
+}
 
+// setHeadBeyondRootLocked is setHeadBeyondRoot with the chain mutex held.
+func (bc *BlockChain) setHeadBeyondRootLocked(head uint64, root common.Hash, repair bool) (uint64, error) {
 	// Track the block number of the requested root hash
 	var rootNumber uint64 // (no root == always 0)
 
@@ -987,6 +996,9 @@ func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
+	if b := bc.balBatch.Load(); b != nil && b.has(hash) {
+		return true
+	}
 	_, err := bc.stateCache.OpenTrie(hash, nil)
 	return err == nil
 }
@@ -1432,6 +1444,9 @@ func (bc *BlockChain) writeReceipts(hash common.Hash, number uint64, receipts ty
 // If an archiving node is running, it always flushes state trie to DB.
 // If not, it flushes state trie to DB periodically. (period = bc.cacheConfig.BlockInterval)
 func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) error {
+	if b := bc.balBatch.Load(); b != nil && b.defers(state) {
+		return nil
+	}
 	state.LockGCCachedNode()
 	defer state.UnlockGCCachedNode()
 
@@ -1573,7 +1588,7 @@ func (bc *BlockChain) pruneTrieNodeLoop() {
 
 				startTime := time.Now()
 				marks := bc.db.ReadPruningMarks(startNum, limit+1)
-				bc.db.PruneTrieNodes(marks)
+				bc.pruneTrieNodes(marks, limit)
 				bc.db.DeletePruningMarks(marks)
 				bc.db.WriteLastPrunedBlockNumber(limit)
 
@@ -1952,6 +1967,19 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
+	batch := bc.newBALBatch(chain)
+	if batch == nil {
+		return bc.insertBlocks(chain, nil)
+	}
+	bc.balBatch.Store(batch)
+	defer bc.balBatch.Store(nil)
+	n, events, logs, err := bc.insertBlocks(chain, batch)
+	return batch.finish(chain, n, events, logs, err)
+}
+
+// insertBlocks inserts the blocks of insertChain with the chain mutex held.
+// The blocks of a non-nil batch apply their block access lists to its state.
+func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *balBatch) (int, []interface{}, []*types.Log, error) {
 	// A queued approach to delivering events. This is generally
 	// faster than direct delivery and requires much less mutex
 	// acquiring.
@@ -2000,7 +2028,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		// transactions and probabilistically some of the account/storage trie nodes.
 		var followupInterrupt uint32
 
-		if bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
+		if batch == nil && bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
 			var snaps *snapshot.Tree
 			if bc.cacheConfig.TrieNodeCacheConfig.UseSnapshotForPrefetch {
 				snaps = bc.snaps
@@ -2077,6 +2105,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			stats.queued++
 			continue
 
+		case err == consensus.ErrPrunedAncestor && batch != nil:
+			return i, events, coalescedLogs, err
+
 		case err == consensus.ErrPrunedAncestor:
 			// Block competing with the canonical chain, store in the db, but don't process
 			// until the competitor TD goes above the canonical TD
@@ -2117,7 +2148,8 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		// --- Speculative cache fast path ---
 		// If the consensus engine speculatively executed this block during
 		// pre-prepare handling, use the cached result to skip Process().
-		// ValidateState always runs regardless of path.
+		// ValidateState always runs regardless of path. Batched syncs never have
+		// a speculative result.
 		var (
 			stateDB          *state.StateDB
 			receipts         types.Receipts
@@ -2129,30 +2161,36 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			validateStart    time.Time
 		)
 
-		if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); cached != nil {
-			validateStart = time.Now()
-			if err = bc.validator.ValidateStateWithCache(block, cached); err == nil {
-				stateDB = cached.State
-				receipts = cached.Receipts
-				logs = cached.Logs
-				usedGas = cached.UsedGas
-				internalTxTraces = cached.InternalTxTraces
-				procStats = cached.ProcessStats
-				cacheHit = true
-			} else {
-				logger.Warn("Speculative cache hit but validation failed, falling back to sync execution",
-					"number", block.NumberU64(), "hash", block.Hash(), "err", err)
+		if batch == nil {
+			if cached := bc.specCache.TryGet(block.Hash(), params.BlockGenerationTimeLimit*2); cached != nil {
+				validateStart = time.Now()
+				if err = bc.validator.ValidateStateWithCache(block, cached); err == nil {
+					stateDB = cached.State
+					receipts = cached.Receipts
+					logs = cached.Logs
+					usedGas = cached.UsedGas
+					internalTxTraces = cached.InternalTxTraces
+					procStats = cached.ProcessStats
+					cacheHit = true
+				} else {
+					logger.Warn("Speculative cache hit but validation failed, falling back to sync execution",
+						"number", block.NumberU64(), "hash", block.Hash(), "err", err)
+				}
 			}
 		}
 
 		if !cacheHit {
-			stateDB, err = bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+			if batch != nil {
+				stateDB, err = batch.stateFor(parent)
+			} else {
+				stateDB, err = bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+			}
 			if err != nil {
 				return i, events, coalescedLogs, err
 			}
 
 			// Process block using the parent state as reference point.
-			receipts, logs, usedGas, internalTxTraces, procStats, err = bc.processBlock(block, stateDB)
+			receipts, logs, usedGas, internalTxTraces, procStats, err = bc.processBlock(block, stateDB, batch)
 			if err != nil {
 				bc.reportExecutionFailure(block, receipts, stateDB, err)
 				atomic.StoreUint32(&followupInterrupt, 1)
@@ -2160,10 +2198,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			}
 
 			// Validate the state using the default validator
-			err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
-			if err != nil {
-				bc.reportExecutionFailure(block, receipts, stateDB, err)
-				atomic.StoreUint32(&followupInterrupt, 1)
+			if batch == nil {
+				err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
+				if err != nil {
+					bc.reportExecutionFailure(block, receipts, stateDB, err)
+					atomic.StoreUint32(&followupInterrupt, 1)
+					return i, events, coalescedLogs, err
+				}
+			} else if err = batch.validate(block, parent, receipts, usedGas, i == len(chain)-1); err != nil {
 				return i, events, coalescedLogs, err
 			}
 		}
@@ -2182,6 +2224,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 		atomic.StoreUint32(&followupInterrupt, 1)
+		if batch != nil {
+			batch.written(block)
+		}
 
 		// Update to-address based spam throttler when spamThrottler is enabled and a single block is fetched.
 		spamThrottler := GetSpamThrottler()

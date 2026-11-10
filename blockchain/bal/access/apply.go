@@ -57,6 +57,21 @@ func Apply(s *state.StateDB, list *BlockAccessList) error {
 	return nil
 }
 
+// ApplyUnchecked writes the final values of a block access list like Apply
+// and finalises the block without hashing, so that several blocks can be
+// applied in a row and checked once at the end: call HashStorages, then
+// IntermediateRoot. The storage roots of the list are not checked.
+func ApplyUnchecked(s *state.StateDB, list *BlockAccessList) error {
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		if err := applyAccountAccess(s, a); err != nil {
+			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.Finalise(true, false)
+	return nil
+}
+
 func applyAccountAccess(s *state.StateDB, a *AccountAccess) error {
 	if !a.Changed() {
 		return nil

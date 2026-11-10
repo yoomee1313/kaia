@@ -24,6 +24,7 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru"
@@ -59,6 +60,8 @@ const (
 	SlimReceiptsRequestMsg = 0x1e
 	SlimReceiptsMsg        = 0x1f
 	NewBlockBALMsg         = 0x20
+	BlocksRequestMsg       = 0x21
+	BlocksMsg              = 0x22
 )
 
 // softResponseLimit is the target maximum size of a response.
@@ -90,6 +93,12 @@ type HistoryRange struct {
 
 func (r *HistoryRange) holdsBALs(from, to uint64) bool {
 	return r.BAL != NoHistory && r.BAL <= from && to < r.BALNext
+}
+
+// HoldsBlocksFrom reports whether the headers, bodies and receipts from block
+// from on are held, which a light node deletes.
+func (r *HistoryRange) HoldsBlocksFrom(from uint64) bool {
+	return r.Header <= from && r.Body <= from && r.Receipt <= from
 }
 
 // announces reports whether a node holding r announces it to a peer it last
@@ -144,7 +153,7 @@ type slimReceiptsResponse struct {
 }
 
 // newBlockBAL follows a block a node inserted: its slim receipts and the
-// stored writes of its BAL.
+// stored writes of its BAL, which a node applying BALs inserts it with.
 type newBlockBAL struct {
 	Hash     common.Hash
 	Number   uint64
@@ -154,7 +163,7 @@ type newBlockBAL struct {
 
 // IsSyncMsg reports whether a message code is one of the messages of Sync.
 func IsSyncMsg(code uint64) bool {
-	return code >= HistoryRangeMsg && code <= NewBlockBALMsg
+	return code >= HistoryRangeMsg && code <= BlocksMsg
 }
 
 func slimReceipts(receipts types.Receipts) []*slimReceipt {
@@ -225,6 +234,12 @@ type Sync struct {
 
 	received  *lru.Cache // block hash -> BAL propagated with it
 	segHashes *lru.Cache // [2]uint64{segment, last block} -> hashes of the stored BALs
+
+	applyBALs    bool       // sync by applying BALs, see SyncRanges
+	tip          *tipState  // blocks at the head to apply, nil unless headers commit BALs
+	hashChain    *HashChain // signed chain that checks fetched BALs, nil if none
+	quit         <-chan struct{}
+	rangeRunning atomic.Bool
 }
 
 // SyncChain is the chain whose blocks a Sync serves.
@@ -241,15 +256,25 @@ func NewSync(db database.DBManager, chain SyncChain, drop func(id string)) *Sync
 	return &Sync{db: db, chain: chain, drop: drop, peers: make(map[string]*balPeer), received: received, segHashes: segHashes}
 }
 
-// LocalRange returns the data this node holds: every header, body and
-// receipt, and the stored BALs.
+// LocalRange returns the data this node holds: a light node deletes the
+// headers, bodies and receipts of old blocks.
 func (s *Sync) LocalRange() HistoryRange {
-	r := HistoryRange{BAL: NoHistory}
+	first := s.db.ReadHistoryFirst()
+	r := HistoryRange{Header: first, Body: first, Receipt: first, BAL: NoHistory}
 	if first, next := s.db.ReadBALRange(); first < next {
 		r.BAL, r.BALNext = first, next
 	}
 	return r
 }
+
+// ApplyBALs reports whether the node syncs by applying BALs.
+func (s *Sync) ApplyBALs() bool { return s.applyBALs }
+
+// HashChain returns the signed chain that checks fetched BALs, nil if none.
+func (s *Sync) HashChain() *HashChain { return s.hashChain }
+
+// RangeRunning reports whether Synchronise is applying blocks.
+func (s *Sync) RangeRunning() bool { return s.rangeRunning.Load() }
 
 // AddPeer adds a kaia/69 peer, which was sent the history range sent and
 // sent rng in the handshake. A nil sent range is announced now.
@@ -369,6 +394,18 @@ func (s *Sync) HandleMsg(conn Conn, msg p2p.Msg) error {
 		s.deliver(conn, res.ID, &res)
 	case SlimReceiptsMsg:
 		var res slimReceiptsResponse
+		if err := msg.Decode(&res); err != nil {
+			return msgError(errDecode, "%v: %v", msg, err)
+		}
+		s.deliver(conn, res.ID, &res)
+	case BlocksRequestMsg:
+		var req blocksRequest
+		if err := msg.Decode(&req); err != nil {
+			return msgError(errDecode, "%v: %v", msg, err)
+		}
+		return conn.Send(BlocksMsg, s.serveBlocks(&req))
+	case BlocksMsg:
+		var res blocksResponse
 		if err := msg.Decode(&res); err != nil {
 			return msgError(errDecode, "%v: %v", msg, err)
 		}
@@ -780,6 +817,7 @@ func (s *Sync) receive(conn Conn, m *newBlockBAL) {
 		return
 	}
 	s.received.Add(m.Hash, &propagated{list: m.List, receipts: m.Receipts})
+	s.signalTip()
 }
 
 // PropagatedBAL returns the BAL and receipts propagated with a block this node
@@ -790,6 +828,35 @@ func (s *Sync) PropagatedBAL(hash common.Hash) ([]byte, []*slimReceipt, bool) {
 		return p.list, p.receipts, true
 	}
 	return nil, nil, false
+}
+
+// PeerRange returns the announced history range of a kaia/69 peer.
+func (s *Sync) PeerRange(id string) (HistoryRange, bool) {
+	if s == nil {
+		return HistoryRange{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p := s.peers[id]; p != nil && p.rng != nil {
+		return *p.rng, true
+	}
+	return HistoryRange{}, false
+}
+
+// PeersHighestBAL returns the last block whose BAL a peer holds, 0 if none.
+func (s *Sync) PeersHighestBAL() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n uint64
+	for _, p := range s.peers {
+		if p.rng != nil && p.rng.BAL != NoHistory && p.rng.BALNext > 0 {
+			n = max(n, p.rng.BALNext-1)
+		}
+	}
+	return n
 }
 
 // PeerRanges returns the announced history ranges of the kaia/69 peers.

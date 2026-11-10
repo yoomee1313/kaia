@@ -147,6 +147,18 @@ type Config struct {
 	HistoryConvertMemory  uint64
 	HistoryConvertWorkers int
 
+	// History modes (experimental): full, history or light. History and light
+	// nodes keep their state with live pruning and start from genesis by
+	// applying block access lists; a light node keeps LightDays of blocks.
+	HistoryMode string
+	LightDays   uint64
+
+	// Sync by applying the block access lists of the blocks up to the last
+	// block of the signed BAL hash chain, a chain file or the directory of
+	// its npm package, instead of executing them.
+	SyncApplyBALs bool
+	BALHashChain  string
+
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`
 	ExtraData          []byte         `toml:",omitempty"`

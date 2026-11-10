@@ -19,6 +19,8 @@ package state
 import (
 	"bytes"
 	"errors"
+	"sync"
+	"sync/atomic"
 
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
@@ -213,4 +215,34 @@ func (s *StateDB) ApplyCode(addr common.Address, code []byte) error {
 		prevcode: obj.code,
 	})
 	return obj.setCode(crypto.Keccak256Hash(code), code)
+}
+
+// HashStorages computes the storage roots left out by Finalise with
+// setStorageRoot unset, with up to workers storage tries hashed at a time, and
+// writes the accounts to the account trie.
+func (s *StateDB) HashStorages(workers int) {
+	objs := make([]*stateObject, 0, len(s.stateObjectsDirtyStorage))
+	for addr := range s.stateObjectsDirtyStorage {
+		if so := s.getStateObject(addr); so != nil {
+			objs = append(objs, so)
+		}
+	}
+	s.stateObjectsDirtyStorage = make(map[common.Address]struct{})
+
+	// Each object hashes its own storage trie, so they do not share state.
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	for range max(1, workers) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < len(objs); i = int(next.Add(1) - 1) {
+				objs[i].updateStorageRoot(s.db)
+			}
+		})
+	}
+	wg.Wait()
+	for _, so := range objs {
+		s.updateStateObject(so)
+	}
 }

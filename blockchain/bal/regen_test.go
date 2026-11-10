@@ -500,3 +500,43 @@ func TestGenesisSpecKeepsDeriveSha(t *testing.T) {
 	require.Equal(t, gspec, got)
 	require.Equal(t, want, types.DeriveShaImpl(receipts, common.Big1))
 }
+
+// TestBALRegenAppliedNode runs the opt-in regenerations on a node that
+// inserted its blocks by applying the BALs it received: verify mode checks the
+// received writes by executing the blocks, and reads mode adds their reads.
+func TestBALRegenAppliedNode(t *testing.T) {
+	f := newRegenFixture(t, "prague", 60)
+	src, err := blockchain.NewBlockChain(f.env.db, regenCacheConfig(false), f.env.config, f.env.sealer, vm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(src.Stop)
+	db := database.NewMemoryDBManager()
+	f.env.gspec.MustCommit(db)
+	chain, err := blockchain.NewBlockChain(db, regenCacheConfig(true), f.env.config, f.env.sealer, vm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(chain.Stop)
+	chain.Processor().RegisterBlockStateModule(f.env.sealer)
+	blocks := make([]*Block, len(f.blocks))
+	for i, block := range f.blocks {
+		enc, err := f.lists[i].Writes().Encode()
+		require.NoError(t, err)
+		blocks[i] = &Block{Block: block, Receipts: src.GetReceiptsByBlockHash(block.Hash()), BAL: enc}
+	}
+	_, err = InsertChain(chain, blocks)
+	require.NoError(t, err)
+	head := uint64(len(f.blocks))
+	requireSpan(t, chain, 1, head+1)
+	f.requireLists(t, chain, 1, head)
+	f.requireNoReads(t, chain, 1, head)
+
+	require.NoError(t, StartRegen(chain, RegenConfig{Mode: RegenVerify, Workers: 2}))
+	s := waitRegen(t, chain)
+	require.Empty(t, s.Error)
+	require.Zero(t, s.Mismatches)
+	require.Equal(t, head+1, s.Next)
+
+	require.NoError(t, StartRegen(chain, RegenConfig{Mode: RegenReads, Workers: 2}))
+	s = waitRegen(t, chain)
+	require.Empty(t, s.Error)
+	require.Zero(t, s.Mismatches)
+	f.requireFull(t, chain, 1, head)
+}
