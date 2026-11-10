@@ -50,9 +50,11 @@ type Proposal interface {
 	WithSeal(header *types.Header) *types.Block
 }
 
-// Request wraps a proposal to be processed by a BFT engine.
+// Request wraps a proposal to be processed by a BFT engine. From the Amber
+// hardfork a block producer adds the block access list of the proposal.
 type Request struct {
-	Proposal Proposal
+	Proposal   Proposal
+	AccessList []byte
 }
 
 // View includes a round number and a sequence number.
@@ -119,11 +121,18 @@ type ConsensusMsg struct {
 // any of them claims a prepared value, PreparedMessages are the PREPARE/COMMIT
 // votes proving the highest claim for Proposal. The prepared block is therefore
 // sent once, as the Proposal itself, instead of once per ROUND CHANGE.
+//
+// From the Amber hardfork it carries AccessList, the RLP of the block access
+// list of the proposal with its reads. It is not part of the block: only the
+// hash of the writes is in the header. It is covered by the signature of the
+// message, so the proposer answers for it. Before Amber it is empty and is not
+// encoded, so the message is the same as before.
 type Preprepare struct {
 	View                   *View
 	Proposal               Proposal
 	RoundChangeCertificate []*Message
 	PreparedMessages       []*Message
+	AccessList             []byte
 }
 
 // EncodeRLP serializes a Preprepare into the Kaia RLP format.
@@ -133,7 +142,8 @@ func (b *Preprepare) EncodeRLP(w io.Writer) error {
 		Proposal               Proposal
 		RoundChangeCertificate []*Message `rlp:"optional"`
 		PreparedMessages       []*Message `rlp:"optional"`
-	}{b.View, b.Proposal, b.RoundChangeCertificate, b.PreparedMessages})
+		AccessList             []byte     `rlp:"optional"`
+	}{b.View, b.Proposal, b.RoundChangeCertificate, b.PreparedMessages, b.AccessList})
 }
 
 // DecodeRLP deserializes a Preprepare from a Kaia RLP stream.
@@ -145,12 +155,14 @@ func (b *Preprepare) DecodeRLP(s *rlp.Stream) error {
 		Proposal               *types.Block
 		RoundChangeCertificate []*Message `rlp:"optional"`
 		PreparedMessages       []*Message `rlp:"optional"`
+		AccessList             []byte     `rlp:"optional"`
 	}
 	if err := s.Decode(&preprepare); err != nil {
 		return err
 	}
 	b.View, b.Proposal = preprepare.View, preprepare.Proposal
 	b.RoundChangeCertificate, b.PreparedMessages = preprepare.RoundChangeCertificate, preprepare.PreparedMessages
+	b.AccessList = preprepare.AccessList
 	return nil
 }
 
