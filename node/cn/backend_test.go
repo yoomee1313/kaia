@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/node/cn/mocks"
@@ -57,6 +58,28 @@ func TestCN_CheckSyncMode(t *testing.T) {
 
 	c.SyncMode = downloader.LightSync
 	assert.Equal(t, errCNLightSync, checkSyncMode(c))
+}
+
+func TestCN_CheckFreezerThreshold(t *testing.T) {
+	c := &Config{FreezerThreshold: 0, TrieBlockInterval: 128, HistoryMode: bal.HistoryModeLight}
+	assert.NoError(t, checkFreezerThreshold(c)) // no freezer on a light node
+
+	c.HistoryMode = bal.HistoryModeFull
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 255
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 256
+	assert.NoError(t, checkFreezerThreshold(c))
+
+	// With state committed every block, the floor still applies.
+	c.TrieBlockInterval, c.FreezerThreshold = 1, 127
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 128
+	assert.NoError(t, checkFreezerThreshold(c))
+
+	assert.NoError(t, checkFreezerThreshold(GetDefaultConfig()))
+	c.HistoryMode = ""
+	assert.True(t, c.freezerEnabled())
 }
 
 func TestCN_SetAcceptTxs(t *testing.T) {

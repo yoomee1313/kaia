@@ -39,6 +39,7 @@ import (
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/kaiachain/kaia/storage/database/ancient"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -215,6 +216,10 @@ type DBManager interface {
 	ReadPruningMarks(startNumber, endNumber uint64) []PruningMark
 	DeletePruningMarks(marks []PruningMark)
 	PruneTrieNodes(marks []PruningMark)
+	// PruneMarkedTrieNodes hands the marks of the blocks [startNumber,
+	// endNumber) to prune, nil for PruneTrieNodes, deletes them and returns
+	// how many there were.
+	PruneMarkedTrieNodes(startNumber, endNumber uint64, prune func([]PruningMark)) int
 	WriteLastPrunedBlockNumber(blockNumber uint64)
 	ReadLastPrunedBlockNumber() (uint64, error)
 
@@ -336,6 +341,18 @@ type DBManager interface {
 
 	Stat(string) (string, error)
 	Compact([]byte, []byte) error
+
+	// FrozenBlocks returns the number of blocks moved to the freezer.
+	FrozenBlocks() uint64
+	// PauseFreezer stops moving blocks to the freezer until resume is called.
+	PauseFreezer() (frozen uint64, resume func())
+	// TruncateFrozen removes the frozen blocks from number items on. The caller
+	// must hold PauseFreezer.
+	TruncateFrozen(items uint64) error
+	// FreezeSyncedBlocks writes the leading synced blocks that are far enough
+	// below the head header straight into the freezer, and returns how many it
+	// took. The caller writes the rest to the key-value store.
+	FreezeSyncedBlocks(blocks types.Blocks, receipts []types.Receipts, headHeader uint64) (int, error)
 }
 
 type DBEntryType uint8
@@ -468,6 +485,19 @@ type databaseManager struct {
 	// lockClose guards closed against the background RemoveOldDB writing to a closed MiscDB.
 	lockClose sync.RWMutex
 	closed    bool
+
+	// Block freezer (ancient store). nil if disabled.
+	freezer          *ancient.Freezer
+	freezerQuit      chan struct{}
+	freezerTrigger   chan chan struct{} // Manual blocking freeze trigger, test determinism
+	freezerWg        sync.WaitGroup
+	freezerCloseOnce sync.Once
+	freezeLock       sync.Mutex // Held by a freeze round and by PauseFreezer
+	firstFreezeWarn  sync.Once  // Warns that the first freeze ends the compatibility with earlier versions
+
+	// Pruning mark freezer. nil if the block freezer is disabled or read-only.
+	pruningMarks       *ancient.Freezer
+	pruningMarkDirOnce sync.Once
 }
 
 func NewMemoryDBManager() DBManager {
@@ -510,6 +540,12 @@ type DBConfig struct {
 
 	// FlatTrie related configurations
 	UseFlatTrie bool
+
+	// Freezer related configurations
+	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer; a setup without freezer support runs without it
+	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
+	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
+	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer is opened for reads only
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -634,6 +670,7 @@ func newDatabaseManager(dbc *DBConfig) *databaseManager {
 func NewDBManager(dbc *DBConfig) DBManager {
 	if dbc.SingleDB {
 		logger.Info("Single database is used for persistent storage", "DBType", dbc.DBType)
+		checkFreezerSupport(dbc, false)
 		if dbm, err := singleDatabaseDBManager(dbc); err != nil {
 			logger.Crit("Failed to create a single database", "DBType", dbc.DBType, "err", err)
 		} else {
@@ -656,6 +693,12 @@ func NewDBManager(dbc *DBConfig) DBManager {
 			}
 		}
 		dbm.migrationOldDBPath = dbm.getMigrationOldDBPath()
+		if err := dbm.openFreezer(); err != nil {
+			logger.Crit("Failed to open block freezer", "err", err)
+		}
+		if err := dbm.openPruningMarkFreezer(); err != nil {
+			logger.Crit("Failed to open pruning mark freezer", "err", err)
+		}
 		return dbm
 	}
 	logger.Crit("Must not reach here!")
@@ -1092,6 +1135,9 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 }
 
 func (dbm *databaseManager) Close() {
+	// Stop the freeze loop before the key-value stores are closed.
+	dbm.closeFreezer()
+
 	dbm.lockClose.Lock()
 	defer dbm.lockClose.Unlock()
 	dbm.closed = true
@@ -1125,6 +1171,9 @@ func (dbm *databaseManager) ReadCanonicalHash(number uint64) common.Hash {
 
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerHashKey(number))
+	if len(data) == 0 {
+		data = dbm.readAncientHash(number)
+	}
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -1278,10 +1327,10 @@ func (dbm *databaseManager) HasHeader(hash common.Hash, number uint64) bool {
 	}
 
 	db := dbm.getDatabase(headerDB)
-	if has, err := db.Has(headerKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(headerKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadHeader retrieves the block header corresponding to the hash.
@@ -1309,6 +1358,9 @@ func (dbm *databaseManager) ReadHeader(hash common.Hash, number uint64) *types.H
 func (dbm *databaseManager) ReadHeaderRLP(hash common.Hash, number uint64) rlp.RawValue {
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readFrozenHeader(hash, number)
+	}
 	return data
 }
 
@@ -1379,10 +1431,10 @@ func (dbm *databaseManager) ReadHeaderNumber(hash common.Hash) *uint64 {
 // HasBody verifies the existence of a block body corresponding to the hash.
 func (dbm *databaseManager) HasBody(hash common.Hash, number uint64) bool {
 	db := dbm.getDatabase(BodyDB)
-	if has, err := db.Has(blockBodyKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(blockBodyKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadBody retrieves the block body corresponding to the hash.
@@ -1421,7 +1473,7 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
@@ -1430,6 +1482,9 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 	// not found in cache, find body in database
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1445,7 +1500,7 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
@@ -1459,6 +1514,9 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(*number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, *number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1520,7 +1578,14 @@ func (dbm *databaseManager) ReadTd(hash common.Hash, number uint64) *big.Int {
 	db := dbm.getDatabase(MiscDB)
 	data, _ := db.Get(headerTDKey(number, hash))
 	if len(data) == 0 {
-		return nil
+		// The freezer deletes the total blockscore of a frozen block if it is
+		// number+1, i.e. every block up to it has blockscore 1.
+		if number == 0 || !dbm.isFrozenCanon(hash, number) {
+			return nil
+		}
+		td := new(big.Int).SetUint64(number + 1)
+		dbm.cm.writeTdCache(hash, td)
+		return td
 	}
 	td := new(big.Int)
 	if err := rlp.Decode(bytes.NewReader(data), td); err != nil {
@@ -1578,6 +1643,9 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 	db := dbm.getDatabase(ReceiptsDB)
 	// Retrieve the flattened receipt slice
 	data, _ := db.Get(blockReceiptsKey(number, blockHash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerReceiptTable, blockHash, number)
+	}
 	if len(data) == 0 {
 		return nil
 	}
@@ -2234,6 +2302,10 @@ func (dbm *databaseManager) DeletePruningEnabled() {
 
 // WritePruningMarks writes the provided set of pruning marks to the database.
 func (dbm *databaseManager) WritePruningMarks(marks []PruningMark) {
+	if dbm.pruningMarks != nil {
+		dbm.appendPruningMarks(marks)
+		return
+	}
 	batch := dbm.NewBatch(MiscDB)
 	defer batch.Release()
 	for _, mark := range marks {
@@ -2521,8 +2593,7 @@ func (dbm *databaseManager) DeleteBloomBits(bloomBitsKey []byte) {
 // ReadBloomBits retrieves the compressed bloom bit vector belonging to the given
 // section and bit index from the.
 func (dbm *databaseManager) ReadBloomBits(bloomBitsKey []byte) ([]byte, error) {
-	db := dbm.getDatabase(MiscDB)
-	return db.Get(bloomBitsKey)
+	return dbm.readBloomBits(bloomBitsKey)
 }
 
 // WriteBloomBits stores the compressed bloom bits vector belonging to the given

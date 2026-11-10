@@ -98,6 +98,8 @@ var FlagGroups = []FlagGroup{
 			PebbleDBCacheSizeFlag,
 			SingleDBFlag,
 			NumStateTrieShardsFlag,
+			FreezerThresholdFlag,
+			AncientDirFlag,
 			LevelDBCompressionTypeFlag,
 			LevelDBNoBufferPoolFlag,
 			RocksDBSecondaryFlag,

@@ -38,6 +38,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -305,6 +306,31 @@ func TestDBManager_Body(t *testing.T) {
 		assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLP(hash2, num2))
 		assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLPByHash(hash2))
 	}
+}
+
+// TestDBManager_BodyRLPFromBodyCache tests that the RLP readers encode a body
+// found in the body cache instead of reading the database.
+func TestDBManager_BodyRLPFromBodyCache(t *testing.T) {
+	dbm := NewMemoryDBManager().(*databaseManager)
+	defer dbm.Close()
+
+	header := &types.Header{Number: big.NewInt(1), BlockScore: big.NewInt(1), Time: big.NewInt(1)}
+	hash, number := header.Hash(), header.Number.Uint64()
+	dbm.WriteHeader(header)
+
+	body := &types.Body{Transactions: types.Transactions{}}
+	encodedBody, err := rlp.EncodeToBytes(body)
+	require.NoError(t, err)
+	dbm.WriteBody(hash, number, body)
+	require.Equal(t, body, dbm.ReadBody(hash, number))
+
+	// Leave the body only in the body cache.
+	dbm.cm.bodyRLPCache.Purge()
+	require.NoError(t, dbm.getDatabase(BodyDB).Delete(blockBodyKey(number, hash)))
+
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLP(hash, number))
+	dbm.cm.bodyRLPCache.Purge()
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLPByHash(hash))
 }
 
 // TestDBManager_Td tests read, write and delete operations of blockchain headers' total difficulty.
