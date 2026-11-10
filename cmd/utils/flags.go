@@ -531,6 +531,18 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	BALRecordFlag = &cli.BoolFlag{
+		Name:     "bal.record",
+		Usage:    "Stores the block access list of every inserted block in the chain database, after checking it reproduces the state root (experimental)",
+		EnvVars:  []string{"KAIA_BAL_RECORD"},
+		Category: "MISC",
+	}
+	BALSkipReadsFlag = &cli.BoolFlag{
+		Name:     "bal.skip-reads",
+		Usage:    "Stores only the writes of the block access lists, without their reads, which a BAL regeneration in reads mode can rebuild",
+		EnvVars:  []string{"KAIA_BAL_SKIP_READS"},
+		Category: "MISC",
+	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{
 		Name:     "state.cache-size",
 		Usage:    "Size of in-memory cache of the global state (in MiB) to flush matured singleton trie nodes to disk",

@@ -34,6 +34,7 @@ import (
 	"github.com/kaiachain/kaia/accounts"
 	"github.com/kaiachain/kaia/api"
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/bloombits"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
@@ -286,12 +287,17 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			SenderTxHashIndexing: config.SenderTxHashIndexing,
 			SnapshotCacheSize:    config.SnapshotCacheSize,
 			SnapshotAsyncGen:     config.SnapshotAsyncGen,
+			BALRecord:            config.BALRecord,
+			BALSkipReads:         config.BALSkipReads,
 		}
 	)
 
 	bc, err := blockchain.NewBlockChain(chainDB, cacheConfig, cn.chainConfig, sealer, vmConfig)
 	if err != nil {
 		return nil, err
+	}
+	if config.Genesis != nil {
+		bal.SetGenesis(bc, config.Genesis)
 	}
 	bc.SetCanonicalBlock(config.StartBlockNumber)
 

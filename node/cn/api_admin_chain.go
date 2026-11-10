@@ -33,6 +33,7 @@ import (
 	"strings"
 
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/networks/rpc"
@@ -254,4 +255,40 @@ func (api *AdminChainCNAPI) GetSpamThrottlerCandidateList(ctx context.Context) (
 
 func (s *AdminChainCNAPI) NodeConfig(ctx context.Context) interface{} {
 	return *s.cn.config
+}
+
+// StartBALRegen starts regenerating the block access lists of blocks from to to
+// (experimental). Zero takes the block after the stored lists and the head,
+// or, for the genesis source, the blocks before the stored lists; opts sets
+// the source (local, genesis), mode (write, verify, reads), memory, workers
+// and skipReads.
+func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *bal.RegenConfig) error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	cfg := bal.RegenConfig{}
+	if opts != nil {
+		cfg = *opts
+	}
+	cfg.From, cfg.To = from, to
+	return bal.StartRegen(bc, cfg)
+}
+
+// StopBALRegen stops the running regeneration of block access lists.
+func (api *AdminChainCNAPI) StopBALRegen() error {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return errors.New("not supported by this chain")
+	}
+	return bal.StopRegen(bc)
+}
+
+// BalRegenStatus reports the last regeneration of block access lists.
+func (api *AdminChainCNAPI) BalRegenStatus() (bal.RegenStatus, error) {
+	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
+	if !ok {
+		return bal.RegenStatus{}, errors.New("not supported by this chain")
+	}
+	return bal.GetRegenStatus(bc), nil
 }

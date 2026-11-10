@@ -337,6 +337,11 @@ func (self *worker) makeCurrent(parent *types.Block, header *types.Header) error
 	if err != nil {
 		return err
 	}
+	// The block access list of a block this node proposes is recorded as it
+	// is built, and stored when the block is written.
+	if r, ok := self.chain.(interface{ StartBALRecording(*state.StateDB) }); ok {
+		r.StartBALRecording(stateDB)
+	}
 	work := NewTask(self.config, types.MakeSigner(self.config, header.Number), stateDB, header)
 
 	// Keep track of transactions which return errors so they can be removed

@@ -77,6 +77,7 @@ type DBManager interface {
 	GetHeaderDB() Database
 	GetBodyDB() Database
 	GetReceiptsDB() Database
+	GetBALDB() Database
 	GetStateTrieDB() Database
 	GetStateTrieMigrationDB() Database
 	GetTxLookupEntryDB() Database
@@ -129,6 +130,17 @@ type DBManager interface {
 	WriteReceipts(hash common.Hash, number uint64, receipts types.Receipts)
 	PutReceiptsToBatch(batch Batch, hash common.Hash, number uint64, receipts types.Receipts)
 	DeleteReceipts(hash common.Hash, number uint64)
+
+	// Block access list operations (experimental)
+	ReadBAL(hash common.Hash, number uint64) []byte
+	HasBAL(hash common.Hash, number uint64) bool
+	WriteBAL(hash common.Hash, number uint64, enc []byte) error
+	DeleteBAL(hash common.Hash, number uint64)
+	ReadBALReads(hash common.Hash, number uint64) []byte
+	WriteBALReads(hash common.Hash, number uint64, enc []byte) error
+	DeleteBALReads(hash common.Hash, number uint64)
+	ReadBALRange() (first, next uint64)
+	WriteBALRange(first, next uint64) error
 
 	ReadBlock(hash common.Hash, number uint64) *types.Block
 	ReadBlockByHash(hash common.Hash) *types.Block
@@ -326,6 +338,7 @@ const (
 	TxLookUpEntryDB
 	bridgeServiceDB
 	SnapshotDB
+	BALDB
 	// databaseEntryTypeSize should be the last item in this list!!
 	databaseEntryTypeSize
 )
@@ -367,6 +380,7 @@ var dbBaseDirs = [databaseEntryTypeSize]string{
 	"txlookup",
 	"bridgeservice",
 	"snapshot",
+	"bal",
 }
 
 // Sum of dbConfigRatio should be 100.
@@ -377,10 +391,11 @@ var dbConfigRatio = [databaseEntryTypeSize]int{
 	5,  // BodyDB
 	5,  // ReceiptsDB
 	40, // StateTrieDB
-	37, // StateTrieMigrationDB
+	35, // StateTrieMigrationDB
 	2,  // TXLookUpEntryDB
 	1,  // bridgeServiceDB
 	3,  // SnapshotDB
+	2,  // BALDB
 }
 
 // checkDBEntryConfigRatio checks if sum of dbConfigRatio is 100.
@@ -946,6 +961,10 @@ func (dbm *databaseManager) GetBodyDB() Database {
 
 func (dbm *databaseManager) GetReceiptsDB() Database {
 	return dbm.dbs[ReceiptsDB]
+}
+
+func (dbm *databaseManager) GetBALDB() Database {
+	return dbm.dbs[BALDB]
 }
 
 func (dbm *databaseManager) GetStateTrieDB() Database {
@@ -1590,6 +1609,68 @@ func (dbm *databaseManager) putReceiptsToPutter(putter KeyValueWriter, hash comm
 	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
 		logger.Crit("Failed to store block receipts", "err", err)
 	}
+}
+
+// ReadBAL returns the RLP-encoded writes of the block access list of a block,
+// or nil.
+func (dbm *databaseManager) ReadBAL(hash common.Hash, number uint64) []byte {
+	enc, _ := dbm.getDatabase(BALDB).Get(blockAccessListKey(number, hash))
+	return enc
+}
+
+// HasBAL reports whether the writes of the block access list of a block are
+// stored.
+func (dbm *databaseManager) HasBAL(hash common.Hash, number uint64) bool {
+	ok, _ := dbm.getDatabase(BALDB).Has(blockAccessListKey(number, hash))
+	return ok
+}
+
+// WriteBAL stores the RLP-encoded writes of the block access list of a block.
+func (dbm *databaseManager) WriteBAL(hash common.Hash, number uint64, enc []byte) error {
+	return dbm.getDatabase(BALDB).Put(blockAccessListKey(number, hash), enc)
+}
+
+// DeleteBAL removes the block access list of a block.
+func (dbm *databaseManager) DeleteBAL(hash common.Hash, number uint64) {
+	if err := dbm.getDatabase(BALDB).Delete(blockAccessListKey(number, hash)); err != nil {
+		logger.Error("Failed to delete block access list", "number", number, "err", err)
+	}
+}
+
+// ReadBALReads returns the RLP-encoded reads of the block access list of a
+// block, or nil. They are kept apart from the writes and may be missing.
+func (dbm *databaseManager) ReadBALReads(hash common.Hash, number uint64) []byte {
+	enc, _ := dbm.getDatabase(BALDB).Get(blockAccessReadsKey(number, hash))
+	return enc
+}
+
+// WriteBALReads stores the RLP-encoded reads of the block access list of a
+// block.
+func (dbm *databaseManager) WriteBALReads(hash common.Hash, number uint64, enc []byte) error {
+	return dbm.getDatabase(BALDB).Put(blockAccessReadsKey(number, hash), enc)
+}
+
+// DeleteBALReads removes the reads of the block access list of a block.
+func (dbm *databaseManager) DeleteBALReads(hash common.Hash, number uint64) {
+	if err := dbm.getDatabase(BALDB).Delete(blockAccessReadsKey(number, hash)); err != nil {
+		logger.Error("Failed to delete block access list reads", "number", number, "err", err)
+	}
+}
+
+// ReadBALRange returns the blocks first to next-1 whose block access lists
+// are all stored; first == next if there are none.
+func (dbm *databaseManager) ReadBALRange() (first, next uint64) {
+	enc, err := dbm.getDatabase(BALDB).Get(blockAccessListRangeKey)
+	if err != nil || len(enc) != 16 {
+		return 0, 0
+	}
+	return binary.BigEndian.Uint64(enc), binary.BigEndian.Uint64(enc[8:])
+}
+
+// WriteBALRange stores the range returned by ReadBALRange.
+func (dbm *databaseManager) WriteBALRange(first, next uint64) error {
+	enc := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, first), next)
+	return dbm.getDatabase(BALDB).Put(blockAccessListRangeKey, enc)
 }
 
 // DeleteReceipts removes all receipt data associated with a block hash.

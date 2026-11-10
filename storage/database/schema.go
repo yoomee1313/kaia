@@ -88,6 +88,10 @@ var (
 	blockBodyPrefix     = []byte("b") // blockBodyPrefix + num (uint64 big endian) + hash -> block body
 	blockReceiptsPrefix = []byte("r") // blockReceiptsPrefix + num (uint64 big endian) + hash -> block receipts
 
+	blockAccessListPrefix   = []byte("j")               // blockAccessListPrefix + num (uint64 big endian) + hash -> writes of the block access list
+	blockAccessReadsPrefix  = []byte("J")               // blockAccessReadsPrefix + num (uint64 big endian) + hash -> reads of the block access list
+	blockAccessListRangeKey = []byte("AccessListRange") // first and next block of the stored block access lists
+
 	txLookupPrefix        = []byte("l") // txLookupPrefix + hash -> transaction/receipt lookup metadata
 	SnapshotAccountPrefix = []byte("a") // SnapshotAccountPrefix + account hash -> account trie value
 	SnapshotStoragePrefix = []byte("o") // SnapshotStoragePrefix + account hash + storage hash -> storage trie value
@@ -171,6 +175,16 @@ func headerNumberKey(hash common.Hash) []byte {
 // blockBodyKey = blockBodyPrefix + num (uint64 big endian) + hash
 func blockBodyKey(number uint64, hash common.Hash) []byte {
 	return append(append(blockBodyPrefix, common.Int64ToByteBigEndian(number)...), hash.Bytes()...)
+}
+
+// blockAccessListKey = blockAccessListPrefix + num (uint64 big endian) + hash
+func blockAccessListKey(number uint64, hash common.Hash) []byte {
+	return append(append(blockAccessListPrefix, common.Int64ToByteBigEndian(number)...), hash.Bytes()...)
+}
+
+// blockAccessReadsKey = blockAccessReadsPrefix + num (uint64 big endian) + hash
+func blockAccessReadsKey(number uint64, hash common.Hash) []byte {
+	return append(append(blockAccessReadsPrefix, common.Int64ToByteBigEndian(number)...), hash.Bytes()...)
 }
 
 // blockReceiptsKey = blockReceiptsPrefix + num (uint64 big endian) + hash

@@ -139,6 +139,8 @@ type CacheConfig struct {
 	TrieNodeCacheConfig  *statedb.TrieNodeCacheConfig // Configures trie node cache
 	SnapshotCacheSize    int                          // Memory allowance (MB) to use for caching snapshot entries in memory
 	SnapshotAsyncGen     bool                         // Enables snapshot data generation asynchronously
+	BALRecord            bool                         // Records the block access lists of inserted blocks in the database (experimental)
+	BALSkipReads         bool                         // Records the writes of the block access lists only, without their reads
 }
 
 // gcBlock is used for priority queue for GC.
@@ -165,11 +167,12 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // stateDB caching and trie caching/pruning configuration
 
-	db      database.DBManager // Low level persistent database to store final content in
-	snaps   *snapshot.Tree     // Snapshot tree for fast trie leaf access
-	triegc  *prque.Prque       // Priority queue mapping block numbers to tries to gc
-	chBlock chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
-	chPrune chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
+	db       database.DBManager // Low level persistent database to store final content in
+	snaps    *snapshot.Tree     // Snapshot tree for fast trie leaf access
+	balHooks BALHooks           // Block access lists, nil unless package bal is linked
+	triegc   *prque.Prque       // Priority queue mapping block numbers to tries to gc
+	chBlock  chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
+	chPrune  chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
 
 	hc                 *HeaderChain
 	rmLogsFeed         event.Feed
@@ -360,6 +363,10 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 			recover = true
 		}
 		bc.snaps, _ = snapshot.New(bc.db, bc.stateCache.TrieDB(), bc.cacheConfig.SnapshotCacheSize, head.Root(), bc.cacheConfig.SnapshotAsyncGen, true, recover)
+	}
+
+	if err := bc.attachBALHooks(); err != nil {
+		return nil, err
 	}
 
 	// Take ownership of this particular state
@@ -601,6 +608,11 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 		// removed in the hc.SetHead function.
 		bc.db.DeleteBody(hash, num)
 		bc.db.DeleteReceipts(hash, num)
+		bc.db.DeleteBAL(hash, num)
+		bc.db.DeleteBALReads(hash, num)
+		if bc.balHooks != nil {
+			bc.balHooks.Truncate(num)
+		}
 		bc.db.DeleteGovernance(num)
 		if params.IsCheckpointInterval(num) {
 			bc.db.DeleteIstanbulSnapshot(hash)
@@ -1126,6 +1138,10 @@ func (bc *BlockChain) Stop() {
 
 	bc.wg.Wait()
 
+	if bc.balHooks != nil {
+		bc.balHooks.Stop()
+	}
+
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
 	if bc.snaps != nil {
@@ -1606,6 +1622,12 @@ func (bc *BlockChain) WriteBlockWithState(block *types.Block, receipts []*types.
 // When announce is set, a ChainPreCommitEvent is published so subscribers can
 // prepare for the new head in parallel; bulk (sync) inserts skip it.
 func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, stateDB *state.StateDB, announce bool) (WriteResult, error) {
+	// Both inserted blocks and the blocks this node builds come here, so the
+	// block access list of every written block is stored.
+	if parent := bc.GetHeaderByHash(block.ParentHash()); parent != nil {
+		bc.recordBAL(block, parent.Root, stateDB)
+	}
+
 	if announce {
 		bc.announceChainPreCommit(block, stateDB)
 	}
@@ -2118,7 +2140,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			}
 
 			// Process block using the parent state as reference point.
-			receipts, logs, usedGas, internalTxTraces, procStats, err = bc.processor.Process(context.Background(), block, stateDB, bc.vmConfig)
+			receipts, logs, usedGas, internalTxTraces, procStats, err = bc.processBlock(block, stateDB)
 			if err != nil {
 				bc.reportExecutionFailure(block, receipts, stateDB, err)
 				atomic.StoreUint32(&followupInterrupt, 1)

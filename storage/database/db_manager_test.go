@@ -348,6 +348,42 @@ func TestDBManager_Receipts(t *testing.T) {
 	}
 }
 
+// TestDBManager_BAL read, write and delete operations of block access lists.
+func TestDBManager_BAL(t *testing.T) {
+	log.EnableLogForTest(log.LvlCrit, log.LvlTrace)
+	hash := common.HexToHash("0x1234")
+	enc := []byte{0xc1, 0xc0}
+
+	for _, dbm := range dbManagers {
+		assert.Nil(t, dbm.ReadBAL(hash, num1))
+		assert.False(t, dbm.HasBAL(hash, num1))
+
+		assert.NoError(t, dbm.WriteBAL(hash, num1, enc))
+		assert.Equal(t, enc, dbm.ReadBAL(hash, num1))
+		assert.True(t, dbm.HasBAL(hash, num1))
+		assert.Nil(t, dbm.ReadBAL(hash, num2))
+
+		reads := []byte{0xc1, 0xc1}
+		assert.Nil(t, dbm.ReadBALReads(hash, num1))
+		assert.NoError(t, dbm.WriteBALReads(hash, num1, reads))
+		assert.Equal(t, reads, dbm.ReadBALReads(hash, num1))
+		assert.Equal(t, enc, dbm.ReadBAL(hash, num1), "the writes are kept apart")
+
+		dbm.DeleteBAL(hash, num1)
+		assert.Nil(t, dbm.ReadBAL(hash, num1))
+		assert.Equal(t, reads, dbm.ReadBALReads(hash, num1))
+		dbm.DeleteBALReads(hash, num1)
+		assert.Nil(t, dbm.ReadBALReads(hash, num1))
+
+		first, next := dbm.ReadBALRange()
+		assert.Equal(t, [2]uint64{0, 0}, [2]uint64{first, next})
+		assert.NoError(t, dbm.WriteBALRange(3, 9))
+		first, next = dbm.ReadBALRange()
+		assert.Equal(t, [2]uint64{3, 9}, [2]uint64{first, next})
+		assert.NoError(t, dbm.WriteBALRange(0, 0))
+	}
+}
+
 // TestDBManager_Block read, write and delete operations of blockchain blocks.
 func TestDBManager_Block(t *testing.T) {
 	log.EnableLogForTest(log.LvlCrit, log.LvlTrace)
