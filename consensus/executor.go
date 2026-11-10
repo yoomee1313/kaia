@@ -49,6 +49,10 @@ type ExecutionResult struct {
 	FinalizeTime time.Duration // Time spent finalizing the block
 	SealTime     time.Duration // Time spent in consensus (Seal)
 
+	// ComputationCost is the sum of the opcode computation costs of the txs,
+	// set by ProcessBlock.
+	ComputationCost uint64
+
 	// ProcessStats timestamps — set by ProcessBlock to mirror
 	// blockchain.ProcessStats so speculative cache can forward them.
 	BeforeApplyTxs time.Time

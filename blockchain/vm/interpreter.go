@@ -62,6 +62,13 @@ type Config struct {
 
 	// Additional EIPs that are to be enabled
 	ExtraEips []int
+
+	// BeforeTxFinalise, if set, is called by ApplyTransaction after a tx ran
+	// and before its changes are finalised, with the opcode computation cost
+	// of the tx. An error leaves the tx out: ApplyTransaction returns it with
+	// the state not finalised, for the caller to revert. A block producer uses
+	// it to check the limits of a block.
+	BeforeTxFinalise func(computationCost uint64) error
 }
 
 // ScopeContext contains the things that are per-call, such as stack and memory,

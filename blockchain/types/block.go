@@ -79,6 +79,16 @@ type Header struct {
 	// VRank was added by KIP-227 and is ignored in legacy headers.
 	VRank []byte `json:"vrank,omitempty" rlp:"optional"`
 
+	// BlockAccessListHash was added by the Amber hardfork. It is the hash of
+	// the writes of the block access list, without the reads, see
+	// bal.BlockAccessList.Hash.
+	BlockAccessListHash *common.Hash `json:"blockAccessListHash,omitempty" rlp:"optional"`
+
+	// CumulativeRoot was added by the Amber hardfork. Only the first block of
+	// each quarter has it: a Merkle mountain range over the roots of the
+	// earlier header segments, see blockchain.CumulativeRoot.
+	CumulativeRoot *common.Hash `json:"cumulativeRoot,omitempty" rlp:"optional"`
+
 	// New header fields must be added at tail for backward compatibility.
 }
 
@@ -323,6 +333,14 @@ func CopyHeader(h *Header) *Header {
 	if len(h.VRank) > 0 {
 		cpy.VRank = make([]byte, len(h.VRank))
 		copy(cpy.VRank, h.VRank)
+	}
+	if h.BlockAccessListHash != nil {
+		cpy.BlockAccessListHash = new(common.Hash)
+		*cpy.BlockAccessListHash = *h.BlockAccessListHash
+	}
+	if h.CumulativeRoot != nil {
+		cpy.CumulativeRoot = new(common.Hash)
+		*cpy.CumulativeRoot = *h.CumulativeRoot
 	}
 	return &cpy
 }

@@ -32,6 +32,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/kaiax"
+	"github.com/kaiachain/kaia/kaiax/bal"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
@@ -280,6 +281,9 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 		statedb, err := state.New(parent.Root(), state.NewDatabase(db), nil, nil)
 		if err != nil {
 			panic(err)
+		}
+		if config.IsAmberForkEnabled(new(big.Int).Add(parent.Number(), common.Big1)) {
+			bal.EnableRecorder(statedb)
 		}
 		block, receipt := genblock(i, parent, statedb)
 		blocks[i] = block

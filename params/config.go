@@ -221,6 +221,11 @@ func TestKaiaConfig(maxHardfork string) *ChainConfig {
 		return chainConfig
 	}
 
+	chainConfig.AmberCompatibleBlock = big.NewInt(0)
+	if maxHardfork == "amber" {
+		return chainConfig
+	}
+
 	return chainConfig
 }
 
@@ -283,6 +288,11 @@ type ChainConfig struct {
 	PragueCompatibleBlock         *big.Int `json:"pragueCompatibleBlock,omitempty"`         // PragueCompatible switch block (nil = no fork)
 	OsakaCompatibleBlock          *big.Int `json:"osakaCompatibleBlock,omitempty"`          // OsakaCompatible switch block (nil = no fork)
 	PermissionlessCompatibleBlock *big.Int `json:"permissionlessCompatibleBlock,omitempty"` // PermissionlessCompatible switch block (nil = no fork)
+	AmberCompatibleBlock          *big.Int `json:"amberCompatibleBlock,omitempty"`          // AmberCompatible switch block (nil = no fork), commits the block access list hash in the header
+
+	// Limits of a block from the Amber hardfork. Zero means the default.
+	AmberBlockComputationCostLimit uint64 `json:"amberBlockComputationCostLimit,omitempty"` // Sum of the opcode computation costs of the txs of a block
+	AmberBlockAccessListEntryLimit uint64 `json:"amberBlockAccessListEntryLimit,omitempty"` // Accounts plus storage slots, read or written, in the block access list
 
 	// Kip103 is a special purpose hardfork feature that can be executed only once
 	// Both Kip103CompatibleBlock and Kip103ContractAddress should be specified to enable KIP103
@@ -418,6 +428,7 @@ func (c *ChainConfig) String() string {
 		" PragueCompatibleBlock: %v"+
 		" OsakaCompatibleBlock: %v"+
 		" PermissionlessCompatibleBlock: %v"+
+		" AmberCompatibleBlock: %v"+
 		"%s%s%s"+
 		" UnitPrice: %d"+
 		" DeriveShaImpl: %d"+
@@ -435,6 +446,7 @@ func (c *ChainConfig) String() string {
 		c.PragueCompatibleBlock,
 		c.OsakaCompatibleBlock,
 		c.PermissionlessCompatibleBlock,
+		c.AmberCompatibleBlock,
 		kip103, kip160, subGroupSize,
 		c.UnitPrice,
 		c.DeriveShaImpl,
@@ -557,6 +569,30 @@ func (c *ChainConfig) IsPermissionlessForkEnabled(num *big.Int) bool {
 	return isForked(c.PermissionlessCompatibleBlock, num)
 }
 
+// IsAmberForkEnabled returns whether num is either equal to the amber block or greater.
+func (c *ChainConfig) IsAmberForkEnabled(num *big.Int) bool {
+	return isForked(c.AmberCompatibleBlock, num)
+}
+
+// BlockComputationCostLimit returns the limit of the sum of the opcode
+// computation costs of the txs of a block from the Amber hardfork.
+func (c *ChainConfig) BlockComputationCostLimit() uint64 {
+	if c.AmberBlockComputationCostLimit != 0 {
+		return c.AmberBlockComputationCostLimit
+	}
+	return DefaultAmberBlockComputationCostLimit
+}
+
+// BlockAccessListEntryLimit returns the limit of the entries of the block
+// access list of a block from the Amber hardfork: its accounts plus its storage
+// slots, read or written.
+func (c *ChainConfig) BlockAccessListEntryLimit() uint64 {
+	if c.AmberBlockAccessListEntryLimit != 0 {
+		return c.AmberBlockAccessListEntryLimit
+	}
+	return DefaultAmberBlockAccessListEntryLimit
+}
+
 // IsKIP103ForkBlock returns whether num is equal to the kip103 block.
 func (c *ChainConfig) IsKIP103ForkBlock(num *big.Int) bool {
 	return isForkBlock(c.Kip103CompatibleBlock, num)
@@ -632,6 +668,7 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		{name: "pragueBlock", block: c.PragueCompatibleBlock},
 		{name: "osakaBlock", block: c.OsakaCompatibleBlock},
 		{name: "permissionlessBlock", block: c.PermissionlessCompatibleBlock},
+		{name: "amberBlock", block: c.AmberCompatibleBlock},
 	} {
 		if lastFork.name != "" {
 			// Next one must be higher number
@@ -650,6 +687,11 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		if cur.block != nil {
 			lastFork = cur
 		}
+	}
+
+	// The Amber block starts a header segment.
+	if c.AmberCompatibleBlock != nil && new(big.Int).Mod(c.AmberCompatibleBlock, big.NewInt(HeaderSegmentSize)).Sign() != 0 {
+		return fmt.Errorf("invalid chain configuration: amberBlock %v is not a multiple of %d", c.AmberCompatibleBlock, HeaderSegmentSize)
 	}
 
 	// Check that the fork enabling blobs explicitly defines a valid blob schedule.
@@ -720,6 +762,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, head *big.Int) *Confi
 	}
 	if isForkIncompatible(c.PermissionlessCompatibleBlock, newcfg.PermissionlessCompatibleBlock, head) {
 		return newCompatError("Permissionless Block", c.PermissionlessCompatibleBlock, newcfg.PermissionlessCompatibleBlock)
+	}
+	if isForkIncompatible(c.AmberCompatibleBlock, newcfg.AmberCompatibleBlock, head) {
+		return newCompatError("Amber Block", c.AmberCompatibleBlock, newcfg.AmberCompatibleBlock)
 	}
 	return nil
 }
@@ -868,6 +913,7 @@ type Rules struct {
 	IsPrague         bool
 	IsOsaka          bool
 	IsPermissionless bool
+	IsAmber          bool
 }
 
 // Rules ensures c's ChainID is not nil.
@@ -890,6 +936,7 @@ func (c *ChainConfig) Rules(num *big.Int) Rules {
 		IsPrague:         c.IsPragueForkEnabled(num),
 		IsOsaka:          c.IsOsakaForkEnabled(num),
 		IsPermissionless: c.IsPermissionlessForkEnabled(num),
+		IsAmber:          c.IsAmberForkEnabled(num),
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/kaiax"
+	"github.com/kaiachain/kaia/kaiax/bal"
 	"github.com/kaiachain/kaia/storage/database"
 )
 
@@ -76,6 +77,10 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, b
 	module := bc.applyModule(block.Hash())
 	if module == nil {
 		bc.PreExecuteBlock(statedb)
+		// From the Amber hardfork the header commits the hash of the list.
+		if bc.chainConfig.IsAmberForkEnabled(block.Number()) && !bal.Recording(statedb) {
+			bal.EnableRecorder(statedb)
+		}
 		return bc.processor.Process(context.Background(), block, statedb, bc.vmConfig)
 	}
 	stats := ProcessStats{BeforeApplyTxs: time.Now()}

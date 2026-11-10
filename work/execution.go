@@ -27,6 +27,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/event"
+	"github.com/kaiachain/kaia/kaiax/bal"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/work/builder"
@@ -169,9 +170,10 @@ func (e *DefaultExecutor) ProcessBlock(ctx context.Context, txs []*types.Transac
 
 	// Record the block access list as InsertChain does, so that a block whose
 	// speculative result is reused by InsertChain still gets its list.
-	if r, ok := e.chain.(interface{ PreExecuteBlock(*state.StateDB) }); ok {
+	if r, ok := e.chain.(interface{ PreExecuteBlock(*state.StateDB) }); ok && !bal.Recording(e.state) {
 		r.PreExecuteBlock(e.state)
 	}
+	startBlockAccessRecorder(e.config, e.state, e.header)
 
 	// Delegate to Process() — the same function InsertChain uses.
 	receipts, logs, usedGas, internalTxTraces, procStats, err := e.chain.Processor().Process(ctx, block, e.state, e.vmConfig)
@@ -188,6 +190,7 @@ func (e *DefaultExecutor) ProcessBlock(ctx context.Context, txs []*types.Transac
 	result.BeforeApplyTxs = procStats.BeforeApplyTxs
 	result.AfterApplyTxs = procStats.AfterApplyTxs
 	result.AfterFinalize = procStats.AfterFinalize
+	result.ComputationCost = procStats.ComputationCost
 	return result, nil
 }
 
@@ -214,5 +217,14 @@ func (e *DefaultExecutor) buildResult(internalTxTraces []*vm.InternalTxTrace) *c
 		UsedGas:          e.usedGas,
 		Txs:              e.txs,
 		InternalTxTraces: internalTxTraces,
+	}
+}
+
+// startBlockAccessRecorder starts recording the block access list of a block the
+// node builds or executes, from the Amber hardfork, whose header commits its
+// hash. It must run before InitializeState.
+func startBlockAccessRecorder(config *params.ChainConfig, statedb *state.StateDB, header *types.Header) {
+	if config.IsAmberForkEnabled(header.Number) && !bal.Recording(statedb) {
+		bal.EnableRecorder(statedb)
 	}
 }
