@@ -45,6 +45,9 @@ var (
 	// whose list failed so they were executed in order
 	parallelBlockCounter  = metrics.NewRegisteredCounter("blockchain/block/parallel/counter", nil)
 	parallelFailedCounter = metrics.NewRegisteredCounter("blockchain/block/parallel/failed/counter", nil)
+	// proposals whose block access list hint would not rebuild their list, so
+	// they carry the whole list
+	accessListHintFallbackCounter = metrics.NewRegisteredCounter("blockchain/bal/hint/fallback/counter", nil)
 
 	txPoolPendingGauge = metrics.NewRegisteredGauge("tx/pool/pending/gauge", nil)
 	txPoolQueueGauge   = metrics.NewRegisteredGauge("tx/pool/queue/gauge", nil)

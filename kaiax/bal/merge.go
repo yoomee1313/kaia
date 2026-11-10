@@ -56,6 +56,44 @@ func (a AccountAccess) Before(k uint32) AccountAccess {
 	return out
 }
 
+// At returns the changes of the account made in phase k only. Reads and the
+// storage root are left out.
+func (a AccountAccess) At(k uint32) AccountAccess {
+	out := AccountAccess{Address: a.Address}
+	for _, w := range a.StorageWrites {
+		for _, c := range w.Changes {
+			if c.Index == k {
+				out.StorageWrites = append(out.StorageWrites, SlotWrites{Slot: w.Slot, Changes: []SlotChange{c}})
+			}
+		}
+	}
+	out.BalanceChanges = at(a.BalanceChanges, k)
+	out.NonceChanges = at(a.NonceChanges, k)
+	out.CodeChanges = at(a.CodeChanges, k)
+	out.AccountChanges = at(a.AccountChanges, k)
+	for _, i := range a.Deleted {
+		if i == k {
+			out.Deleted = append(out.Deleted, i)
+		}
+	}
+	for _, i := range a.StorageCleared {
+		if i == k {
+			out.StorageCleared = append(out.StorageCleared, i)
+		}
+	}
+	return out
+}
+
+func at[T indexed](list []T, k uint32) []T {
+	var out []T
+	for _, v := range list {
+		if v.index() == k {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 func before[T indexed](list []T, k uint32) []T {
 	var out []T
 	for _, v := range list {

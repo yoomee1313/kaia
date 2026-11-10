@@ -59,6 +59,11 @@ type fakeParallel struct {
 	provided map[common.Hash]*bal.BlockAccessList
 }
 
+// AccessListHint returns the list itself.
+func (p *fakeParallel) AccessListHint(_ *types.Block, list *bal.BlockAccessList) (*bal.BlockAccessList, error) {
+	return list, nil
+}
+
 func (p *fakeParallel) ExecuteWithAccessList(context.Context, *types.Block, *types.Header, *bal.BlockAccessList) (*blockchain.SpeculativeResult, error) {
 	p.calls++
 	return p.res, p.err

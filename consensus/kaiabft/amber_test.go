@@ -112,18 +112,21 @@ func TestCheckProposalAccessList(t *testing.T) {
 	require.NoError(t, check(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil)))
 	require.Error(t, check(amberConfig(), pp(block, []byte{0x01})), "not a list")
 
-	// The writes of the list are not the ones the header commits.
+	// A hint is not checked against the header: it leaves out what the
+	// validators predict, and they check their own list.
 	other, otherEnc := amberBlock(t, 10)
 	header := other.Header()
 	header.BlockAccessListHash = &common.Hash{9}
-	require.ErrorIs(t, check(amberConfig(), pp(types.NewBlockWithHeader(header), otherEnc)), errAccessListHashMismatch)
+	require.NoError(t, check(amberConfig(), pp(types.NewBlockWithHeader(header), otherEnc)))
 
-	// The entry limit: the list has 2 write entries; its read is not counted.
-	cfg := amberConfig()
-	cfg.AmberBlockAccessListEntryLimit = 2
-	require.NoError(t, check(cfg, pp(block, enc)))
-	cfg.AmberBlockAccessListEntryLimit = 1
-	require.ErrorIs(t, check(cfg, pp(block, enc)), blockchain.ErrBlockAccessListEntryLimit)
+	// The consensus limit of a hint counts reads and writes: 3 accounts and
+	// one read slot.
+	defer func(limit uint64) { accessListHintEntryLimit = limit }(accessListHintEntryLimit)
+	accessListHintEntryLimit = 4
+	require.NoError(t, check(amberConfig(), pp(block, enc)))
+	accessListHintEntryLimit = 3
+	require.ErrorIs(t, check(amberConfig(), pp(block, enc)), errAccessListHintEntryLimit)
+	accessListHintEntryLimit = uint64(params.DefaultAmberAccessListHintEntryLimit)
 
 	// The size limit of the block and the list together.
 	limit := uint64(params.MaxProposalSize - len(enc))
@@ -184,10 +187,9 @@ func TestCommitBeforeAmberDoesNotWait(t *testing.T) {
 	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
 }
 
-// A valid block whose PRE-PREPARE carries another BAL is not committed, the
-// node asks for a new round and keeps the lock; the block proposed again with
-// the BAL of the execution is committed without executing it again.
-func TestAmberAccessListMismatchKeepsLock(t *testing.T) {
+// A valid block whose PRE-PREPARE carries another hint than the one of this
+// node is committed: the hint says nothing about the block.
+func TestAmberAccessListHintMismatchCommits(t *testing.T) {
 	block, enc := amberBlock(t, 10)
 	wrong := append([]byte{}, enc...)
 	wrong[len(wrong)-1] ^= 1
@@ -198,14 +200,9 @@ func TestAmberAccessListMismatchKeepsLock(t *testing.T) {
 
 	m.trySendCommit()
 	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc})
-	requireCode(t, recvMessage(t, msgs), bft.MsgRoundChange)
-	expectNoMessage(t, msgs)
-	require.True(t, m.isHashLocked(), "the block is valid")
-	require.False(t, m.needsExecution(block.Hash()))
-
-	m.preprepare = &bft.Preprepare{View: m.currentView(), Proposal: block, AccessList: enc}
-	m.trySendCommit()
 	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
+	require.True(t, m.isHashLocked())
+	require.False(t, m.needsExecution(block.Hash()))
 }
 
 // A proposal found invalid by execution is not committed, releases the lock
