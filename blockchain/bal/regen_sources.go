@@ -144,7 +144,7 @@ func (r *regen) runFromGenesis() {
 		var list *access.BlockAccessList
 		if source == nil {
 			access.EnableRecorderAt(sdb, 0)
-			if _, _, _, _, _, err := r.c.bc.Processor().Process(block, sdb, r.c.vmConfig); err != nil {
+			if _, _, _, _, _, err := r.c.bc.Processor().Process(context.Background(), block, sdb, r.c.vmConfig); err != nil {
 				r.fail(fmt.Errorf("block %d: %w", n, err))
 				return
 			}

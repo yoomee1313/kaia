@@ -17,6 +17,7 @@
 package bal
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
@@ -235,7 +236,7 @@ func checkBAL(t *testing.T, chain *blockchain.BlockChain, blocks []*types.Block)
 			if record {
 				access.EnableRecorder(statedb)
 			}
-			receipts, _, usedGas, _, _, err := chain.Processor().Process(block, statedb, vm.Config{})
+			receipts, _, usedGas, _, _, err := chain.Processor().Process(context.Background(), block, statedb, vm.Config{})
 			require.NoError(t, err)
 			return receipts, usedGas, statedb.IntermediateRoot(true), statedb
 		}

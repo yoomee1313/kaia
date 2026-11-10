@@ -17,6 +17,7 @@
 package blockchain
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -97,7 +98,7 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, b
 		if h != nil {
 			h.Executing(statedb)
 		}
-		return bc.processor.Process(block, statedb, bc.vmConfig)
+		return bc.processor.Process(context.Background(), block, statedb, bc.vmConfig)
 	}
 	stats := ProcessStats{BeforeApplyTxs: time.Now()}
 	var check func(types.Receipts, uint64) error

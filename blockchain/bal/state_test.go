@@ -17,6 +17,7 @@
 package bal
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -85,7 +86,7 @@ func testBALStateAt(t *testing.T, hardfork string) {
 		parent := chain.GetHeaderByHash(block.ParentHash())
 		sdb, err := chain.StateAt(parent.Root)
 		require.NoError(t, err)
-		_, _, _, _, _, err = chain.Processor().Process(block, sdb, vm.Config{})
+		_, _, _, _, _, err = chain.Processor().Process(context.Background(), block, sdb, vm.Config{})
 		require.NoError(t, err)
 		require.Equal(t, block.Root(), sdb.IntermediateRoot(true), "block %d", block.NumberU64())
 	}
@@ -138,7 +139,7 @@ func testBALStateAt(t *testing.T, hardfork string) {
 	sdb, err := chain.StateAt(headers[4].Root)
 	require.NoError(t, err)
 	require.True(t, ReadOnly(sdb.Database()))
-	receipts, _, usedGas, _, _, err := chain.Processor().Process(blocks[4], sdb, vm.Config{})
+	receipts, _, usedGas, _, _, err := chain.Processor().Process(context.Background(), blocks[4], sdb, vm.Config{})
 	require.NoError(t, err)
 	require.Equal(t, blocks[4].GasUsed(), usedGas)
 	wantReceipts, err := rlp.EncodeToBytes(chain.GetReceiptsByBlockHash(blocks[4].Hash()))

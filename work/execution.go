@@ -21,6 +21,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -166,6 +167,14 @@ func (e *DefaultExecutor) ProcessBlock(ctx context.Context, txs []*types.Transac
 	// which rewrites TxHash/ReceiptHash). This ensures block.Hash() matches
 	// the proposed block's hash for correct SetTxContext behavior inside Process.
 	block := types.NewBlockWithHeader(e.header).WithBody(txs)
+
+	// Record the block access list as InsertChain does, so that a block whose
+	// speculative result is reused by InsertChain still gets its list.
+	if c, ok := e.chain.(interface{ BALHooks() blockchain.BALHooks }); ok {
+		if h := c.BALHooks(); h != nil {
+			h.Executing(e.state)
+		}
+	}
 
 	// Delegate to Process() — the same function InsertChain uses.
 	receipts, logs, usedGas, internalTxTraces, procStats, err := e.chain.Processor().Process(ctx, block, e.state, e.vmConfig)
