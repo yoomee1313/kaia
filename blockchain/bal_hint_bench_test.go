@@ -23,6 +23,7 @@ import (
 
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +34,8 @@ import (
 // list), the time a validator takes to rebuild the list before it executes the
 // block, with the senders of the txs cached or recovered again, the time the
 // proposer takes to make the hints of its fragments, and the parallel
-// execution with the hint against the one with the whole list:
+// execution with the hint against the one with the whole list and against
+// executing the block in order:
 //
 //	go test ./blockchain -run '^$' -bench BenchmarkAccessListHint -benchtime 5x
 func BenchmarkAccessListHint(b *testing.B) {
@@ -65,6 +67,18 @@ func BenchmarkAccessListHint(b *testing.B) {
 				b.ReportMetric(float64(len(listEnc)), "list-B")
 				b.ReportMetric(float64(len(hintEnc)), "hint-B")
 			}
+			// Executing in order, as a validator does without a list: with the
+			// recorder an Amber block needs, and without one.
+			b.Run("in-order", func(b *testing.B) { benchInOrder(b, bb) })
+			b.Run("in-order-no-bal", func(b *testing.B) {
+				for b.Loop() {
+					sdb, err := bb.chain.StateAt(bb.parent.Root)
+					require.NoError(b, err)
+					_, _, _, _, _, err = bb.chain.Processor().Process(context.Background(), bb.block, sdb, vm.Config{})
+					require.NoError(b, err)
+					require.Equal(b, bb.block.Root(), sdb.IntermediateRoot(true))
+				}
+			})
 			b.Run("hint", func(b *testing.B) {
 				for b.Loop() {
 					_, err := bb.chain.AccessListHint(bb.block, bb.list)
