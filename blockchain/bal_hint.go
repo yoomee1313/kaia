@@ -20,16 +20,22 @@ import (
 	"bytes"
 	"errors"
 	"math/big"
+	"runtime"
 	"slices"
 	"sort"
+	"sync"
+	"sync/atomic"
 
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/types/account"
+	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/rlp"
 )
 
 // The block access list hint of an Amber proposal.
@@ -90,23 +96,57 @@ func newHintPredictor(config *params.ChainConfig, header *types.Header) *hintPre
 	return p
 }
 
+// predictable reports whether predict may predict the tx, by its type only.
+func predictable(tx *types.Transaction) bool {
+	switch tx.Type() {
+	case types.TxTypeLegacyTransaction:
+		return len(tx.Data()) == 0 && tx.To() != nil
+	case types.TxTypeValueTransfer, types.TxTypeValueTransferMemo,
+		types.TxTypeFeeDelegatedValueTransfer, types.TxTypeFeeDelegatedValueTransferMemo:
+		return true
+	}
+	return false
+}
+
+// recoverSigners recovers in parallel the signers of the txs a prediction
+// validates, which the txs cache, so that the phases, which run in order, do
+// not recover them one by one.
+func (p *hintPredictor) recoverSigners(txs types.Transactions) {
+	var (
+		wg   sync.WaitGroup
+		next atomic.Int64
+	)
+	for range runtime.GOMAXPROCS(0) {
+		wg.Go(func() {
+			for i := int(next.Add(1) - 1); i < len(txs); i = int(next.Add(1) - 1) {
+				tx := txs[i]
+				if !predictable(tx) {
+					continue
+				}
+				if tx.IsEthereumTransaction() {
+					types.Sender(p.signer, tx)
+					continue
+				}
+				types.SenderPubkey(p.signer, tx)
+				if tx.IsFeeDelegatedTransaction() {
+					types.SenderFeePayerPubkey(p.signer, tx)
+				}
+			}
+		})
+	}
+	wg.Wait()
+}
+
 // predict returns the changes of a tx on s, the state at the start of its
-// phase, and the accounts it reads, or nothing if the tx runs EVM code or its
+// phase (see phaseView), and the accounts it reads, or nothing if the tx runs EVM code or its
 // effect is not known without running it. It mirrors StateTransition for a
 // value transfer: the fee of the gas used, which is the intrinsic gas with the
 // signature validation gas and the floor data gas, is paid by the sender or the
 // fee payer, the value goes from the sender to the recipient, the sender nonce
 // is incremented and the fee is credited to the rewardbase, half of it burnt
 // from the Permissionless hardfork.
-func (p *hintPredictor) predict(tx *types.Transaction, s *state.StateDB) (map[common.Address]*predictedAccount, []common.Address) {
-	switch tx.Type() {
-	case types.TxTypeLegacyTransaction:
-		if len(tx.Data()) != 0 {
-			return nil, nil
-		}
-	case types.TxTypeValueTransfer, types.TxTypeValueTransferMemo,
-		types.TxTypeFeeDelegatedValueTransfer, types.TxTypeFeeDelegatedValueTransferMemo:
-	default:
+func (p *hintPredictor) predict(tx *types.Transaction, s predictState) (map[common.Address]*predictedAccount, []common.Address) {
+	if !predictable(tx) {
 		return nil, nil
 	}
 	if !p.rules.IsMagma || p.header.BaseFee == nil {
@@ -189,35 +229,33 @@ func (p *hintPredictor) predict(tx *types.Transaction, s *state.StateDB) (map[co
 	return out, reads
 }
 
-// hintList is a block access list being edited: accounts by address and the
-// accounts that change in each phase.
+// predictState is the state a prediction reads, at the start of a phase.
+type predictState interface {
+	types.AccountKeyPicker
+	Empty(addr common.Address) bool
+	GetCodeHash(addr common.Address) common.Hash
+	GetBalance(addr common.Address) *big.Int
+	GetNonce(addr common.Address) uint64
+}
+
+// hintList is a block access list by account, which rebuildAccessList adds
+// predicted changes to.
 type hintList struct {
 	accounts map[common.Address]*access.AccountAccess
-	phases   map[uint32]map[common.Address]struct{}
 }
 
-func newHintList(list *access.BlockAccessList) *hintList {
-	h := &hintList{
-		accounts: make(map[common.Address]*access.AccountAccess, len(list.Accounts)),
-		phases:   make(map[uint32]map[common.Address]struct{}),
-	}
+// newHintList indexes list by account. With copied set the accounts are
+// copies, to be changed; otherwise they are the ones of list, to be read.
+func newHintList(list *access.BlockAccessList, copied bool) *hintList {
+	h := &hintList{accounts: make(map[common.Address]*access.AccountAccess, len(list.Accounts))}
 	for i := range list.Accounts {
-		a := copyAccountAccess(&list.Accounts[i])
-		h.accounts[a.Address] = a
-		for _, k := range changeIndices(a) {
-			h.mark(k, a.Address)
+		a := &list.Accounts[i]
+		if copied {
+			a = copyAccountAccess(a)
 		}
+		h.accounts[a.Address] = a
 	}
 	return h
-}
-
-func (h *hintList) mark(k uint32, addr common.Address) {
-	m := h.phases[k]
-	if m == nil {
-		m = make(map[common.Address]struct{})
-		h.phases[k] = m
-	}
-	m[addr] = struct{}{}
 }
 
 func (h *hintList) account(addr common.Address) *access.AccountAccess {
@@ -229,13 +267,117 @@ func (h *hintList) account(addr common.Address) *access.AccountAccess {
 	return a
 }
 
-// apply writes the changes of phase k to s, which holds the start of phase k.
-func (h *hintList) apply(s *state.StateDB, k uint32) error {
-	var phase access.BlockAccessList
-	for addr := range h.phases[k] {
-		phase.Accounts = append(phase.Accounts, h.accounts[addr].At(k))
+// phaseView reads the state at the start of phase k of a block: an account
+// as the last of its changes before k in the list leaves it, or as the parent
+// state has it if none. It changes neither, so the phases of a block are
+// predicted without applying the list to a state.
+type phaseView struct {
+	base *state.StateDB
+	h    *hintList
+	k    uint32
+}
+
+func (v *phaseView) before(addr common.Address) *state.OverlayAccount {
+	a := v.h.accounts[addr]
+	if a == nil {
+		return nil
 	}
-	return access.ApplyPhase(s, &phase, int(k))
+	return access.AccountBefore(a, v.k)
+}
+
+// record decodes the whole account record of o, nil if it has none or it does
+// not decode.
+func (v *phaseView) record(o *state.OverlayAccount) account.Account {
+	if o == nil || o.Record == nil {
+		return nil
+	}
+	ser := account.NewAccountSerializer()
+	if err := rlp.DecodeBytes(o.Record, ser); err != nil {
+		return nil
+	}
+	return ser.GetAccount()
+}
+
+func (v *phaseView) Exist(addr common.Address) bool {
+	o := v.before(addr)
+	switch {
+	case o == nil:
+		return v.base.Exist(addr)
+	case o.Deleted:
+		return false
+	case o.Record != nil:
+		return true
+	}
+	return v.base.Exist(addr)
+}
+
+func (v *phaseView) GetBalance(addr common.Address) *big.Int {
+	o := v.before(addr)
+	switch {
+	case o == nil:
+		return v.base.GetBalance(addr)
+	case o.Deleted:
+		return new(big.Int)
+	case o.Balance != nil:
+		return o.Balance
+	}
+	if acc := v.record(o); acc != nil {
+		return acc.GetBalance()
+	}
+	return v.base.GetBalance(addr)
+}
+
+func (v *phaseView) GetNonce(addr common.Address) uint64 {
+	o := v.before(addr)
+	switch {
+	case o == nil:
+		return v.base.GetNonce(addr)
+	case o.Deleted:
+		return 0
+	case o.Nonce != nil:
+		return *o.Nonce
+	}
+	if acc := v.record(o); acc != nil {
+		return acc.GetNonce()
+	}
+	return v.base.GetNonce(addr)
+}
+
+func (v *phaseView) GetCodeHash(addr common.Address) common.Hash {
+	o := v.before(addr)
+	switch {
+	case o == nil:
+		return v.base.GetCodeHash(addr)
+	case o.Deleted:
+		return emptyCodeHashBytes
+	case o.HasCode:
+		return crypto.Keccak256Hash(o.Code)
+	}
+	if acc := v.record(o); acc != nil {
+		if pa := account.GetProgramAccount(acc); pa != nil {
+			return common.BytesToHash(pa.GetCodeHash())
+		}
+		return emptyCodeHashBytes
+	}
+	return v.base.GetCodeHash(addr)
+}
+
+func (v *phaseView) GetKey(addr common.Address) accountkey.AccountKey {
+	o := v.before(addr)
+	if o != nil && o.Deleted {
+		return accountkey.NewAccountKeyLegacy()
+	}
+	if acc := v.record(o); acc != nil {
+		if ak := account.GetAccountWithKey(acc); ak != nil {
+			return ak.GetKey()
+		}
+		return accountkey.NewAccountKeyLegacy()
+	}
+	return v.base.GetKey(addr)
+}
+
+func (v *phaseView) Empty(addr common.Address) bool {
+	return !v.Exist(addr) || (v.GetBalance(addr).Sign() == 0 && v.GetNonce(addr) == 0 && v.GetCodeHash(addr) == emptyCodeHashBytes)
 }
 
 func (h *hintList) list() *access.BlockAccessList {
@@ -260,31 +402,6 @@ func copyAccountAccess(a *access.AccountAccess) *access.AccountAccess {
 	return &c
 }
 
-func changeIndices(a *access.AccountAccess) []uint32 {
-	var ks []uint32
-	for _, w := range a.StorageWrites {
-		for _, c := range w.Changes {
-			ks = append(ks, c.Index)
-		}
-	}
-	for _, c := range a.BalanceChanges {
-		ks = append(ks, c.Index)
-	}
-	for _, c := range a.NonceChanges {
-		ks = append(ks, c.Index)
-	}
-	for _, c := range a.CodeChanges {
-		ks = append(ks, c.Index)
-	}
-	for _, c := range a.AccountChanges {
-		ks = append(ks, c.Index)
-	}
-	ks = append(ks, a.Deleted...)
-	ks = append(ks, a.StorageCleared...)
-	slices.Sort(ks)
-	return slices.Compact(ks)
-}
-
 func balanceAt(a *access.AccountAccess, k uint32) (int, bool) {
 	i := sort.Search(len(a.BalanceChanges), func(i int) bool { return a.BalanceChanges[i].Index >= k })
 	return i, i < len(a.BalanceChanges) && a.BalanceChanges[i].Index == k
@@ -304,11 +421,9 @@ func isEmptyAccess(a *access.AccountAccess) bool {
 // stripAccessList returns the hint of list: list without the changes and the
 // reads the prediction gets right. s is the parent state of the block.
 func stripAccessList(config *params.ChainConfig, block *types.Block, s *state.StateDB, list *access.BlockAccessList) (*access.BlockAccessList, error) {
-	h := newHintList(list)
+	h := newHintList(list, false)
 	p := newHintPredictor(config, block.Header())
-	if err := h.apply(s, 0); err != nil {
-		return nil, err
-	}
+	v := &phaseView{base: s, h: h}
 	type key struct {
 		addr  common.Address
 		nonce bool
@@ -318,7 +433,8 @@ func stripAccessList(config *params.ChainConfig, block *types.Block, s *state.St
 	predictedReads := make(map[common.Address]struct{})
 	for i, tx := range block.Transactions() {
 		k := uint32(i + 1)
-		preds, reads := p.predict(tx, s)
+		v.k = k
+		preds, reads := p.predict(tx, v)
 		for addr, pa := range preds {
 			a := h.accounts[addr]
 			if a == nil {
@@ -334,26 +450,23 @@ func stripAccessList(config *params.ChainConfig, block *types.Block, s *state.St
 		for _, addr := range reads {
 			predictedReads[addr] = struct{}{}
 		}
-		if err := h.apply(s, k); err != nil {
-			return nil, err
-		}
 	}
 
 	hint := &access.BlockAccessList{Accounts: make([]access.AccountAccess, 0, len(list.Accounts))}
 	for i := range list.Accounts {
-		a := copyAccountAccess(&list.Accounts[i])
-		a.BalanceChanges = slices.DeleteFunc(a.BalanceChanges, func(c access.BalanceChange) bool {
+		a := list.Accounts[i]
+		a.BalanceChanges = slices.DeleteFunc(slices.Clone(a.BalanceChanges), func(c access.BalanceChange) bool {
 			_, ok := strip[key{a.Address, false, c.Index}]
 			return ok
 		})
-		a.NonceChanges = slices.DeleteFunc(a.NonceChanges, func(c access.NonceChange) bool {
+		a.NonceChanges = slices.DeleteFunc(slices.Clone(a.NonceChanges), func(c access.NonceChange) bool {
 			_, ok := strip[key{a.Address, true, c.Index}]
 			return ok
 		})
-		if _, read := predictedReads[a.Address]; read && isEmptyAccess(a) {
+		if _, read := predictedReads[a.Address]; read && isEmptyAccess(&a) {
 			continue
 		}
-		hint.Accounts = append(hint.Accounts, *a)
+		hint.Accounts = append(hint.Accounts, a)
 	}
 	return hint, nil
 }
@@ -362,34 +475,38 @@ func stripAccessList(config *params.ChainConfig, block *types.Block, s *state.St
 // changes and the reads the prediction gives where the hint has none. s is the
 // parent state of the block.
 func rebuildAccessList(config *params.ChainConfig, block *types.Block, s *state.StateDB, hint *access.BlockAccessList) (*access.BlockAccessList, error) {
-	h := newHintList(hint)
+	h := newHintList(hint, true)
 	p := newHintPredictor(config, block.Header())
-	if err := h.apply(s, 0); err != nil {
-		return nil, err
-	}
+	p.recoverSigners(block.Transactions())
+	v := &phaseView{base: s, h: h}
 	for i, tx := range block.Transactions() {
 		k := uint32(i + 1)
-		preds, reads := p.predict(tx, s)
+		v.k = k
+		preds, reads := p.predict(tx, v)
 		for addr, pa := range preds {
+			// The values before the change: a change of phase k is not seen at k.
+			var preBalance *big.Int
+			var preNonce uint64
+			if pa.balance != nil {
+				preBalance = v.GetBalance(addr)
+			}
+			if pa.nonce != nil {
+				preNonce = v.GetNonce(addr)
+			}
 			a := h.account(addr)
 			if pa.balance != nil {
-				if j, ok := balanceAt(a, k); !ok && pa.balance.Cmp(s.GetBalance(addr)) != 0 {
+				if j, ok := balanceAt(a, k); !ok && pa.balance.Cmp(preBalance) != 0 {
 					a.BalanceChanges = slices.Insert(a.BalanceChanges, j, access.BalanceChange{Index: k, Balance: pa.balance})
-					h.mark(k, addr)
 				}
 			}
 			if pa.nonce != nil {
-				if j, ok := nonceAt(a, k); !ok && *pa.nonce != s.GetNonce(addr) {
+				if j, ok := nonceAt(a, k); !ok && *pa.nonce != preNonce {
 					a.NonceChanges = slices.Insert(a.NonceChanges, j, access.NonceChange{Index: k, Nonce: *pa.nonce})
-					h.mark(k, addr)
 				}
 			}
 		}
 		for _, addr := range reads {
 			h.account(addr)
-		}
-		if err := h.apply(s, k); err != nil {
-			return nil, err
 		}
 	}
 	return h.list(), nil
@@ -447,8 +564,8 @@ func (bc *BlockChain) RebuildAccessList(block *types.Block, parent *types.Header
 // with.
 type FragmentHinter struct {
 	p    *hintPredictor
-	s    *state.StateDB
-	done int // phases already given, from 0: InitializeState
+	s    *state.StateDB // the parent state, read only
+	done int            // phases already given, from 0: InitializeState
 	sent map[common.Address]map[common.Hash]struct{}
 }
 
@@ -475,7 +592,8 @@ func (bc *BlockChain) NewFragmentHinter(header *types.Header) (*FragmentHinter, 
 // the block access list recorded so far, and txs, every tx applied so far. The
 // first call gives InitializeState too.
 func (f *FragmentHinter) Next(list *access.BlockAccessList, txs []*types.Transaction) (*access.BlockAccessList, error) {
-	h := newHintList(list)
+	h := newHintList(list, false)
+	v := &phaseView{base: f.s, h: h}
 	from := uint32(f.done + 1)
 	type key struct {
 		addr  common.Address
@@ -484,27 +602,23 @@ func (f *FragmentHinter) Next(list *access.BlockAccessList, txs []*types.Transac
 	}
 	strip := make(map[key]struct{})
 	predictedReads := make(map[common.Address]struct{})
-	for k := f.done + 1; k <= len(txs); k++ {
-		if k > 0 {
-			preds, reads := f.p.predict(txs[k-1], f.s)
-			for addr, pa := range preds {
-				a := h.accounts[addr]
-				if a == nil {
-					continue
-				}
-				if j, ok := balanceAt(a, uint32(k)); ok && pa.balance != nil && a.BalanceChanges[j].Balance.Cmp(pa.balance) == 0 {
-					strip[key{addr, false, uint32(k)}] = struct{}{}
-				}
-				if j, ok := nonceAt(a, uint32(k)); ok && pa.nonce != nil && a.NonceChanges[j].Nonce == *pa.nonce {
-					strip[key{addr, true, uint32(k)}] = struct{}{}
-				}
+	for k := max(f.done+1, 1); k <= len(txs); k++ {
+		v.k = uint32(k)
+		preds, reads := f.p.predict(txs[k-1], v)
+		for addr, pa := range preds {
+			a := h.accounts[addr]
+			if a == nil {
+				continue
 			}
-			for _, addr := range reads {
-				predictedReads[addr] = struct{}{}
+			if j, ok := balanceAt(a, uint32(k)); ok && pa.balance != nil && a.BalanceChanges[j].Balance.Cmp(pa.balance) == 0 {
+				strip[key{addr, false, uint32(k)}] = struct{}{}
+			}
+			if j, ok := nonceAt(a, uint32(k)); ok && pa.nonce != nil && a.NonceChanges[j].Nonce == *pa.nonce {
+				strip[key{addr, true, uint32(k)}] = struct{}{}
 			}
 		}
-		if err := h.apply(f.s, uint32(k)); err != nil {
-			return nil, err
+		for _, addr := range reads {
+			predictedReads[addr] = struct{}{}
 		}
 	}
 	to := uint32(len(txs))

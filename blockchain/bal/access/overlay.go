@@ -40,20 +40,6 @@ func ApplyBefore(s *state.StateDB, list *BlockAccessList, k int) error {
 	return nil
 }
 
-// ApplyPhase writes the changes of phase k of a block access list to a state
-// that holds the start of the phase, which gives the start of phase k+1, and
-// finalises them like the end of a tx.
-func ApplyPhase(s *state.StateDB, list *BlockAccessList, k int) error {
-	for i := range list.Accounts {
-		a := list.Accounts[i].At(uint32(k))
-		if err := applyAccountAccess(s, &a); err != nil {
-			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
-		}
-	}
-	s.Finalise(true, false)
-	return nil
-}
-
 // Index holds the accounts of a block access list by address, for UseBefore.
 // It is read only, so the phases of a block share it.
 type Index map[common.Address]*indexedAccount
@@ -109,7 +95,39 @@ func (o overlay) Account(addr common.Address) *state.OverlayAccount {
 	if ia == nil {
 		return nil
 	}
-	a, k := ia.access, o.k
+	return accountBefore(ia.access, o.k, func() (uint32, bool) {
+		n := countBefore(len(ia.storageWrites), func(i int) uint32 { return ia.storageWrites[i] }, o.k)
+		if n == 0 {
+			return 0, false
+		}
+		return ia.storageWrites[n-1], true
+	})
+}
+
+// AccountBefore returns the account at the start of phase k relative to the
+// parent state, from its changes alone, as a state given the list with
+// UseBefore sees it; nil if no change of the account is before k. It finds the
+// changes by binary search.
+func AccountBefore(a *AccountAccess, k uint32) *state.OverlayAccount {
+	return accountBefore(a, k, func() (uint32, bool) {
+		var (
+			last    uint32
+			written bool
+		)
+		for _, w := range a.StorageWrites {
+			if n := countBefore(len(w.Changes), func(i int) uint32 { return w.Changes[i].Index }, k); n > 0 {
+				if idx := w.Changes[n-1].Index; !written || idx > last {
+					last, written = idx, true
+				}
+			}
+		}
+		return last, written
+	})
+}
+
+// accountBefore is AccountBefore given the last phase below k that wrote a
+// slot of the account.
+func accountBefore(a *AccountAccess, k uint32, lastSlotWrite func() (uint32, bool)) *state.OverlayAccount {
 	var (
 		balances = a.BalanceChanges[:countBefore(len(a.BalanceChanges), func(i int) uint32 { return a.BalanceChanges[i].Index }, k)]
 		nonces   = a.NonceChanges[:countBefore(len(a.NonceChanges), func(i int) uint32 { return a.NonceChanges[i].Index }, k)]
@@ -117,9 +135,9 @@ func (o overlay) Account(addr common.Address) *state.OverlayAccount {
 		records  = a.AccountChanges[:countBefore(len(a.AccountChanges), func(i int) uint32 { return a.AccountChanges[i].Index }, k)]
 		deleted  = a.Deleted[:countBefore(len(a.Deleted), func(i int) uint32 { return a.Deleted[i] }, k)]
 		cleared  = a.StorageCleared[:countBefore(len(a.StorageCleared), func(i int) uint32 { return a.StorageCleared[i] }, k)]
-		slotsAt  = ia.storageWrites[:countBefore(len(ia.storageWrites), func(i int) uint32 { return ia.storageWrites[i] }, k)]
 	)
-	if len(balances)+len(nonces)+len(codes)+len(records)+len(deleted)+len(cleared)+len(slotsAt) == 0 {
+	slotWrite, slotsWritten := lastSlotWrite()
+	if len(balances)+len(nonces)+len(codes)+len(records)+len(deleted)+len(cleared) == 0 && !slotsWritten {
 		return nil
 	}
 
@@ -137,7 +155,9 @@ func (o overlay) Account(addr common.Address) *state.OverlayAccount {
 	note(len(nonces), func(i int) uint32 { return nonces[i].Index })
 	note(len(codes), func(i int) uint32 { return codes[i].Index })
 	note(len(records), func(i int) uint32 { return records[i].Index })
-	note(len(slotsAt), func(i int) uint32 { return slotsAt[i] })
+	if slotsWritten {
+		note(1, func(int) uint32 { return slotWrite })
+	}
 	out := &state.OverlayAccount{}
 	var from uint32
 	if n := len(deleted); n > 0 {
@@ -163,7 +183,7 @@ func (o overlay) Account(addr common.Address) *state.OverlayAccount {
 	if n := len(codes); n > 0 && codes[n-1].Index >= from {
 		out.Code, out.HasCode = codes[n-1].Code, true
 	}
-	if n := len(slotsAt); n > 0 && slotsAt[n-1] >= from {
+	if slotsWritten && slotWrite >= from {
 		out.Slot = slotValue(a, k, from)
 	}
 	return out
