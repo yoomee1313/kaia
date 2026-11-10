@@ -2878,6 +2878,42 @@ func (bc *BlockChain) ValidateProposalExecution(block *types.Block) error {
 	return nil
 }
 
+// ErrProposalExecutionLocal wraps a failure of this node to execute a proposal:
+// the parent or its state is missing, or the state could not be read. It says
+// nothing about the proposal.
+var ErrProposalExecutionLocal = errors.New("proposal execution failed on this node")
+
+// ExecuteProposal executes a consensus proposal on its parent state and
+// validates the resulting state without importing it. Unlike
+// ValidateProposalExecution it records no bad block: a proposal is not
+// committed yet, so the consensus engine only refuses it for its height. A
+// failure of this node is returned wrapped in ErrProposalExecutionLocal.
+func (bc *BlockChain) ExecuteProposal(block *types.Block) error {
+	bc.wg.Add(1)
+	defer bc.wg.Done()
+
+	parent := bc.GetBlock(block.ParentHash(), block.NumberU64()-1)
+	if parent == nil {
+		return fmt.Errorf("%w: %w", ErrProposalExecutionLocal, consensus.ErrUnknownAncestor)
+	}
+	stateDB, err := bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrProposalExecutionLocal, err)
+	}
+	receipts, _, usedGas, _, _, err := bc.processor.Process(context.Background(), block, stateDB, bc.vmConfig)
+	if err == nil {
+		err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
+	}
+	if err == nil {
+		return nil
+	}
+	if dbErr := stateDB.Error(); dbErr != nil || errors.Is(err, ErrInitializeState) {
+		return fmt.Errorf("%w: %w (state access: %v)", ErrProposalExecutionLocal, err, dbErr)
+	}
+	logger.Warn("Proposal is invalid by execution", "number", block.Number(), "hash", block.Hash(), "err", err)
+	return err
+}
+
 // reportExecutionFailure reports a block whose execution or resulting state
 // failed validation. The block is recorded as a bad proposal only if the state
 // was read without error: StateDB keeps a read failure in Error() and returns
@@ -2919,12 +2955,6 @@ func (bc *BlockChain) reportBlock(block *types.Block, receipts types.Receipts, e
 // paired a correctly sealed header with another body, so it says nothing about
 // the block that hash names; recording it would make the consensus engine
 // refuse a block that a quorum prepared.
-// ReportBadBlock records block as a bad block, which this node found invalid
-// without inserting it, such as a proposal by its execution.
-func (bc *BlockChain) ReportBadBlock(block *types.Block, receipts types.Receipts, err error) {
-	bc.reportBlock(block, receipts, err)
-}
-
 func (bc *BlockChain) logBadBlock(block *types.Block, receipts types.Receipts, err error) {
 	badBlockCounter.Inc(1)
 

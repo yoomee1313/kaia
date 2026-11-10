@@ -29,6 +29,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/bft"
 	"github.com/kaiachain/kaia/params"
+	"github.com/rcrowley/go-metrics"
 )
 
 // From the Amber hardfork a PRE-PREPARE carries the block access list (BAL)
@@ -44,6 +45,11 @@ var (
 	errUnexpectedAccessList   = errors.New("block access list before the Amber hardfork")
 	errAccessListHashMismatch = errors.New("block access list hash mismatch")
 	errRejectedProposal       = errors.New("proposal found invalid by execution")
+
+	// invalidProposalCounter counts the proposals this node refused for their
+	// sequence after executing them, which consensus no longer records as
+	// bad blocks.
+	invalidProposalCounter = metrics.NewRegisteredCounter("consensus/kaiabft/proposal/invalid", nil)
 )
 
 // execResultEvent is the outcome of the speculative execution of an Amber
@@ -151,12 +157,24 @@ func encodeAccessList(statedb *state.StateDB) ([]byte, error) {
 // Machine side
 // ---------------------------------------------------------------------------
 
-// isRejected reports whether this node found the proposal invalid by
-// executing it in this sequence. Such a proposal is never committed or kept
-// locked; the backend also records it as a bad block.
-func (m *machine) isRejected(hash common.Hash) bool {
-	_, ok := m.rejected[hash]
-	return ok
+// isInvalidProposal reports whether this node found the proposal invalid by
+// executing it in this sequence, or found the block invalid on import, which
+// records a bad block. Such a proposal is never committed, voted for or kept
+// locked. A proposal is refused for its sequence only: consensus records no
+// bad block, as the proposal is not committed.
+func (m *machine) isInvalidProposal(hash common.Hash) bool {
+	if _, ok := m.invalid[hash]; ok {
+		return true
+	}
+	return m.b.hasBadProposal(hash)
+}
+
+// markInvalid refuses a proposal for this sequence for the given reason.
+func (m *machine) markInvalid(hash common.Hash, err error) {
+	if _, ok := m.invalid[hash]; !ok {
+		invalidProposalCounter.Inc(1)
+	}
+	m.invalid[hash] = err
 }
 
 // trySendCommit sends the COMMIT of the accepted proposal. From Amber it waits
@@ -191,7 +209,7 @@ func (m *machine) handleExecResult(ev execResultEvent) {
 	current := m.preprepare != nil && m.preprepare.Proposal.Hash() == ev.Hash
 	if ev.Err != nil {
 		logger.Warn("Proposal is invalid by execution", "number", ev.Number, "hash", ev.Hash, "err", ev.Err)
-		m.rejected[ev.Hash] = struct{}{}
+		m.markInvalid(ev.Hash, ev.Err)
 		m.reproposal = nil
 		if current {
 			m.commitPending = false
@@ -254,5 +272,5 @@ func (m *machine) needsExecution(hash common.Hash) bool {
 		return false
 	}
 	_, ok := m.verified[hash]
-	return !ok && !m.isRejected(hash)
+	return !ok && !m.isInvalidProposal(hash)
 }

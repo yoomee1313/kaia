@@ -51,17 +51,12 @@ func (c *specChain) PrunableStateAt(root common.Hash, _ uint64) (*state.StateDB,
 func (c *specChain) TxLookup() func(common.Hash) *types.Transaction { return nil }
 
 // fakeParallel returns a given outcome for the parallel execution, and keeps
-// the bad blocks reported to the chain.
+// the outcome the machine gets.
 type fakeParallel struct {
 	res      *blockchain.SpeculativeResult
 	err      error
 	calls    int
 	provided map[common.Hash]*access.BlockAccessList
-	bad      []error
-}
-
-func (p *fakeParallel) ReportBadBlock(_ *types.Block, _ types.Receipts, err error) {
-	p.bad = append(p.bad, err)
 }
 
 func (p *fakeParallel) ExecuteWithAccessList(context.Context, *types.Block, *types.Header, *access.BlockAccessList) (*blockchain.SpeculativeResult, error) {
@@ -99,7 +94,6 @@ func newSpecBackend(t *testing.T, cfg *params.ChainConfig, block *types.Block, p
 	b, _ := newTestBackend(t, chain)
 	b.specCache = blockchain.NewSpeculativeResultCache()
 	b.parallel = parallel
-	b.badBlocks = parallel
 	return b
 }
 
@@ -146,7 +140,6 @@ func TestSpeculativeExecutionWithAccessList(t *testing.T) {
 		require.Equal(t, 1, parallel.calls)
 		require.NoError(t, ev.Err)
 		require.Equal(t, enc, ev.AccessList)
-		require.Empty(t, parallel.bad)
 	})
 
 	t.Run("parallel failure runs in order", func(t *testing.T) {
@@ -155,7 +148,6 @@ func TestSpeculativeExecutionWithAccessList(t *testing.T) {
 		require.Equal(t, 1, parallel.calls)
 		require.EqualError(t, ev.Err, "invalid tx")
 		require.False(t, ev.Local)
-		require.Equal(t, []error{ev.Err}, parallel.bad, "invalid in order: a bad block")
 	})
 
 	t.Run("invalid parallel result runs in order", func(t *testing.T) {
@@ -165,7 +157,6 @@ func TestSpeculativeExecutionWithAccessList(t *testing.T) {
 		ev := runSpeculative(t, cfg, block, list, parallel, inOrderFails)
 		require.Equal(t, 1, parallel.calls)
 		require.EqualError(t, ev.Err, "invalid tx")
-		require.Len(t, parallel.bad, 1, "only the in-order verdict is recorded")
 	})
 
 	t.Run("in-order result over a limit", func(t *testing.T) {
@@ -178,7 +169,6 @@ func TestSpeculativeExecutionWithAccessList(t *testing.T) {
 		})
 		require.ErrorIs(t, ev.Err, blockchain.ErrBlockComputationCostLimit)
 		require.False(t, ev.Local)
-		require.Equal(t, []error{ev.Err}, parallel.bad)
 	})
 
 	t.Run("local failure in order is not a rejection", func(t *testing.T) {
@@ -188,7 +178,6 @@ func TestSpeculativeExecutionWithAccessList(t *testing.T) {
 		})
 		require.Error(t, ev.Err)
 		require.True(t, ev.Local)
-		require.Empty(t, parallel.bad, "a local failure is not a bad block")
 	})
 
 	t.Run("no list runs in order", func(t *testing.T) {
@@ -219,7 +208,6 @@ func TestSpeculativeExecutionRetriesAfterLocalFailure(t *testing.T) {
 	require.NoError(t, err)
 	ev := runSpeculativeOn(t, b, block, nil, inOrder(unrecorded))
 	require.True(t, ev.Local)
-	require.Empty(t, parallel.bad)
 	require.False(t, b.specCache.HasUsable(block.Hash()))
 	require.Nil(t, b.specCache.TryGet(block.Hash(), 0))
 

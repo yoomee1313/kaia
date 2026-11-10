@@ -456,7 +456,8 @@ func TestRecoveryRoundZeroPreprepareRejectsJustification(t *testing.T) {
 
 // A locked node that refuses a proposal below the highest claim first executes
 // its lock once. A lock that fails execution is released, and the proposal is
-// accepted as it would be by a node without a lock.
+// accepted as it would be by a node without a lock. The failed lock is refused
+// for the height without a bad block record.
 func TestRecoveryLockedNodeExecutesLockBeforeRefusing(t *testing.T) {
 	for _, bad := range []bool{false, true} {
 		synctest.Test(t, func(t *testing.T) {
@@ -473,6 +474,9 @@ func TestRecoveryLockedNodeExecutesLockBeforeRefusing(t *testing.T) {
 				require.NoError(t, err)
 				require.False(t, c.m.isHashLocked())
 				require.Equal(t, statePreprepared, c.m.state)
+				// Refused for the height in memory; consensus records no bad block.
+				require.Contains(t, c.m.invalid, x.Hash())
+				require.False(t, c.chain.HasBadBlock(x.Hash()))
 				return
 			}
 			require.ErrorIs(t, err, bft.ErrInvalidMessage)

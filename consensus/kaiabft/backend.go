@@ -150,7 +150,6 @@ type backend struct {
 	specCache  *blockchain.SpeculativeResultCache
 	validator  blockchain.Validator // checks a speculative result from Amber
 	parallel   accessListExecutor   // executes an Amber proposal with its BAL
-	badBlocks  badBlockReporter     // records an Amber proposal invalid by execution
 	specHash   common.Hash          // proposal of the in-flight execution
 	specCancel context.CancelFunc
 	specWg     sync.WaitGroup
@@ -197,7 +196,6 @@ func (b *backend) Start(chain consensus.ChainReader, executor consensus.Executor
 		b.specCache = bc.SpeculativeCache()
 		b.validator = bc.Validator()
 		b.parallel = bc
-		b.badBlocks = bc
 	}
 
 	b.startPrepreparedRelay()
@@ -789,6 +787,19 @@ func (b *backend) lastProposal() (bft.Proposal, common.Address) {
 	return block, proposer
 }
 
+// executeProposal executes a proposal on its parent state without importing
+// it or recording a bad block, and reports whether a failure is one of this
+// node. A chain without ExecuteProposal falls back to
+// ValidateProposalExecution, whose bad block record tells a definite failure.
+func (b *backend) executeProposal(block *types.Block) (err error, local bool) {
+	if c, ok := b.chain.(interface{ ExecuteProposal(*types.Block) error }); ok {
+		err = c.ExecuteProposal(block)
+		return err, errors.Is(err, blockchain.ErrProposalExecutionLocal)
+	}
+	err = b.chain.ValidateProposalExecution(block)
+	return err, err != nil && !b.hasBadProposal(block.Hash())
+}
+
 func (b *backend) hasBadProposal(hash common.Hash) bool {
 	if b.chain == nil {
 		return false
@@ -837,11 +848,6 @@ func (b *backend) committedSealPreimage(view *bft.View, digest common.Hash) []by
 type accessListExecutor interface {
 	ExecuteWithAccessList(ctx context.Context, block *types.Block, parent *types.Header, list *access.BlockAccessList) (*blockchain.SpeculativeResult, error)
 	ProvideAccessList(hash common.Hash, list *access.BlockAccessList)
-}
-
-// badBlockReporter records a bad block, as *blockchain.BlockChain does.
-type badBlockReporter interface {
-	ReportBadBlock(block *types.Block, receipts types.Receipts, err error)
 }
 
 // provideAccessList gives the checked BAL of an Amber proposal to the chain,
@@ -897,10 +903,9 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal, list *access.
 			go b.eventMux.Post(ev)
 		}
 	}
-	reject := func(receipts types.Receipts, err error) {
-		if amber && b.badBlocks != nil {
-			b.badBlocks.ReportBadBlock(block, receipts, err)
-		}
+	// An invalid proposal is refused for its height by the machine; it is
+	// not committed, so it is not recorded as a bad block.
+	reject := func(_ types.Receipts, err error) {
 		report(execResultEvent{Err: err})
 	}
 
