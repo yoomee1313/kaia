@@ -239,8 +239,11 @@ const (
 	// time limit of the proposer (400ms), as the per-tx limits do (150,000,000
 	// for 150ms, see OpcodeComputationCostLimitCancun).
 	DefaultAmberBlockComputationCostLimit = 400_000_000
-	// DefaultAmberBlockAccessListEntryLimit is above the largest block access
-	// list of Kairos up to block 143,188,913: 21,138 entries (block 100,159,749).
+	// DefaultAmberBlockAccessListEntryLimit bounds the write entries of a block:
+	// changed accounts plus written slots, reads not counted. A block of
+	// 10,000 value transfers between distinct accounts has about 20,000. The
+	// value is to be set from measurements; the largest list of Kairos up to
+	// block 143,188,913, reads included, had 21,138 entries (block 100,159,749).
 	DefaultAmberBlockAccessListEntryLimit = 32_768
 )
 

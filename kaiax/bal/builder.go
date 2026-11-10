@@ -239,20 +239,21 @@ func MaxBytesChangeSize(n int) uint64 {
 	return indexSize + 2*listHeaderSize + uint64(n)
 }
 
-// Stats returns the entries of the list being built, as EntryCount counts
-// them, and an upper bound of its encoded size.
+// Stats returns the write entries of the list being built, as WriteEntryCount
+// counts them, and an upper bound of the encoded size of the whole list, reads
+// included.
 func (b *Builder) Stats() (entries, size uint64) {
 	size = listHeaderSize
 	for _, a := range b.accounts {
-		entries++
+		if a.changed() {
+			entries += 1 + uint64(len(a.slots))
+		}
 		size += MaxAccountSize
 		for _, changes := range a.slots {
-			entries++
 			size += MaxSlotSize + uint64(len(changes))*MaxChangeSize
 		}
 		for slot := range a.reads {
 			if _, written := a.slots[slot]; !written {
-				entries++
 				size += MaxSlotSize
 			}
 		}
@@ -281,4 +282,23 @@ func (b *Builder) Has(addr common.Address, slot *common.Hash) (account, hasSlot 
 	_, read := a.reads[*slot]
 	_, written := a.slots[*slot]
 	return true, read || written
+}
+
+// Written reports whether the builder has a change of the account, and
+// whether it has a write of the slot of the account.
+func (b *Builder) Written(addr common.Address, slot *common.Hash) (account, hasSlot bool) {
+	a := b.accounts[addr]
+	if a == nil || !a.changed() {
+		return false, false
+	}
+	if slot == nil {
+		return true, false
+	}
+	_, written := a.slots[*slot]
+	return true, written
+}
+
+// changed reports whether the account has a change, so that it is in Writes().
+func (a *accountBuilder) changed() bool {
+	return len(a.slots)+len(a.balances)+len(a.nonces)+len(a.codes)+len(a.accounts)+len(a.deleted)+len(a.cleared) > 0
 }
