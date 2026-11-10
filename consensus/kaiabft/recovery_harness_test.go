@@ -19,6 +19,7 @@ package kaiabft
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"fmt"
 	"math/big"
 	"slices"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	"testing/synctest"
 
 	"github.com/golang/mock/gomock"
+	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
@@ -126,13 +128,18 @@ func (c *recoveryChain) GetHeader(h common.Hash, _ uint64) *types.Header {
 func (c *recoveryChain) CurrentBlock() *types.Block   { return c.current }
 func (c *recoveryChain) CurrentHeader() *types.Header { return c.current.Header() }
 func (c *recoveryChain) ValidateProposalExecution(block *types.Block) error {
+	panic("consensus executes proposals with ExecuteProposal")
+}
+
+// ExecuteProposal fails with executionError as a failure of this node, and
+// for a block in badExec as an invalid proposal, without recording it.
+func (c *recoveryChain) ExecuteProposal(block *types.Block) error {
 	c.node.executions++
 	if c.executionError != nil {
-		return c.executionError
+		return fmt.Errorf("%w: %w", blockchain.ErrProposalExecutionLocal, c.executionError)
 	}
 	if c.badExec[block.Hash()] {
-		c.bad[block.Hash()] = true
-		return errInvalidCommittedSeal // any error; the record is what matters
+		return errInvalidCommittedSeal // any error
 	}
 	return nil
 }

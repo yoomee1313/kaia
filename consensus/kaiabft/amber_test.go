@@ -221,7 +221,7 @@ func TestAmberInvalidExecutionReleasesLock(t *testing.T) {
 	requireCode(t, recvMessage(t, msgs), bft.MsgRoundChange)
 	expectNoMessage(t, msgs)
 	require.False(t, m.isHashLocked())
-	require.True(t, m.isRejected(block.Hash()))
+	require.True(t, m.isInvalidProposal(block.Hash()))
 	require.False(t, m.needsExecution(block.Hash()))
 
 	// The next round, whose proposer proposes it again.
@@ -244,7 +244,7 @@ func TestAmberLocalFailureDoesNotVote(t *testing.T) {
 	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), Err: errors.New("missing trie node"), Local: true})
 	expectNoMessage(t, msgs)
 	require.True(t, m.isHashLocked())
-	require.False(t, m.isRejected(block.Hash()))
+	require.False(t, m.isInvalidProposal(block.Hash()))
 	require.True(t, m.commitPending)
 }
 

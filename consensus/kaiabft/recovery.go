@@ -403,7 +403,7 @@ func (m *machine) verifyRoundChangeCertificate(messages []*bft.Message, target *
 			}
 			// A claim for a block this node found invalid is void, as a local
 			// lock on it is.
-			if m.b.hasBadProposal(claim.Digest) {
+			if m.isInvalidProposal(claim.Digest) {
 				seen[message.Address] = struct{}{}
 				continue
 			}
@@ -483,8 +483,8 @@ func (m *machine) verifyRecoveryJustification(pp *bft.Preprepare) (*bft.Prepared
 
 // verifyLockedProposalExecution executes the locked block once per height, so
 // that a lock on a block this node never imported cannot refuse recovery from
-// a value known bad elsewhere. A failure is recorded by the chain and read
-// back through isHashLocked.
+// a value known bad elsewhere. A definite failure marks the proposal invalid
+// for this sequence, which isHashLocked reads back; no bad block is recorded.
 func (m *machine) verifyLockedProposalExecution() {
 	locked := m.lockedHash
 	var block *types.Block
@@ -498,10 +498,13 @@ func (m *machine) verifyLockedProposalExecution() {
 	if _, done := m.executedProposals[locked]; done {
 		return
 	}
-	err := m.b.chain.ValidateProposalExecution(block)
-	if err == nil || m.b.hasBadProposal(locked) {
-		// A definite result; a failure to execute at all is retried later.
+	err, local := m.b.executeProposal(block)
+	if err == nil || !local {
+		// A definite result; a failure of this node is retried later.
 		m.executedProposals[locked] = struct{}{}
+	}
+	if err != nil && !local {
+		m.markInvalid(locked, err)
 	}
 	if err != nil {
 		logger.Warn("Locked proposal fails execution", "hash", locked, "released", !m.isHashLocked(), "err", err)
@@ -522,7 +525,7 @@ func (m *machine) roundChangeJustification(messages []*bft.Message, target *bft.
 		if err := message.Decode(&roundChange); err != nil {
 			return nil, nil, err
 		}
-		if roundChange.Prepared == nil || m.b.hasBadProposal(roundChange.Prepared.Digest) ||
+		if roundChange.Prepared == nil || m.isInvalidProposal(roundChange.Prepared.Digest) ||
 			(highest != nil && roundChange.Prepared.Round.Cmp(highest.View.Round) <= 0) {
 			continue
 		}

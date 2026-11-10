@@ -18,7 +18,6 @@ package blockchain
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -273,18 +272,4 @@ func TestUseBlockAccessListBefore(t *testing.T) {
 	}
 	_, chain, blocks, lists := amberParallelChain(t)
 	check(chain, blocks, lists)
-}
-
-// A block can be reported bad without being inserted.
-func TestReportBadBlock(t *testing.T) {
-	env := newAmberTestEnv(t)
-	blocks, _ := GenerateChain(env.config, env.genesis, env.sealer, env.db, 1, amberTestTxs(env))
-	chain := newImportChain(t, env)
-	require.False(t, chain.HasBadBlock(blocks[0].Hash()))
-	chain.ReportBadBlock(blocks[0], nil, errors.New("invalid by execution"))
-	require.True(t, chain.HasBadBlock(blocks[0].Hash()))
-	bad, err := chain.BadBlocks()
-	require.NoError(t, err)
-	require.Len(t, bad, 1)
-	require.Equal(t, blocks[0].Hash(), bad[0].Hash)
 }

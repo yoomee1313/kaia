@@ -115,12 +115,14 @@ type machine struct {
 	waitingForRoundChange bool
 
 	// Amber: the proposals of this sequence this node executed and found
-	// valid, with the RLP of the BAL of its execution, and the ones it found
-	// invalid. commitPending is set while a COMMIT waits for the execution,
+	// valid, with the RLP of the BAL of its execution. invalid holds the
+	// proposals of this sequence this node found invalid by executing them,
+	// from any fork, with the reason: they are refused for the sequence
+	// instead of being recorded as bad blocks. commitPending is set while a COMMIT waits for the execution,
 	// and reproposal is a proposal of this node that waits for it to be
 	// proposed again in a new round.
 	verified      map[common.Hash][]byte
-	rejected      map[common.Hash]struct{}
+	invalid       map[common.Hash]error
 	commitPending bool
 	reproposal    bft.Proposal
 
@@ -157,7 +159,7 @@ func newMachine(b *backend) *machine {
 		backlogPreprepares:   make(map[common.Address]backlogPreprepare),
 		roundChangeSets:      make(map[uint64]*messageSet),
 		verified:             make(map[common.Hash][]byte),
-		rejected:             make(map[common.Hash]struct{}),
+		invalid:              make(map[common.Hash]error),
 		metrics:              bft.NewCoreMetrics("consensus/istanbul/core"),
 	}
 	m.resetPreparedEvidence()
@@ -370,7 +372,7 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 	// Amber: this node found the block invalid by executing it in this
 	// sequence. The check needs no signature, so it runs before the
 	// round-change justification is verified.
-	if m.isRejected(pp.Proposal.Hash()) {
+	if m.isInvalidProposal(pp.Proposal.Hash()) {
 		m.sendNextRoundChange("handlePreprepare: rejected proposal")
 		return errRejectedProposal
 	}
@@ -847,7 +849,7 @@ func (m *machine) startNewRound(round *big.Int) {
 	m.commitPending = false
 	if !roundChange {
 		m.verified = make(map[common.Hash][]byte)
-		m.rejected = make(map[common.Hash]struct{})
+		m.invalid = make(map[common.Hash]error)
 		m.reproposal = nil
 	}
 
@@ -1291,7 +1293,7 @@ func (m *machine) isHashLocked() bool {
 	if common.EmptyHash(m.lockedHash) {
 		return false
 	}
-	return !m.b.hasBadProposal(m.lockedHash) && !m.isRejected(m.lockedHash)
+	return !m.isInvalidProposal(m.lockedHash)
 }
 
 func (m *machine) getPrepareOrCommitSize() int {
