@@ -393,6 +393,7 @@ func (r *regen) run() {
 // finish drops the work files.
 func (r *regen) finish() {
 	os.RemoveAll(r.dir)
+	r.c.signalIndex()
 	close(r.done)
 	r.mu.Lock()
 	r.status.Running = false
@@ -512,4 +513,52 @@ func cmpOr(v, def uint64) uint64 {
 		return def
 	}
 	return v
+}
+
+// StartHistoryConversion turns a node that keeps its states, archive or full
+// without live pruning, into a node with BAL history: it regenerates the lists
+// of the blocks after its first stored state, or after its last state
+// migration, up to the stored lists or the head, while new blocks keep being
+// recorded. Blocks before stay without lists, for an operator to regenerate
+// from genesis. It does nothing on a live pruned node or when the lists are
+// there.
+func StartHistoryConversion(bc *blockchain.BlockChain, memory uint64, workers int) error {
+	return of(bc).startHistoryConversion(memory, workers)
+}
+
+func (c *chain) startHistoryConversion(memory uint64, workers int) error {
+	if c.rec == nil || c.db.ReadPruningEnabled() {
+		return nil
+	}
+	head := c.bc.CurrentBlock().NumberU64()
+	first, next := c.rec.span()
+	empty := first == next
+	if !empty && next <= head {
+		logger.Info("Converting to BAL history", "from", next, "to", head)
+		return c.startRegen(RegenConfig{From: next, To: head, Memory: memory, Workers: workers})
+	}
+	start, ok := c.db.ReadLastMigratedBlockNumber()
+	if !ok {
+		step := uint64(c.cfg.BlockInterval)
+		if c.cfg.ArchiveMode || step == 0 {
+			step = 1
+		}
+		anchors, err := c.findStateAnchors(0, head, step, 100)
+		if err != nil {
+			return err
+		}
+		if len(anchors.Missing) > 0 {
+			logger.Warn("Some stored states are missing, earlier ones are used instead", "sampled", anchors.Sampled, "missing", len(anchors.Missing))
+		}
+		start = anchors.First
+	}
+	from, to := start+1, head
+	if !empty {
+		to = first - 1
+	}
+	if from > to {
+		return nil
+	}
+	logger.Info("Converting to BAL history", "from", from, "to", to)
+	return c.startRegen(RegenConfig{From: from, To: to, Memory: memory, Workers: workers})
 }

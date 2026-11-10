@@ -531,9 +531,29 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	HistoryConvertFlag = &cli.BoolFlag{
+		Name:     "history.convert",
+		Usage:    "On a node without live pruning, record block access lists and regenerate the lists of the blocks since its first stored state by executing them again (experimental)",
+		Value:    false,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT"},
+		Category: "MISC",
+	}
+	HistoryConvertMemoryFlag = &cli.Uint64Flag{
+		Name:     "history.convert.memory",
+		Usage:    "MiB the regeneration of block access lists may use",
+		Value:    4096,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_MEMORY"},
+		Category: "MISC",
+	}
+	HistoryConvertWorkersFlag = &cli.IntFlag{
+		Name:     "history.convert.workers",
+		Usage:    "Goroutines regenerating block access lists (0 = from the memory and the cores)",
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_WORKERS"},
+		Category: "MISC",
+	}
 	BALRecordFlag = &cli.BoolFlag{
 		Name:     "bal.record",
-		Usage:    "Stores the block access list of every inserted block in the chain database, after checking it reproduces the state root (experimental)",
+		Usage:    "Stores the block access list of every inserted block in the chain database, after checking it reproduces the state root (experimental). On by default for EN",
 		EnvVars:  []string{"KAIA_BAL_RECORD"},
 		Category: "MISC",
 	}

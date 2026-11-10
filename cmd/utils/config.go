@@ -816,6 +816,9 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	}
 	cfg.BALRecord = ctx.Bool(BALRecordFlag.Name)
 	cfg.BALSkipReads = ctx.Bool(BALSkipReadsFlag.Name)
+	cfg.HistoryConvert = ctx.Bool(HistoryConvertFlag.Name)
+	cfg.HistoryConvertMemory = ctx.Uint64(HistoryConvertMemoryFlag.Name) << 20
+	cfg.HistoryConvertWorkers = ctx.Int(HistoryConvertWorkersFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

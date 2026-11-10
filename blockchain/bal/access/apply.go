@@ -22,6 +22,7 @@ import (
 
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types/account"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/rlp"
 )
 
@@ -103,4 +104,39 @@ func applyAccountAccess(s *state.StateDB, a *AccountAccess) error {
 		}
 	}
 	return nil
+}
+
+// StateBase serves a state as the base of a BAL index, see History.
+type StateBase struct {
+	s *state.StateDB
+}
+
+func NewStateBase(s *state.StateDB) *StateBase {
+	return &StateBase{s: s}
+}
+
+func (b *StateBase) Account(addr common.Address) (account.Account, error) {
+	acc := b.s.GetAccount(addr)
+	if acc == nil {
+		return nil, b.s.Error()
+	}
+	return acc.DeepCopy(), b.s.Error()
+}
+
+func (b *StateBase) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
+	return b.s.GetState(addr, slot), b.s.Error()
+}
+
+func (b *StateBase) Code(codeHash common.Hash) ([]byte, error) {
+	return b.s.Database().ContractCode(codeHash)
+}
+
+// Slots returns the slots of the storage of addr.
+func (b *StateBase) Slots(addr common.Address) ([]common.Hash, error) {
+	var slots []common.Hash
+	b.s.ForEachStorage(addr, func(key, _ common.Hash) bool {
+		slots = append(slots, key)
+		return true
+	})
+	return slots, b.s.Error()
 }

@@ -162,6 +162,7 @@ func (r *recorder) record(c *chain, block *types.Block, parentRoot common.Hash, 
 		r.sinceLog.failures++
 		return
 	}
+	c.signalIndex()
 	r.sinceLog.blocks++
 	r.sinceLog.txs += uint64(len(block.Transactions()))
 	r.sinceLog.bytes += uint64(len(enc))

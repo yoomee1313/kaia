@@ -1000,6 +1000,11 @@ func TestDatabaseManager_FinishStateMigration(t *testing.T) {
 			expectedStateDBPath := "statetrie_migrated_" + strconv.FormatUint(migrationBlockNum2, 10) // new DB format
 			assert.Equal(t, expectedStateDBPath, string(fetchedStateDBPath), "new DB should remain")
 
+			// check if the block of the finished migration is kept
+			lastMigrated, ok := dbm.ReadLastMigratedBlockNumber()
+			assert.True(t, ok)
+			assert.Equal(t, migrationBlockNum2, lastMigrated)
+
 			// check if migration DB Path is not set in MiscDB
 			migrationDBPathKey := append(databaseDirPrefix, common.Int64ToByteBigEndian(uint64(StateTrieMigrationDB))...)
 			fetchedMigrationPath, err := dbm.getDatabase(MiscDB).Get(migrationDBPathKey)

@@ -141,6 +141,12 @@ type Config struct {
 	BALRecord            bool
 	BALSkipReads         bool
 
+	// History conversion: record and regenerate block access lists on a node
+	// without live pruning (experimental).
+	HistoryConvert        bool
+	HistoryConvertMemory  uint64
+	HistoryConvertWorkers int
+
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`
 	ExtraData          []byte         `toml:",omitempty"`

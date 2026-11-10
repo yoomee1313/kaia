@@ -792,7 +792,19 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
+// The state of the head block is read from the state trie with snapshots. For
+// another block the BAL history covers, a value is read from the last list at
+// or before the block that changed it, and from the state trie otherwise.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
+	if sdb, ok, err := bc.balStateAt(root); ok {
+		return sdb, err
+	}
+	return bc.trieStateAt(root)
+}
+
+// trieStateAt returns a new mutable state read from the state trie only, to
+// execute and commit blocks on.
+func (bc *BlockChain) trieStateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, bc.stateCache, bc.snaps, nil)
 }
 
@@ -804,7 +816,7 @@ func (bc *BlockChain) PrunableStateAt(root common.Hash, num uint64) (*state.Stat
 			PruningBlockNumber: num,
 		})
 	} else {
-		return bc.StateAt(root)
+		return bc.trieStateAt(root)
 	}
 }
 
@@ -814,7 +826,7 @@ func (bc *BlockChain) StateAtWithPersistent(root common.Hash) (*state.StateDB, e
 	if !exist {
 		return nil, ErrNotExistNode
 	}
-	return state.New(root, bc.stateCache, bc.snaps, nil)
+	return bc.StateAt(root)
 }
 
 // StateAtWithGCLock returns a new mutable state based on a particular point in time with read lock of the state nodes.
@@ -827,7 +839,7 @@ func (bc *BlockChain) StateAtWithGCLock(root common.Hash) (*state.StateDB, error
 		return nil, ErrNotExistNode
 	}
 
-	stateDB, err := state.New(root, bc.stateCache, bc.snaps, nil)
+	stateDB, err := bc.StateAt(root)
 	if err != nil {
 		bc.RUnlockGCCachedNode()
 		return nil, err

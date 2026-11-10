@@ -292,6 +292,10 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 		}
 	)
 
+	// A node without live pruning keeps its history as block access lists.
+	if config.HistoryConvert && !config.LivePruning && !chainDB.ReadPruningEnabled() {
+		cacheConfig.BALRecord = true
+	}
 	bc, err := blockchain.NewBlockChain(chainDB, cacheConfig, cn.chainConfig, sealer, vmConfig)
 	if err != nil {
 		return nil, err
@@ -924,6 +928,15 @@ func (s *CN) Start(srvr p2p.Server) error {
 
 	// Start the bloom bits servicing goroutines
 	s.startBloomHandlers()
+
+	// The modules are registered, so blocks can be executed again.
+	if s.config.HistoryConvert {
+		if bc, ok := s.blockchain.(*blockchain.BlockChain); ok {
+			if err := bal.StartHistoryConversion(bc, s.config.HistoryConvertMemory, s.config.HistoryConvertWorkers); err != nil {
+				logger.Warn("BAL history conversion not started", "err", err)
+			}
+		}
+	}
 
 	// Start the RPC service
 	s.p2pServer = srvr

@@ -18,6 +18,7 @@ package bal
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,4 +192,43 @@ func (c *chain) regenDir() (string, error) {
 		return filepath.Join(dir, "balregen"), nil
 	}
 	return os.MkdirTemp("", "balregen")
+}
+
+// RecordedFirst returns the first block with a block access list, and
+// whether the node records them.
+func RecordedFirst(bc *blockchain.BlockChain) (uint64, bool) { return of(bc).recordedFirst() }
+
+func (c *chain) recordedFirst() (uint64, bool) {
+	if c.rec == nil {
+		return 0, false
+	}
+	first, next := c.rec.span()
+	if first == next {
+		return c.bc.CurrentBlock().NumberU64() + 1, true
+	}
+	return first, true
+}
+
+// ErrNoHistory is returned for the state of a block before the BAL history.
+var ErrNoHistory = errors.New("no history")
+
+// HistoryError explains why the state of a block is missing: the history of
+// the node starts later, and admin_startBALRegen can build the earlier part,
+// or the BAL index has not reached the block yet.
+func HistoryError(bc *blockchain.BlockChain, number uint64, err error) error {
+	return of(bc).historyError(number, err)
+}
+
+func (c *chain) historyError(number uint64, err error) error {
+	first, ok := c.recordedFirst()
+	if !ok {
+		return err
+	}
+	if number < first {
+		return fmt.Errorf("%w before block %d, regenerate it with admin_startBALRegen: %v", ErrNoHistory, first, err)
+	}
+	if base, next, ok := c.indexed(); !ok || number >= next || number < base {
+		return fmt.Errorf("%w yet: the BAL index covers blocks %d to %d: %v", ErrNoHistory, base, int64(next)-1, err)
+	}
+	return err
 }

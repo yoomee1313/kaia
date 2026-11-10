@@ -209,6 +209,25 @@ func TestBALRegenHeadBlocks(t *testing.T) {
 	require.False(t, of(chain).db.HasBAL(f.blocks[257].Hash(), 258))
 }
 
+// TestStartHistoryConversion converts a node whose states start at block 80:
+// the lists of the blocks after it are regenerated, and nothing happens once
+// they are there.
+func TestStartHistoryConversion(t *testing.T) {
+	f := newRegenFixture(t, "prague", 200)
+	chain := f.open(t)
+	dropStatesBefore(chain, 80)
+
+	require.NoError(t, StartHistoryConversion(chain, 1<<30, 2))
+	s := waitRegen(t, chain)
+	require.Empty(t, s.Error)
+	requireSpan(t, chain, 81, 201)
+	f.requireLists(t, chain, 81, 200)
+
+	require.NoError(t, StartHistoryConversion(chain, 1<<30, 2))
+	again := GetRegenStatus(chain)
+	require.Equal(t, [3]uint64{s.From, s.To, s.Next}, [3]uint64{again.From, again.To, again.Next}, "no new regeneration")
+}
+
 // TestBALRegenFromGenesis fills in the lists before the BAL history of a node
 // whose oldest states are gone by executing from genesis, and checks that it
 // gives the lists of an in-order execution.
@@ -223,9 +242,14 @@ func TestBALRegenFromGenesis(t *testing.T) {
 	} {
 		chain := f.open(t)
 		dropStatesBefore(chain, 80)
-		require.NoError(t, StartRegen(chain, RegenConfig{From: 81, Workers: 2}))
+		require.NoError(t, StartHistoryConversion(chain, 1<<30, 2))
 		require.Empty(t, waitRegen(t, chain).Error)
 		requireSpan(t, chain, 81, 201)
+
+		_, err := chain.StateAt(chain.GetHeaderByNumber(10).Root)
+		err = HistoryError(chain, 10, err)
+		require.ErrorIs(t, err, ErrNoHistory)
+		require.ErrorContains(t, err, "before block 81")
 
 		// Blocks 1-80 join the stored lists.
 		require.NoError(t, StartRegen(chain, cfg), cfg.Source)
@@ -234,6 +258,8 @@ func TestBALRegenFromGenesis(t *testing.T) {
 		require.Equal(t, uint64(81), s.Next, cfg.Source)
 		requireSpan(t, chain, 1, 201)
 		f.requireLists(t, chain, 1, 200)
+		first, _ := RecordedFirst(chain)
+		require.Equal(t, uint64(1), first)
 
 		// And they verify from genesis.
 		require.NoError(t, StartRegen(chain, RegenConfig{Source: RegenGenesis, Genesis: env.gspec, Mode: RegenVerify}))

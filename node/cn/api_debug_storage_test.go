@@ -26,9 +26,12 @@ import (
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/statedb"
+	"github.com/stretchr/testify/require"
 )
 
 var dumper = spew.ConfigState{Indent: "    "}
@@ -92,4 +95,26 @@ func TestStorageRangeAt(t *testing.T) {
 				test.start, test.limit, dumper.Sdump(result), dumper.Sdump(&test.want))
 		}
 	}
+}
+
+type noIterationTrie struct{ state.Trie }
+
+func (t noIterationTrie) NodeIterator(start []byte) statedb.NodeIterator {
+	return noIterator{t.Trie.NodeIterator(start)}
+}
+
+type noIterator struct{ statedb.NodeIterator }
+
+func (noIterator) Next(bool) bool { return false }
+func (noIterator) Error() error   { return bal.ErrNoIteration }
+
+// TestStorageRangeAtNoIteration returns the error of a storage that cannot be
+// iterated, like a state read from the BAL history alone, instead of an empty
+// range.
+func TestStorageRangeAtNoIteration(t *testing.T) {
+	sdb, _ := state.New(common.Hash{}, state.NewDatabase(database.NewMemoryDBManager()), nil, nil)
+	addr := common.Address{0x01}
+	sdb.SetState(addr, common.Hash{0x01}, common.Hash{0x01})
+	_, err := storageRangeAt(noIterationTrie{sdb.StorageTrie(addr)}, nil, 10)
+	require.ErrorIs(t, err, bal.ErrNoIteration)
 }

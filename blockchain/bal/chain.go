@@ -14,8 +14,6 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the Kaia library. If not, see <http://www.gnu.org/licenses/>.
 
-// Package bal keeps the BAL history of a node: it records the block access
-// lists (see package access) of inserted blocks and regenerates them.
 package bal
 
 import (
@@ -28,18 +26,16 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
-	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/storage/database"
 )
-
-var logger = log.NewModuleLogger(log.Blockchain)
 
 func init() {
 	blockchain.RegisterBALHooks(newChain)
 }
 
 // chain keeps the block access lists of a BlockChain, see
-// blockchain.BALHooks: it records them and regenerates lists.
+// blockchain.BALHooks: it records them, serves past states from them and
+// regenerates lists.
 type chain struct {
 	bc       *blockchain.BlockChain
 	db       database.DBManager
@@ -48,7 +44,8 @@ type chain struct {
 	quit     chan struct{}
 	wg       sync.WaitGroup
 
-	rec *recorder // nil unless recording
+	rec     *recorder     // nil unless recording
+	archive *chainArchive // serves past states from the lists, nil unless indexed
 
 	genesis atomic.Pointer[blockchain.Genesis]
 	regenMu sync.Mutex
@@ -59,6 +56,9 @@ func newChain(bc *blockchain.BlockChain, ctx blockchain.BALContext) (blockchain.
 	c := &chain{bc: bc, db: ctx.DB, cfg: ctx.CacheConfig, vmConfig: ctx.VMConfig, quit: make(chan struct{})}
 	if c.cfg.BALRecord {
 		c.rec = newRecorder(c.db, c.cfg.BALSkipReads)
+		if err := c.openArchive(); err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }
@@ -82,9 +82,20 @@ func (c *chain) Record(block *types.Block, parentRoot common.Hash, statedb *stat
 	}
 }
 
+func (c *chain) StateAt(root common.Hash) (*state.StateDB, bool, error) {
+	if c.archive == nil {
+		return nil, false, nil
+	}
+	sdb, err := c.stateFromBAL(root, c.bc.StateCache(), c.bc.Snapshots())
+	return sdb, true, err
+}
+
 func (c *chain) Truncate(number uint64) {
 	if c.rec != nil {
 		c.rec.truncate(number)
+	}
+	if c.archive != nil {
+		c.archive.Truncate(number)
 	}
 }
 

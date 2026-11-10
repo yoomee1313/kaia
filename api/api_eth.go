@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/forkid"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
@@ -310,6 +311,9 @@ func doGetProof(ctx context.Context, b Backend, address common.Address, storageK
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return nil, err
+	}
+	if bal.ReadOnly(state.Database()) {
+		return nil, bal.ErrNoProof
 	}
 	codeHash := state.GetCodeHash(address)
 

@@ -35,6 +35,9 @@ type BALHooks interface {
 	// Record is called with the state of a validated block before it is
 	// written.
 	Record(block *types.Block, parentRoot common.Hash, statedb *state.StateDB)
+	// StateAt opens the state with the given root of a past block, and
+	// reports whether it handled the lookup.
+	StateAt(root common.Hash) (*state.StateDB, bool, error)
 	// Truncate is called for every block deleted by a rewind.
 	Truncate(number uint64)
 	// Stop is called once the chain stopped.
@@ -96,4 +99,13 @@ func (bc *BlockChain) recordBAL(block *types.Block, parentRoot common.Hash, stat
 	if bc.balHooks != nil {
 		bc.balHooks.Record(block, parentRoot, statedb)
 	}
+}
+
+// balStateAt opens the state with the given root from the BAL history, and
+// reports whether it did.
+func (bc *BlockChain) balStateAt(root common.Hash) (*state.StateDB, bool, error) {
+	if bc.balHooks != nil && root != bc.CurrentBlock().Root() {
+		return bc.balHooks.StateAt(root)
+	}
+	return nil, false, nil
 }

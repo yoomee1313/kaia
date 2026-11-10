@@ -91,6 +91,8 @@ func init() {
 func main() {
 	// Set NodeTypeFlag to en
 	utils.NodeTypeFlag.Value = "en"
+	// Record the block access lists of the blocks the node inserts
+	utils.BALRecordFlag.Value = true
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

@@ -57,6 +57,7 @@ type DBManager interface {
 	IsSingle() bool
 	InMigration() bool
 	MigrationBlockNumber() uint64
+	ReadLastMigratedBlockNumber() (uint64, bool)
 	MigrationOldDBPath() string
 	getStateTrieMigrationInfo() uint64
 
@@ -669,6 +670,16 @@ func (dbm *databaseManager) MigrationBlockNumber() uint64 {
 	return dbm.migrationBlockNumber
 }
 
+// ReadLastMigratedBlockNumber returns the block of the last finished state
+// migration, recorded since the key was added, and whether there is one.
+func (dbm *databaseManager) ReadLastMigratedBlockNumber() (uint64, bool) {
+	enc, err := dbm.getDatabase(MiscDB).Get(lastMigratedBlockKey)
+	if err != nil || len(enc) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(enc), true
+}
+
 func (dbm *databaseManager) MigrationOldDBPath() string {
 	return dbm.migrationOldDBPath
 }
@@ -896,6 +907,13 @@ func (dbm *databaseManager) FinishStateMigration(succeed bool) chan struct{} {
 	// Replace StateTrieDB with new one
 	dbm.setDBDir(StateTrieDB, dbDirToBeUsed)
 	dbm.dbs[StateTrieDB] = dbToBeUsed
+
+	// Keep the block of a finished migration: states before it are gone.
+	if succeed {
+		if err := dbm.getDatabase(MiscDB).Put(lastMigratedBlockKey, common.Int64ToByteBigEndian(dbm.migrationBlockNumber)); err != nil {
+			logger.Error("Failed to write the last migrated block number", "err", err)
+		}
+	}
 
 	// Set the completion mark.
 	// If the old database is not removed, it will be removed when the node is restarted.
