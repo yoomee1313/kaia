@@ -167,6 +167,12 @@ func (e *DefaultExecutor) ProcessBlock(ctx context.Context, txs []*types.Transac
 	// the proposed block's hash for correct SetTxContext behavior inside Process.
 	block := types.NewBlockWithHeader(e.header).WithBody(txs)
 
+	// Record the block access list as InsertChain does, so that a block whose
+	// speculative result is reused by InsertChain still gets its list.
+	if r, ok := e.chain.(interface{ PreExecuteBlock(*state.StateDB) }); ok {
+		r.PreExecuteBlock(e.state)
+	}
+
 	// Delegate to Process() — the same function InsertChain uses.
 	receipts, logs, usedGas, internalTxTraces, procStats, err := e.chain.Processor().Process(ctx, block, e.state, e.vmConfig)
 	if err != nil {

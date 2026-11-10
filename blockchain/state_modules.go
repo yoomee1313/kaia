@@ -17,6 +17,7 @@
 package blockchain
 
 import (
+	"context"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -75,7 +76,7 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, b
 	module := bc.applyModule(block.Hash())
 	if module == nil {
 		bc.PreExecuteBlock(statedb)
-		return bc.processor.Process(block, statedb, bc.vmConfig)
+		return bc.processor.Process(context.Background(), block, statedb, bc.vmConfig)
 	}
 	stats := ProcessStats{BeforeApplyTxs: time.Now()}
 	var check func(types.Receipts, uint64) error

@@ -18,6 +18,7 @@ package impl
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -500,7 +501,7 @@ func (r *regen) execute(db state.Database, job *regenInterval) error {
 			return fmt.Errorf("no block %d", n)
 		}
 		bal.EnableRecorderAt(sdb, 0)
-		if _, _, _, _, _, err := r.c.bc.Processor().Process(block, sdb, r.c.vmConfig); err != nil {
+		if _, _, _, _, _, err := r.c.bc.Processor().Process(context.Background(), block, sdb, r.c.vmConfig); err != nil {
 			return fmt.Errorf("block %d: %w", n, err)
 		}
 		if root := sdb.IntermediateRoot(true); root != block.Root() {

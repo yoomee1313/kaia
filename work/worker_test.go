@@ -257,6 +257,7 @@ func TestCommitNewWorkQualifiedOnly(t *testing.T) {
 			chain.EXPECT().CurrentBlock().Return(types.NewBlockWithHeader(&types.Header{Number: big.NewInt(0), Time: big.NewInt(0)})).AnyTimes()
 			chain.EXPECT().Validator().Return(&fakeValidator{valset: mValset}).AnyTimes()
 			txPool := mocks.NewMockTxPool(ctrl)
+			txPool.EXPECT().CurrentBlockNumber().Return(uint64(0)).AnyTimes()
 			if tc.prepareHeader {
 				txPool.EXPECT().Pending().Return(nil, nil)
 				chain.EXPECT().PrepareHeader(gomock.Any()).Return(errors.New("stop"))

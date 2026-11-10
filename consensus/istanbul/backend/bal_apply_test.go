@@ -17,6 +17,7 @@
 package backend
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
@@ -61,7 +62,7 @@ func balSyncContexts(t *testing.T, n int, cacheConfig *blockchain.CacheConfig, b
 		sdb, err := src.chain.StateAt(parent.Root())
 		require.NoError(t, err)
 		bal.EnableRecorder(sdb)
-		_, _, _, _, _, err = src.chain.Processor().Process(block, sdb, vm.Config{})
+		_, _, _, _, _, err = src.chain.Processor().Process(context.Background(), block, sdb, vm.Config{})
 		require.NoError(t, err)
 		enc, err := bal.Recorded(sdb).Writes().Encode()
 		require.NoError(t, err)
