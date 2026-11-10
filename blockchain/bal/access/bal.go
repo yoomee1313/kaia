@@ -363,6 +363,17 @@ func (a *AccountAccess) LastWriteIndex() (idx uint32, ok bool) {
 	return idx, ok
 }
 
+// EntryCount returns the accounts plus the storage slots of the list, read or
+// written. It is what the consensus limit of the block access list hint of a
+// proposal counts.
+func (s *BlockAccessList) EntryCount() uint64 {
+	n := uint64(len(s.Accounts))
+	for i := range s.Accounts {
+		n += uint64(len(s.Accounts[i].StorageWrites) + len(s.Accounts[i].StorageReads))
+	}
+	return n
+}
+
 // WriteEntryCount returns the entries of the writes of the list, which the
 // Amber entry limit counts: the accounts of Writes() plus their written storage
 // slots. Reads are not counted, so every node that has the writes of a block,

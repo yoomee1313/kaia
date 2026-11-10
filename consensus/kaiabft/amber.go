@@ -50,6 +50,15 @@ var (
 	// sequence after executing them, which consensus no longer records as
 	// bad blocks.
 	invalidProposalCounter = metrics.NewRegisteredCounter("consensus/kaiabft/proposal/invalid", nil)
+	// accessListHintMismatchCounter counts valid proposals whose block access
+	// list hint differs from the one this node makes from its execution.
+	accessListHintMismatchCounter = metrics.NewRegisteredCounter("consensus/kaiabft/proposal/hint/mismatch", nil)
+
+	// accessListHintEntryLimit is the consensus limit of the accounts plus
+	// the storage slots, read or written, of the block access list hint of a
+	// proposal. A proposal over it is not voted for in its round.
+	accessListHintEntryLimit    = uint64(params.DefaultAmberAccessListHintEntryLimit)
+	errAccessListHintEntryLimit = errors.New("block access list hint entry limit exceeded")
 )
 
 // execResultEvent is the outcome of the speculative execution of an Amber
@@ -66,10 +75,15 @@ func (b *backend) isAmberAt(num uint64) bool {
 	return b.chain.Config().IsAmberForkEnabled(new(big.Int).SetUint64(num))
 }
 
-// checkProposalAccessList checks the BAL of a PRE-PREPARE without executing
-// the proposal: present from Amber and absent before, well formed, with the
-// writes hash of the header, within the entry limit, and within the size
-// limit together with the block. It returns the list, nil before Amber.
+// checkProposalAccessList checks the block access list hint of a PRE-PREPARE
+// without executing the proposal: present from Amber and absent before, well
+// formed, within the consensus entry limit of a hint, and within the size limit
+// together with the block. The hint is not checked against the header: it
+// leaves out what validators predict from the txs (see
+// blockchain.AccessListHint), and each validator checks the list of its own
+// execution against the header. A failure is not a property of the block, so
+// the proposal is not voted for in its round only. It returns the hint, nil
+// before Amber.
 func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*access.BlockAccessList, error) {
 	number := pp.Proposal.Number()
 	if !config.IsAmberForkEnabled(number) {
@@ -81,21 +95,12 @@ func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*a
 	if len(pp.AccessList) == 0 {
 		return nil, errMissingAccessList
 	}
-	list, err := access.Decode(pp.AccessList)
+	hint, err := access.Decode(pp.AccessList)
 	if err != nil {
 		return nil, fmt.Errorf("block access list: %w", err)
 	}
-	want := pp.Proposal.Header().BlockAccessListHash
-	if want == nil {
-		return nil, errors.New("missing block access list hash")
-	}
-	if got, err := list.Hash(); err != nil {
-		return nil, fmt.Errorf("block access list: %w", err)
-	} else if got != *want {
-		return nil, fmt.Errorf("%w: header %x, list %x", errAccessListHashMismatch, *want, got)
-	}
-	if err := blockchain.CheckBlockAccessListEntries(config, number, list.WriteEntryCount()); err != nil {
-		return nil, err
+	if entries := hint.EntryCount(); entries > accessListHintEntryLimit {
+		return nil, fmt.Errorf("%w: %d > %d", errAccessListHintEntryLimit, entries, accessListHintEntryLimit)
 	}
 	block, ok := pp.Proposal.(*types.Block)
 	if !ok {
@@ -104,7 +109,7 @@ func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*a
 	if err := blockchain.CheckProposalSize(config, number, uint64(block.Size()), uint64(len(pp.AccessList))); err != nil {
 		return nil, err
 	}
-	return list, nil
+	return hint, nil
 }
 
 // verifyExecution checks the speculative result of an Amber proposal and
@@ -178,15 +183,18 @@ func (m *machine) markInvalid(hash common.Hash, err error) {
 }
 
 // trySendCommit sends the COMMIT of the accepted proposal. From Amber it waits
-// until this node verified the proposal and the BAL of the PRE-PREPARE is the
-// one of its execution; handleExecResult sends it then.
+// until this node verified the proposal by executing it; handleExecResult
+// sends it then. The block access list hint of the PRE-PREPARE need not be the
+// one of this node: each node checks the list of its own execution against
+// the header.
 func (m *machine) trySendCommit() {
 	if m.preprepare == nil || !m.b.isAmberAt(m.sequence.Uint64()) {
 		m.sendCommit()
 		return
 	}
-	verified, ok := m.verified[m.preprepare.Proposal.Hash()]
-	if ok && bytes.Equal(verified, m.preprepare.AccessList) {
+	// The block must be verified by execution; its hint need not match the
+	// one of this node.
+	if _, ok := m.verified[m.preprepare.Proposal.Hash()]; ok {
 		m.commitPending = false
 		m.sendCommit()
 		return
@@ -229,12 +237,10 @@ func (m *machine) handleExecResult(ev execResultEvent) {
 		return
 	}
 	if !bytes.Equal(m.preprepare.AccessList, ev.AccessList) {
-		// The block is valid but its PRE-PREPARE carries another BAL. Keep the
-		// lock: the block may be proposed again with the right BAL.
-		logger.Warn("Block access list of the proposal differs from the execution", "number", ev.Number, "hash", ev.Hash)
-		m.commitPending = false
-		m.sendNextRoundChange("execution: block access list differs")
-		return
+		// The block is valid; only its hint differs from the one of this
+		// node, which says nothing about the block.
+		accessListHintMismatchCounter.Inc(1)
+		logger.Debug("Block access list hint of the proposal differs from the execution", "number", ev.Number, "hash", ev.Hash)
 	}
 	if m.commitPending && m.state == statePrepared {
 		m.trySendCommit()

@@ -245,6 +245,12 @@ const (
 	// value is to be set from measurements; the largest list of Kairos up to
 	// block 143,188,913, reads included, had 21,138 entries (block 100,159,749).
 	DefaultAmberBlockAccessListEntryLimit = 32_768
+	// DefaultAmberAccessListHintEntryLimit bounds, as a consensus rule of
+	// consensus nodes only, the accounts plus the storage slots, read or
+	// written, of the block access list hint of a proposal, which leaves out
+	// what validators predict from the txs. Twice the write limit, as a
+	// placeholder until it is measured.
+	DefaultAmberAccessListHintEntryLimit = 2 * DefaultAmberBlockAccessListEntryLimit
 )
 
 const (

@@ -40,6 +40,20 @@ func ApplyBefore(s *state.StateDB, list *BlockAccessList, k int) error {
 	return nil
 }
 
+// ApplyPhase writes the changes of phase k of a block access list to a state
+// that holds the start of the phase, which gives the start of phase k+1, and
+// finalises them like the end of a tx.
+func ApplyPhase(s *state.StateDB, list *BlockAccessList, k int) error {
+	for i := range list.Accounts {
+		a := list.Accounts[i].At(uint32(k))
+		if err := applyAccountAccess(s, &a); err != nil {
+			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.Finalise(true, false)
+	return nil
+}
+
 // Index holds the accounts of a block access list by address, for UseBefore.
 // It is read only, so the phases of a block share it.
 type Index map[common.Address]*indexedAccount

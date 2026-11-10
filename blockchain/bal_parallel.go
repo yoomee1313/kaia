@@ -52,8 +52,9 @@ func parallelSupported(cfg vm.Config) bool {
 }
 
 // ExecuteWithAccessList executes a block from the Amber hardfork in parallel
-// with its block access list, reads included, after prefetching the keys of
-// the list, and returns the result as the speculative cache holds it: the
+// with its block access list, reads included, which it first rebuilds from the
+// hint of a proposal (see AccessListHint; a whole list is its own hint), after
+// prefetching the keys of the list, and returns the result as the speculative cache holds it: the
 // state to commit, whose BlockAccessList is the list of the whole block, and
 // the receipts, the bloom and the receipt root, which the caller checks with
 // ValidateStateWithCache.
@@ -61,13 +62,17 @@ func parallelSupported(cfg vm.Config) bool {
 // The list only says what to prefetch and where each phase starts. An error
 // says nothing about the block, as the list may be wrong while the block is
 // right: the caller executes the block in order instead, which decides.
-func (bc *BlockChain) ExecuteWithAccessList(ctx context.Context, block *types.Block, parent *types.Header, list *access.BlockAccessList) (*SpeculativeResult, error) {
+func (bc *BlockChain) ExecuteWithAccessList(ctx context.Context, block *types.Block, parent *types.Header, hint *access.BlockAccessList) (*SpeculativeResult, error) {
 	if !bc.chainConfig.IsAmberForkEnabled(block.Number()) {
 		return nil, errors.New("block access list before the Amber hardfork")
 	}
 	sp, ok := bc.processor.(*StateProcessor)
 	if !ok {
 		return nil, errors.New("no state processor")
+	}
+	list, err := bc.RebuildAccessList(block, parent, hint)
+	if err != nil {
+		return nil, err
 	}
 	bc.PrefetchAccessList(ctx, parent.Root, list, ParallelExecutionWorkers)
 	final, receipts, logs, usedGas, stats, err := sp.ProcessWithAccessList(ctx, block, parent, list, bc.vmConfig, ParallelExecutionWorkers, true)
