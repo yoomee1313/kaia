@@ -206,13 +206,15 @@ type BlockChain struct {
 	procInterrupt int32          // interrupt signaler for block processing
 	wg            sync.WaitGroup // chain processing wait group for shutting down
 
-	sealer     consensus.Sealer
-	processor  Processor  // block processor interface
-	prefetcher Prefetcher // Block state prefetcher interface
-	validator  Validator  // block and state validator interface
-	vmConfig   vm.Config
-	specCache  *SpeculativeResultCache // single-entry cache for speculative execution results
-	txLookup   atomic.Pointer[chainTxLookup]
+	sealer       consensus.Sealer
+	processor    Processor  // block processor interface
+	prefetcher   Prefetcher // Block state prefetcher interface
+	validator    Validator  // block and state validator interface
+	vmConfig     vm.Config
+	specCache    *SpeculativeResultCache // single-entry cache for speculative execution results
+	segmentRoots *headerSegmentRoots     // E_k of the header segments, for the cumulative root
+
+	txLookup atomic.Pointer[chainTxLookup]
 
 	parallelDBWrite bool // TODO-Kaia-Storage parallelDBWrite will be replaced by number of goroutines when worker pool pattern is introduced.
 
@@ -262,6 +264,10 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	state.EnabledExpensive = db.GetDBConfig().EnableDBPerfMetrics
 
 	futureBlocks, _ := lru.New(maxFutureBlocks)
+	segmentRoots, err := loadHeaderSegmentRoots(db.GetMiscDB())
+	if err != nil {
+		return nil, err
+	}
 
 	if sealer == nil {
 		return nil, errors.New("consensus sealer is nil")
@@ -280,6 +286,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 		sealer:             sealer,
 		vmConfig:           vmConfig,
 		specCache:          NewSpeculativeResultCache(),
+		segmentRoots:       segmentRoots,
 		parallelDBWrite:    db.IsParallelDBWrite(),
 		stopStateMigration: make(chan struct{}),
 	}
@@ -293,7 +300,6 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	bc.prefetcher = newStatePrefetcher(bc)
 	bc.processor = NewStateProcessor(chainConfig, bc)
 
-	var err error
 	bc.hc, err = NewHeaderChain(db, chainConfig, bc.sealer, bc.validator, bc.getProcInterrupt)
 	if err != nil {
 		return nil, err
@@ -373,6 +379,14 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	if err := bc.attachBALHooks(); err != nil {
 		return nil, err
 	}
+
+	// The header segment roots are part of a synced node: fill the ones the
+	// header chain completes but the database lacks.
+	bc.wg.Go(func() {
+		if err := bc.fillHeaderSegmentRoots(); err != nil {
+			logger.Warn("Failed to fill the header segment roots", "err", err)
+		}
+	})
 
 	// Take ownership of this particular state
 	go bc.update()
@@ -659,6 +673,7 @@ func (bc *BlockChain) setHeadBeyondRootLocked(head uint64, root common.Hash, rep
 		if err := bc.hc.SetHead(head, updateFn, delFn); err != nil {
 			return 0, err
 		}
+		bc.segmentRoots.truncate((bc.hc.CurrentHeader().Number.Uint64() + 1) / HeaderSegmentSize)
 
 		// Delete istanbul snapshot database further two epochs
 		// Invoked only if the sethead was originated from explicit API call
@@ -804,7 +819,7 @@ func (bc *BlockChain) PrepareHeader(header *types.Header) error {
 			return err
 		}
 	}
-	return nil
+	return bc.setCumulativeRoot(header, parent)
 }
 
 // State returns a new mutable state based on the current HEAD block.
@@ -2147,6 +2162,10 @@ func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *balBatch) (int, []
 			stats.queued++
 			continue
 
+		case errors.Is(err, ErrCumulativeRootUnavailable):
+			// This node cannot check the block, which is not bad for that.
+			return i, events, coalescedLogs, err
+
 		case err == consensus.ErrPrunedAncestor && batch != nil:
 			return i, events, coalescedLogs, err
 
@@ -2268,6 +2287,12 @@ func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *balBatch) (int, []
 		atomic.StoreUint32(&followupInterrupt, 1)
 		if batch != nil {
 			batch.written(block)
+		}
+
+		if writeResult.Status == CanonStatTy && (block.NumberU64()+1)%HeaderSegmentSize == 0 {
+			if err := bc.fillHeaderSegmentRoots(); err != nil {
+				logger.Warn("Failed to fill the header segment roots", "number", block.NumberU64(), "err", err)
+			}
 		}
 
 		// Update to-address based spam throttler when spamThrottler is enabled and a single block is fetched.
@@ -2877,7 +2902,11 @@ func (bc *BlockChain) InsertHeaderChain(chain []*types.Header, _ int) (int, erro
 	bc.wg.Add(1)
 	defer bc.wg.Done()
 
-	return bc.hc.InsertHeaderChain(chain)
+	n, err := bc.hc.InsertHeaderChain(chain)
+	if ferr := bc.fillHeaderSegmentRoots(); ferr != nil {
+		logger.Warn("Failed to fill the header segment roots", "err", ferr)
+	}
+	return n, err
 }
 
 // CurrentHeader retrieves the current head header of the canonical chain. The

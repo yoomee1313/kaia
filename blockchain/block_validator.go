@@ -328,6 +328,13 @@ func (v *BlockValidator) validateHeader(header *types.Header, parent *types.Head
 		return ErrInvalidBaseFee
 	}
 
+	// From Amber the first block of a quarter commits the header segments.
+	if v.bc != nil {
+		if err := v.bc.verifyCumulativeRoot(header, parent); err != nil {
+			return err
+		}
+	}
+
 	// Verify the header with registered header modules.
 	for _, module := range v.headerModules {
 		if err := module.VerifyHeader(header, parent); err != nil {
