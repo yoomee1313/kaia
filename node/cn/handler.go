@@ -37,6 +37,7 @@ import (
 	"time"
 
 	kaia_blockchain "github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
@@ -208,6 +209,8 @@ type ProtocolManager struct {
 
 	missingBlobSidecarCh  <-chan *kaia_blockchain.MissingBlobSidecar
 	blobSidecarReqManager *sidecarReqManager
+
+	balSync *bal.Sync // kaia/69 block access lists and slim receipts
 }
 
 // NewProtocolManager returns a new Kaia sub protocol manager. The Kaia sub protocol manages peers capable
@@ -388,6 +391,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 			proposerPolicy = config.Istanbul.ProposerPolicy
 		}
 		manager.downloader = downloader.New(mode, chainDB, stateBloom, manager.eventMux, blockchain, nil, manager.stakingModule, manager.removePeer, proposerPolicy)
+		manager.balSync = bal.NewSync(chainDB, blockchain, manager.removePeer)
 	}
 
 	// Create and set fetcher
@@ -507,6 +511,9 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	// start sync handlers
 	go pm.syncer()
 	go pm.txsyncLoop()
+	if pm.balSync != nil {
+		go pm.balSync.AnnounceLoop(pm.quitSync)
+	}
 }
 
 func (pm *ProtocolManager) Stop() {
@@ -616,7 +623,8 @@ func (pm *ProtocolManager) handle(p Peer) error {
 		td      = pm.blockchain.GetTd(hash, number)
 	)
 
-	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash()); err != nil {
+	history := pm.handshakeRange(p.GetVersion())
+	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash(), history); err != nil {
 		p.GetP2PPeer().Log().Debug("Kaia peer handshake failed", "err", err)
 		return err
 	}
@@ -652,6 +660,8 @@ func (pm *ProtocolManager) handle(p Peer) error {
 	if err := pm.downloader.RegisterPeer(p.GetID(), p.GetVersion(), p); err != nil {
 		return err
 	}
+	pm.balSync.AddPeer(p, history, p.HistoryRange())
+	defer pm.balSync.RemovePeer(p.GetID())
 	if snap != nil {
 		if err := pm.downloader.GetSnapSyncer().Register(snap); err != nil {
 			p.GetP2PPeer().Log().Info("Failed to register peer in snap syncer", "err", err)
@@ -871,6 +881,9 @@ func (pm *ProtocolManager) handleMsg(p Peer, addr common.Address, msg p2p.Msg) e
 		if err := handleVRankPreprepareMsg(pm, p, msg); err != nil {
 			return err
 		}
+
+	case bal.IsSyncMsg(msg.Code) && p.GetVersion() >= kaia69:
+		return pm.balSync.HandleMsg(p, msg)
 
 	case p.GetVersion() >= kaia68 && msg.Code == VRankCandidateMsg:
 		if err := handleVRankCandidateMsg(pm, p, msg); err != nil {
@@ -1762,6 +1775,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block) {
 	for _, peer := range peersToSendBlock {
 		peer.AsyncSendNewBlock(block, td)
 	}
+	bal.BroadcastBAL(pm.balSync, block, peersToSendBlock)
 }
 
 // BroadcastBlockHash will propagate a blockHash to a subset of its peers.
@@ -1775,6 +1789,13 @@ func (pm *ProtocolManager) BroadcastBlockHash(block *types.Block) {
 	for _, peer := range peersWithoutBlock {
 		// peer.SendNewBlockHashes([]common.Hash{hash}, []uint64{block.NumberU64()})
 		peer.AsyncSendNewBlockHash(block)
+	}
+	if pm.balSync != nil {
+		peers := make([]Peer, 0, len(peersWithoutBlock))
+		for _, p := range pm.peers.Peers() {
+			peers = append(peers, p)
+		}
+		bal.BroadcastBAL(pm.balSync, block, peers)
 	}
 	logger.Trace("Announced block", "hash", block.Hash(),
 		"recipients", len(peersWithoutBlock), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))

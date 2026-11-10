@@ -18,6 +18,7 @@ package bal
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
@@ -34,7 +36,22 @@ import (
 // Sources that start from the genesis block instead of a stored state.
 const (
 	RegenGenesis = "genesis" // execute every block from the genesis state
+	RegenImport  = "import"  // apply the lists stored by another node, checking every root
+	RegenPeers   = "peers"   // apply the lists of other nodes fetched over p2p, checking every root
 )
+
+// Fetcher fetches the stored writes of the lists of other nodes, see the
+// peers source.
+type Fetcher interface {
+	// FetchBALs returns the writes of the lists of blocks from to to, which
+	// are in one segment. With a chain, they are the blocks of one of its
+	// segments, checked against it: a node whose lists do not match is
+	// dropped and the segment is fetched from another one.
+	FetchBALs(ctx context.Context, chain *HashChain, from, to uint64) ([][]byte, error)
+}
+
+// importPrefetch is how many segments the peers source fetches ahead.
+var importPrefetch uint64 = 4
 
 // blocks between commits of the temporary state of a source from genesis
 var regenCommitInterval uint64 = 2048
@@ -57,11 +74,37 @@ func (c *chain) genesisSpec(cfg *RegenConfig) (*blockchain.Genesis, error) {
 }
 
 // runFromGenesis rebuilds the state from the genesis block in a temporary
-// database, executing every block, checks the state root of every block, and
-// commits the lists of the blocks from From on.
+// database, executing every block (genesis source) or applying the lists in
+// the chaindata of another node (import source), checks the state root of
+// every block, and commits the lists of the blocks from From on.
 func (r *regen) runFromGenesis() {
 	defer r.finish()
 
+	var source *importLists
+	switch r.cfg.Source {
+	case RegenImport:
+		src, closeSrc, err := r.c.openImport(&r.cfg)
+		if err != nil {
+			r.fail(err)
+			return
+		}
+		defer closeSrc()
+		source = &importLists{db: src, chain: r.cfg.HashChain, to: r.cfg.To}
+	case RegenPeers:
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-r.quit:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+		source = &importLists{fetcher: r.cfg.Fetcher, ctx: ctx, chain: r.cfg.HashChain, to: r.cfg.To}
+	}
+	if c := r.cfg.HashChain; c != nil {
+		logger.Info("Checking imported block access lists against the BAL hash chain", "last", c.Last, "root", c.Root())
+	}
 	genesis, err := r.c.genesisSpec(&r.cfg)
 	if err != nil {
 		r.fail(err)
@@ -98,16 +141,28 @@ func (r *regen) runFromGenesis() {
 			r.fail(fmt.Errorf("no block %d", n))
 			return
 		}
-		access.EnableRecorderAt(sdb, 0)
-		if _, _, _, _, _, err := r.c.bc.Processor().Process(block, sdb, r.c.vmConfig); err != nil {
-			r.fail(fmt.Errorf("block %d: %w", n, err))
-			return
+		var list *access.BlockAccessList
+		if source == nil {
+			access.EnableRecorderAt(sdb, 0)
+			if _, _, _, _, _, err := r.c.bc.Processor().Process(block, sdb, r.c.vmConfig); err != nil {
+				r.fail(fmt.Errorf("block %d: %w", n, err))
+				return
+			}
+			if err := sdb.Error(); err != nil {
+				r.fail(fmt.Errorf("block %d: %w", n, err))
+				return
+			}
+			list = access.Recorded(sdb)
+		} else {
+			if list, err = source.read(n); err != nil {
+				r.fail(fmt.Errorf("block %d: %w", n, err))
+				return
+			}
+			if err := access.Apply(sdb, list); err != nil {
+				r.fail(fmt.Errorf("block %d: %w", n, err))
+				return
+			}
 		}
-		if err := sdb.Error(); err != nil {
-			r.fail(fmt.Errorf("block %d: %w", n, err))
-			return
-		}
-		list := access.Recorded(sdb)
 		if got := sdb.IntermediateRoot(true); got != block.Root() {
 			r.mu.Lock()
 			r.status.Mismatches++
@@ -115,8 +170,9 @@ func (r *regen) runFromGenesis() {
 			r.fail(fmt.Errorf("block %d: state root %x, header has %x", n, got, block.Root()))
 			return
 		}
+		// Imported lists hold the writes only; executed ones have the reads.
 		if n >= r.cfg.From {
-			if err := r.commitList(n, list, true); err != nil {
+			if err := r.commitList(n, list, source == nil); err != nil {
 				r.fail(err)
 				return
 			}
@@ -141,6 +197,104 @@ func (r *regen) runFromGenesis() {
 	r.status.Done = 1
 	r.mu.Unlock()
 	logger.Info("Rebuilt the state from genesis", "number", r.cfg.To)
+}
+
+// importLists reads the writes of the lists of another node, from its
+// chaindata or, with a fetcher, from other nodes over p2p, up to the last
+// block of the hash chain. The writes of a segment, whose keccak256 are the
+// hashes of their blocks, are all read and checked against the chain before
+// any list of it is decoded and returned.
+type importLists struct {
+	db      database.DBManager
+	fetcher Fetcher
+	ctx     context.Context
+	chain   *HashChain
+	to      uint64 // last block to import, at most the last of the chain
+
+	from, next uint64                    // blocks of lists
+	lists      []*access.BlockAccessList // lists of blocks from to next-1
+	ahead      map[uint64]chan fetchedBALs
+}
+
+type fetchedBALs struct {
+	encs [][]byte
+	err  error
+}
+
+func (l *importLists) read(n uint64) (*access.BlockAccessList, error) {
+	if !l.chain.Covers(n) {
+		return nil, fmt.Errorf("%w: block %d is after the last block %d", ErrHashChain, n, l.chain.Last)
+	}
+	if n < l.from || n >= l.next {
+		from, to := l.chain.SegmentBlocks(Segment(n))
+		encs, err := l.segment(from, to)
+		if err != nil {
+			return nil, err
+		}
+		lists := make([]*access.BlockAccessList, len(encs))
+		for i, enc := range encs {
+			if from+uint64(i) == 0 {
+				lists[i] = &access.BlockAccessList{}
+				continue
+			}
+			list, err := access.Decode(enc)
+			if err != nil {
+				return nil, fmt.Errorf("block %d: %w", from+uint64(i), err)
+			}
+			lists[i] = list
+		}
+		l.from, l.next, l.lists = from, to+1, lists
+	}
+	return l.lists[n-l.from], nil
+}
+
+// segment returns the writes of the segment of blocks from to to, checked
+// against the chain.
+func (l *importLists) segment(from, to uint64) ([][]byte, error) {
+	if l.fetcher != nil {
+		return l.fetch(from, to)
+	}
+	encs := make([][]byte, 0, to-from+1)
+	hashes := make([]common.Hash, 0, to-from+1)
+	for m := from; m <= to; m++ {
+		if m == 0 {
+			encs, hashes = append(encs, nil), append(hashes, EmptyListHash)
+			continue
+		}
+		enc, err := ReadRaw(l.db, m)
+		if err != nil {
+			return nil, fmt.Errorf("block %d: %w", m, err)
+		}
+		encs, hashes = append(encs, enc), append(hashes, crypto.Keccak256Hash(enc))
+	}
+	if err := l.chain.VerifySegment(Segment(from), hashes); err != nil {
+		return nil, fmt.Errorf("blocks %d-%d: %w", from, to, err)
+	}
+	return encs, nil
+}
+
+// fetch returns the writes of the segment of blocks from to to from other
+// nodes, and starts fetching the next segments.
+func (l *importLists) fetch(from, to uint64) ([][]byte, error) {
+	if l.ahead == nil {
+		l.ahead = make(map[uint64]chan fetchedBALs)
+	}
+	k := Segment(from)
+	for next := k; next <= k+importPrefetch && next < uint64(len(l.chain.Roots)) && next*SegmentSize <= l.to; next++ {
+		if _, ok := l.ahead[next]; ok {
+			continue
+		}
+		ch := make(chan fetchedBALs, 1)
+		l.ahead[next] = ch
+		go func(k uint64) {
+			from, to := l.chain.SegmentBlocks(k)
+			encs, err := l.fetcher.FetchBALs(l.ctx, l.chain, from, to)
+			ch <- fetchedBALs{encs, err}
+		}(next)
+	}
+	res := <-l.ahead[k]
+	delete(l.ahead, k)
+	return res.encs, res.err
 }
 
 // commitList stores the list of a block, or compares its writes with the
@@ -184,6 +338,21 @@ func (r *regen) commitList(n uint64, list *access.BlockAccessList, hasReads bool
 	r.committed++
 	r.mu.Unlock()
 	return nil
+}
+
+// openImport opens the chaindata of another node to import its lists, and
+// returns how to close it.
+func (c *chain) openImport(cfg *RegenConfig) (database.DBManager, func(), error) {
+	if cfg.ImportDB != nil {
+		return cfg.ImportDB, func() {}, nil
+	}
+	if _, err := os.Stat(cfg.ImportDir); err != nil {
+		return nil, nil, err
+	}
+	dbc := *c.db.GetDBConfig()
+	dbc.Dir = cfg.ImportDir
+	db := database.NewDBManager(&dbc)
+	return db, db.Close, nil
 }
 
 // regenDir returns the directory of the work files of a regeneration.

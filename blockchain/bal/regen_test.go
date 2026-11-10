@@ -17,6 +17,7 @@
 package bal
 
 import (
+	"context"
 	"math/big"
 	"testing"
 	"time"
@@ -228,17 +229,38 @@ func TestStartHistoryConversion(t *testing.T) {
 	require.Equal(t, [3]uint64{s.From, s.To, s.Next}, [3]uint64{again.From, again.To, again.Next}, "no new regeneration")
 }
 
+// importDB returns the database of another node that stores the writes of the
+// lists of the fixture, the one of block tamper replaced by the one of the
+// block before it.
+func (f *regenFixture) importDB(t *testing.T, tamper uint64) database.DBManager {
+	db := database.NewMemoryDBManager()
+	for i, list := range f.lists {
+		n, hash := uint64(i+1), f.blocks[i].Hash()
+		if n == tamper {
+			list = f.lists[i-1]
+		}
+		enc, err := list.Writes().Encode()
+		require.NoError(t, err)
+		db.WriteCanonicalHash(hash, n)
+		require.NoError(t, db.WriteBAL(hash, n, enc))
+	}
+	require.NoError(t, db.WriteBALRange(1, uint64(len(f.lists)+1)))
+	return db
+}
+
 // TestBALRegenFromGenesis fills in the lists before the BAL history of a node
-// whose oldest states are gone by executing from genesis, and checks that it
-// gives the lists of an in-order execution.
+// whose oldest states are gone, by executing from genesis and by importing,
+// and checks that both give the lists of an in-order execution.
 func TestBALRegenFromGenesis(t *testing.T) {
 	env := newBALTestEnv(t, "prague", 3)
 	f := newRegenFixtureFor(t, env, 200)
 	defer func(old uint64) { regenCommitInterval = old }(regenCommitInterval)
 	regenCommitInterval = 32
 
+	source := f.importDB(t, 0)
 	for _, cfg := range []RegenConfig{
 		{Source: RegenGenesis, Genesis: env.gspec},
+		{Source: RegenImport, ImportDB: source, HashChain: f.hashChain(t, 200), Genesis: env.gspec},
 	} {
 		chain := f.open(t)
 		dropStatesBefore(chain, 80)
@@ -270,9 +292,23 @@ func TestBALRegenFromGenesis(t *testing.T) {
 	}
 }
 
-// TestBALRegenReads deletes the reads of stored lists, which leaves the writes
-// and the history as they are, and builds the reads again by executing the
-// blocks, from the stored states and from genesis.
+// TestBALRegenImportTampered rejects an imported list that does not give the
+// state root of its block, even with a hash chain that has it.
+func TestBALRegenImportTampered(t *testing.T) {
+	f := newRegenFixture(t, "prague", 60)
+	chain := f.open(t)
+	src := f.importDB(t, 40)
+	hashChain, err := BuildHashChain(60, func(n uint64) (common.Hash, error) { return HashOf(src, n) })
+	require.NoError(t, err)
+	require.NoError(t, StartRegen(chain, RegenConfig{Source: RegenImport, ImportDB: src, HashChain: hashChain, Genesis: f.env.gspec}))
+	s := waitRegen(t, chain)
+	require.Contains(t, s.Error, "block 40: state root")
+	requireSpan(t, chain, 1, 40)
+}
+
+// TestBALRegenReads deletes the reads of stored lists, which leaves the writes,
+// the hash chain and the history as they are, and builds the reads again by
+// executing the blocks, from the stored states and from genesis.
 func TestBALRegenReads(t *testing.T) {
 	f := newRegenFixture(t, "prague", 150)
 	head := uint64(len(f.blocks))
@@ -293,6 +329,9 @@ func TestBALRegenReads(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, hash, crypto.Keccak256Hash(enc), "the stored writes of block %d hash to its BAL hash", n)
 		}
+		hashChain, err := BuildHashChain(head, func(n uint64) (common.Hash, error) { return HashOf(of(chain).db, n) })
+		require.NoError(t, err)
+		require.Equal(t, f.hashChain(t, head), hashChain, "the hash chain needs the writes only")
 
 		require.NoError(t, StartRegen(chain, cfg), cfg.Source)
 		s := waitRegen(t, chain)
@@ -317,6 +356,122 @@ func TestBALRegenReads(t *testing.T) {
 	chain := f.open(t)
 	err := StartRegen(chain, RegenConfig{Mode: RegenReads})
 	require.ErrorContains(t, err, "reads mode needs stored lists")
+	err = StartRegen(chain, RegenConfig{Mode: RegenReads, Source: RegenImport, ImportDB: f.importDB(t, 0), HashChain: f.hashChain(t, head)})
+	require.ErrorContains(t, err, "executes the blocks again")
+}
+
+// hashChain returns the pre-Amber BAL hash chain of the lists of the fixture
+// up to block last.
+func (f *regenFixture) hashChain(t *testing.T, last uint64) *HashChain {
+	chain, err := BuildHashChain(last, func(n uint64) (common.Hash, error) {
+		if n == 0 {
+			return EmptyListHash, nil
+		}
+		return f.lists[n-1].Hash()
+	})
+	require.NoError(t, err)
+	return chain
+}
+
+// TestBALRegenImportHashChain imports lists checked against the BAL hash
+// chain: a tampered list or chain stops the import before any list of its
+// segment is applied, an import stops at the last block of the chain, and
+// none runs without a chain.
+func TestBALRegenImportHashChain(t *testing.T) {
+	f := newRegenFixture(t, "prague", 200)
+	run := func(src database.DBManager, chain *HashChain, to uint64) RegenStatus {
+		chainDB := f.open(t)
+		require.NoError(t, StartRegen(chainDB, RegenConfig{Source: RegenImport, ImportDB: src, HashChain: chain, Genesis: f.env.gspec, To: to}))
+		s := waitRegen(t, chainDB)
+		if s.Error == "" {
+			last := min(chain.Last, cmpOr(to, 200))
+			require.Equal(t, last, s.To)
+			requireSpan(t, chainDB, 1, last+1)
+			f.requireLists(t, chainDB, 1, last)
+		} else {
+			requireSpan(t, chainDB, 0, 0)
+		}
+		return s
+	}
+
+	require.Empty(t, run(f.importDB(t, 0), f.hashChain(t, 200), 0).Error)
+	require.Empty(t, run(f.importDB(t, 0), f.hashChain(t, 100), 0).Error, "stops at the last block of the chain")
+	require.Empty(t, run(f.importDB(t, 150), f.hashChain(t, 100), 180).Error, "a list after the chain is not read")
+
+	s := run(f.importDB(t, 40), f.hashChain(t, 200), 0)
+	require.Contains(t, s.Error, "blocks 0-200")
+	require.Contains(t, s.Error, ErrHashChain.Error())
+
+	tampered := f.hashChain(t, 200)
+	tampered.Roots[0][0] ^= 1
+	require.Contains(t, run(f.importDB(t, 0), tampered, 0).Error, ErrHashChain.Error())
+
+	chainDB := f.open(t)
+	err := StartRegen(chainDB, RegenConfig{Source: RegenGenesis, HashChain: f.hashChain(t, 200), Genesis: f.env.gspec})
+	require.ErrorContains(t, err, "for the import and peers sources")
+	err = StartRegen(chainDB, RegenConfig{Source: RegenImport, ImportDB: f.importDB(t, 0), Genesis: f.env.gspec})
+	require.ErrorContains(t, err, "signed BAL hash chain")
+	err = StartRegen(chainDB, RegenConfig{Source: RegenImport, ImportDB: f.importDB(t, 0), HashChainFile: t.TempDir(), Genesis: f.env.gspec})
+	require.ErrorContains(t, err, "no BAL hash chain of genesis")
+}
+
+// dbFetcher fetches the lists of another node from its database, checking
+// them against the chain as a p2p fetcher does.
+type dbFetcher struct {
+	db    database.DBManager
+	calls [][2]uint64
+}
+
+func (f *dbFetcher) FetchBALs(ctx context.Context, chain *HashChain, from, to uint64) ([][]byte, error) {
+	f.calls = append(f.calls, [2]uint64{from, to})
+	var encs [][]byte
+	var hashes []common.Hash
+	for n := from; n <= to; n++ {
+		enc, err := (&access.BlockAccessList{}).Writes().Encode()
+		if n > 0 {
+			enc, err = ReadRaw(f.db, n)
+		}
+		if err != nil {
+			return nil, err
+		}
+		encs, hashes = append(encs, enc), append(hashes, crypto.Keccak256Hash(enc))
+	}
+	if chain != nil {
+		if err := chain.VerifySegment(Segment(from), hashes); err != nil {
+			return nil, err
+		}
+	}
+	return encs, nil
+}
+
+// TestBALRegenPeers imports the lists of other nodes through a fetcher: the
+// segments of the hash chain are fetched whole and checked, and the import
+// stops at its last block.
+func TestBALRegenPeers(t *testing.T) {
+	f := newRegenFixture(t, "prague", 200)
+	chain := f.open(t)
+	require.ErrorContains(t, StartRegen(chain, RegenConfig{Source: RegenPeers, HashChain: f.hashChain(t, 200)}), "p2p")
+	require.ErrorContains(t, StartRegen(chain, RegenConfig{Source: RegenPeers, Fetcher: &dbFetcher{}}), "signed BAL hash chain")
+	require.ErrorContains(t, StartRegen(chain, RegenConfig{Source: RegenPeers, Mode: RegenReads, Fetcher: &dbFetcher{}, HashChain: f.hashChain(t, 200)}), "reads mode")
+
+	fetcher := &dbFetcher{db: f.importDB(t, 0)}
+	require.NoError(t, StartRegen(chain, RegenConfig{Source: RegenPeers, Fetcher: fetcher, HashChain: f.hashChain(t, 100), Genesis: f.env.gspec}))
+	s := waitRegen(t, chain)
+	require.Empty(t, s.Error)
+	requireSpan(t, chain, 1, 101)
+	f.requireLists(t, chain, 1, 100)
+	require.Equal(t, [][2]uint64{{0, 100}}, fetcher.calls)
+
+	// The whole chain, and a tampered list in it.
+	chain = f.open(t)
+	fetcher = &dbFetcher{db: f.importDB(t, 0)}
+	require.NoError(t, StartRegen(chain, RegenConfig{Source: RegenPeers, Fetcher: fetcher, HashChain: f.hashChain(t, 200), Genesis: f.env.gspec}))
+	require.Empty(t, waitRegen(t, chain).Error)
+	requireSpan(t, chain, 1, 201)
+	f.requireLists(t, chain, 1, 200)
+	chain = f.open(t)
+	require.NoError(t, StartRegen(chain, RegenConfig{Source: RegenPeers, Fetcher: &dbFetcher{db: f.importDB(t, 150)}, HashChain: f.hashChain(t, 200), Genesis: f.env.gspec}))
+	require.Contains(t, waitRegen(t, chain).Error, ErrHashChain.Error())
 }
 
 // TestGenesisSpecKeepsDeriveSha rebuilds the genesis state of a Kairos chain

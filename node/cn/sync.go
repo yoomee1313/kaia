@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/datasync/downloader"
@@ -235,4 +236,17 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 		// more reliably update peers or the local TD state.
 		go pm.BroadcastBlockHash(head)
 	}
+}
+
+// handshakeRange returns the history range a node sends in the handshake of
+// a protocol version, nil before kaia/69.
+func (pm *ProtocolManager) handshakeRange(version int) *bal.HistoryRange {
+	if version < kaia69 {
+		return nil
+	}
+	if pm.balSync != nil {
+		rng := pm.balSync.LocalRange()
+		return &rng
+	}
+	return &bal.HistoryRange{BAL: bal.NoHistory}
 }

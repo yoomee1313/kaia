@@ -34,6 +34,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
 
@@ -69,7 +70,17 @@ type RegenConfig struct {
 
 	SkipReads bool `json:"skipReads"` // write mode stores the writes only; set with --bal.skip-reads
 
-	Genesis *blockchain.Genesis `json:"-"` // genesis to start from; nil: the one of the chain ID
+	ImportDir string              `json:"importDir"` // chaindata of another node to import the lists from, for the import source
+	ImportDB  database.DBManager  `json:"-"`         // database to import from instead of ImportDir
+	Genesis   *blockchain.Genesis `json:"-"`         // genesis to start from; nil: the one of the chain ID
+
+	// The signed pre-Amber BAL hash chain, a file or the directory of its
+	// package, checks every segment of imported lists before they are
+	// applied; an import stops at its last block.
+	HashChainFile string     `json:"hashChain"`
+	HashChain     *HashChain `json:"-"` // chain to check against instead of HashChainFile
+
+	Fetcher Fetcher `json:"-"` // fetches the lists of other nodes, for the peers source
 }
 
 // RegenStatus reports a regeneration.
@@ -133,12 +144,37 @@ func (c *chain) startRegen(cfg RegenConfig) error {
 	if cfg.Mode == "" {
 		cfg.Mode = RegenWrite
 	}
-	fromGenesis := cfg.Source == RegenGenesis
+	imported := cfg.Source == RegenImport || cfg.Source == RegenPeers
+	fromGenesis := cfg.Source == RegenGenesis || imported
 	if cfg.Source != RegenLocal && !fromGenesis {
 		return fmt.Errorf("unknown source %q", cfg.Source)
 	}
+	if cfg.Source == RegenImport && cfg.ImportDir == "" && cfg.ImportDB == nil {
+		return errors.New("the import source needs importDir")
+	}
+	if cfg.Source == RegenPeers && cfg.Fetcher == nil {
+		return errors.New("the peers source needs the p2p protocol of the node")
+	}
+	if imported && cfg.HashChainFile == "" && cfg.HashChain == nil {
+		return fmt.Errorf("the %s source checks the lists of another node against the signed BAL hash chain (hashChain)", cfg.Source)
+	}
+	if cfg.HashChainFile != "" || cfg.HashChain != nil {
+		if !imported {
+			return errors.New("a BAL hash chain checks imported lists, for the import and peers sources")
+		}
+		if cfg.HashChain == nil {
+			chain, err := LoadSignedHashChain(cfg.HashChainFile, c.bc.Genesis().Hash(), HashChainPublicKey)
+			if err != nil {
+				return err
+			}
+			cfg.HashChain = chain
+		}
+	}
 	if cfg.Mode != RegenWrite && cfg.Mode != RegenVerify && cfg.Mode != RegenReads {
 		return fmt.Errorf("unknown mode %q", cfg.Mode)
+	}
+	if cfg.Mode == RegenReads && imported {
+		return errors.New("reads mode executes the blocks again, from stored states or genesis")
 	}
 	cfg.SkipReads = cfg.SkipReads || c.rec.skipReads
 	if cfg.Memory == 0 {
@@ -174,6 +210,10 @@ func (c *chain) startRegen(cfg RegenConfig) error {
 	} else if cfg.From, cfg.To = max(cfg.From, first), cmpOr(cfg.To, next-1); cfg.To >= next {
 		return fmt.Errorf("%s mode works on blocks %d-%d of the stored lists", cfg.Mode, first, next-1)
 	}
+	if imported && cfg.To > cfg.HashChain.Last {
+		logger.Info("Importing block access lists up to the last block of the BAL hash chain", "to", cfg.To, "last", cfg.HashChain.Last)
+		cfg.To = cfg.HashChain.Last
+	}
 	// Lists that do not touch the stored ones would not join them.
 	if cfg.Mode == RegenWrite && !empty && (cfg.From > next || cfg.To+1 < first) {
 		return fmt.Errorf("write mode fills blocks that touch the stored lists of blocks %d-%d", first, next-1)
@@ -186,7 +226,18 @@ func (c *chain) startRegen(cfg RegenConfig) error {
 	}
 	if !fromGenesis {
 		if _, err := c.findStateAnchors(0, cfg.From-1, 1, 0); err != nil {
-			return fmt.Errorf("no stored state before block %d, regenerate from genesis: %w", cfg.From, err)
+			return fmt.Errorf("no stored state before block %d, regenerate from genesis or import lists: %w", cfg.From, err)
+		}
+	}
+	if cfg.Source == RegenImport {
+		src, closeSrc, err := c.openImport(&cfg)
+		if err != nil {
+			return err
+		}
+		srcFirst, srcNext := src.ReadBALRange()
+		closeSrc()
+		if srcFirst > 1 || srcNext <= cfg.To {
+			return fmt.Errorf("the imported chaindata holds the lists of blocks %d-%d, not 1-%d", srcFirst, srcNext-1, cfg.To)
 		}
 	}
 
@@ -520,8 +571,8 @@ func cmpOr(v, def uint64) uint64 {
 // of the blocks after its first stored state, or after its last state
 // migration, up to the stored lists or the head, while new blocks keep being
 // recorded. Blocks before stay without lists, for an operator to regenerate
-// from genesis. It does nothing on a live pruned node or when the lists are
-// there.
+// from genesis or to import. It does nothing on a live pruned node or when the
+// lists are there.
 func StartHistoryConversion(bc *blockchain.BlockChain, memory uint64, workers int) error {
 	return of(bc).startHistoryConversion(memory, workers)
 }

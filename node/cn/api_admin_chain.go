@@ -259,9 +259,11 @@ func (s *AdminChainCNAPI) NodeConfig(ctx context.Context) interface{} {
 
 // StartBALRegen starts regenerating the block access lists of blocks from to to
 // (experimental). Zero takes the block after the stored lists and the head,
-// or, for the genesis source, the blocks before the stored lists; opts sets
-// the source (local, genesis), mode (write, verify, reads), memory, workers
-// and skipReads.
+// or, for the genesis, import and peers sources, the blocks before the stored
+// lists; opts sets the source (local, genesis, import with importDir, peers),
+// mode (write, verify, reads), memory, workers and skipReads. The import and
+// peers sources stop at the last block of the signed BAL hash chain, the
+// hashChain file or package directory.
 func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *bal.RegenConfig) error {
 	bc, ok := api.cn.blockchain.(*blockchain.BlockChain)
 	if !ok {
@@ -272,7 +274,20 @@ func (api *AdminChainCNAPI) StartBALRegen(from, to uint64, opts *bal.RegenConfig
 		cfg = *opts
 	}
 	cfg.From, cfg.To = from, to
+	if pm, ok := api.cn.protocolManager.(*ProtocolManager); ok && pm.balSync != nil && cfg.Source == bal.RegenPeers {
+		cfg.Fetcher = pm.balSync
+	}
 	return bal.StartRegen(bc, cfg)
+}
+
+// BalPeers returns the history ranges kaia/69 peers announced: the oldest
+// block whose header, body, receipts and block access list each one holds.
+func (api *AdminChainCNAPI) BalPeers() (map[string]bal.HistoryRange, error) {
+	pm, ok := api.cn.protocolManager.(*ProtocolManager)
+	if !ok || pm.balSync == nil {
+		return nil, errors.New("not supported by this node")
+	}
+	return pm.balSync.PeerRanges(), nil
 }
 
 // StopBALRegen stops the running regeneration of block access lists.
