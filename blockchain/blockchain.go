@@ -39,6 +39,7 @@ import (
 
 	"github.com/go-redis/redis/v7"
 	lru "github.com/hashicorp/golang-lru"
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -106,6 +107,7 @@ var (
 // TODO-Kaia: Below should be handled by ini or other configurations.
 const (
 	maxFutureBlocks     = 256
+	maxAccessLists      = 8
 	maxTimeFutureBlocks = 30
 	// TODO-Klaytn-Issue1911  This flag needs to be adjusted to the appropriate value.
 	//  Currently, this value is taken to cache all 10 million accounts
@@ -214,6 +216,10 @@ type BlockChain struct {
 	specCache    *SpeculativeResultCache // single-entry cache for speculative execution results
 	segmentRoots *headerSegmentRoots     // E_k of the header segments, for the cumulative root
 
+	// accessLists holds the block access lists given with blocks not inserted
+	// yet, by block hash, for InsertChain to execute them in parallel.
+	accessLists *lru.Cache
+
 	txLookup atomic.Pointer[chainTxLookup]
 
 	parallelDBWrite bool // TODO-Kaia-Storage parallelDBWrite will be replaced by number of goroutines when worker pool pattern is introduced.
@@ -264,6 +270,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	state.EnabledExpensive = db.GetDBConfig().EnableDBPerfMetrics
 
 	futureBlocks, _ := lru.New(maxFutureBlocks)
+	accessLists, _ := lru.New(maxAccessLists)
 	segmentRoots, err := loadHeaderSegmentRoots(db.GetMiscDB())
 	if err != nil {
 		return nil, err
@@ -286,6 +293,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 		sealer:             sealer,
 		vmConfig:           vmConfig,
 		specCache:          NewSpeculativeResultCache(),
+		accessLists:        accessLists,
 		segmentRoots:       segmentRoots,
 		parallelDBWrite:    db.IsParallelDBWrite(),
 		stopStateMigration: make(chan struct{}),
@@ -757,6 +765,23 @@ func (bc *BlockChain) Validator() Validator {
 // VMConfig returns the VM configuration used for block processing.
 func (bc *BlockChain) VMConfig() vm.Config {
 	return bc.vmConfig
+}
+
+// ProvideAccessList gives the block access list of a block from the Amber
+// hardfork that is not inserted yet, such as the BAL of a proposal, so that
+// InsertChain executes the block in parallel with it. The list is used only to
+// execute the block and is not stored.
+func (bc *BlockChain) ProvideAccessList(hash common.Hash, list *access.BlockAccessList) {
+	if list != nil {
+		bc.accessLists.Add(hash, list)
+	}
+}
+
+func (bc *BlockChain) accessList(hash common.Hash) *access.BlockAccessList {
+	if v, ok := bc.accessLists.Get(hash); ok {
+		return v.(*access.BlockAccessList)
+	}
+	return nil
 }
 
 // SpeculativeCache returns the speculative execution result cache.
@@ -2240,7 +2265,31 @@ func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *balBatch) (int, []
 			}
 		}
 
-		if !cacheHit {
+		// A block from Amber that came with its block access list runs in
+		// parallel with it. If that fails, it runs in order below, which
+		// decides whether it is valid.
+		var parallel bool
+		if list := bc.accessList(block.Hash()); !cacheHit && batch == nil && list != nil && bc.chainConfig.IsAmberForkEnabled(block.Number()) {
+			res, perr := bc.ExecuteWithAccessList(context.Background(), block, parent.Header(), list)
+			if perr == nil {
+				validateStart = time.Now()
+				perr = bc.validator.ValidateStateWithCache(block, res)
+			}
+			if perr == nil {
+				stateDB = res.State
+				receipts = res.Receipts
+				logs = res.Logs
+				usedGas = res.UsedGas
+				procStats = res.ProcessStats
+				parallel = true
+				parallelBlockCounter.Inc(1)
+			} else {
+				parallelFailedCounter.Inc(1)
+				logger.Debug("Executing the block in order, its block access list failed", "number", block.NumberU64(), "hash", block.Hash(), "err", perr)
+			}
+		}
+
+		if !cacheHit && !parallel {
 			if batch != nil {
 				stateDB, err = batch.stateFor(parent)
 			} else {
@@ -2346,7 +2395,7 @@ func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *balBatch) (int, []
 				"txs", len(block.Transactions()), "gas", block.GasUsed(), "elapsed", totalTime,
 				"processTxs", processTxsTime, "finalize", processFinalizeTime, "validateState", validateTime,
 				"totalWrite", writeResult.TotalWriteTime, "trieWrite", writeResult.TrieWriteTime,
-				"cacheHit", cacheHit)
+				"cacheHit", cacheHit, "parallel", parallel)
 
 			if block.Header().BaseFee != nil {
 				blockBaseFee.Update(block.Header().BaseFee.Int64() / int64(params.Gkei))
@@ -2870,6 +2919,12 @@ func (bc *BlockChain) reportBlock(block *types.Block, receipts types.Receipts, e
 // paired a correctly sealed header with another body, so it says nothing about
 // the block that hash names; recording it would make the consensus engine
 // refuse a block that a quorum prepared.
+// ReportBadBlock records block as a bad block, which this node found invalid
+// without inserting it, such as a proposal by its execution.
+func (bc *BlockChain) ReportBadBlock(block *types.Block, receipts types.Receipts, err error) {
+	bc.reportBlock(block, receipts, err)
+}
+
 func (bc *BlockChain) logBadBlock(block *types.Block, receipts types.Receipts, err error) {
 	badBlockCounter.Inc(1)
 

@@ -34,6 +34,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
@@ -148,6 +149,8 @@ type backend struct {
 	// cancel/wg track the in-flight goroutine launched by the machine).
 	specCache  *blockchain.SpeculativeResultCache
 	validator  blockchain.Validator // checks a speculative result from Amber
+	parallel   accessListExecutor   // executes an Amber proposal with its BAL
+	badBlocks  badBlockReporter     // records an Amber proposal invalid by execution
 	specHash   common.Hash          // proposal of the in-flight execution
 	specCancel context.CancelFunc
 	specWg     sync.WaitGroup
@@ -193,6 +196,8 @@ func (b *backend) Start(chain consensus.ChainReader, executor consensus.Executor
 	if bc, ok := chain.(*blockchain.BlockChain); ok {
 		b.specCache = bc.SpeculativeCache()
 		b.validator = bc.Validator()
+		b.parallel = bc
+		b.badBlocks = bc
 	}
 
 	b.startPrepreparedRelay()
@@ -827,11 +832,40 @@ func (b *backend) committedSealPreimage(view *bft.View, digest common.Hash) []by
 // Speculative execution
 // ---------------------------------------------------------------------------
 
+// accessListExecutor executes an Amber block in parallel with its BAL, as
+// *blockchain.BlockChain does.
+type accessListExecutor interface {
+	ExecuteWithAccessList(ctx context.Context, block *types.Block, parent *types.Header, list *access.BlockAccessList) (*blockchain.SpeculativeResult, error)
+	ProvideAccessList(hash common.Hash, list *access.BlockAccessList)
+}
+
+// badBlockReporter records a bad block, as *blockchain.BlockChain does.
+type badBlockReporter interface {
+	ReportBadBlock(block *types.Block, receipts types.Receipts, err error)
+}
+
+// provideAccessList gives the checked BAL of an Amber proposal to the chain,
+// so that InsertChain executes the block in parallel if it has no speculative
+// result for it.
+func (b *backend) provideAccessList(hash common.Hash, list *access.BlockAccessList) {
+	if b.parallel != nil {
+		b.parallel.ProvideAccessList(hash, list)
+	}
+}
+
 // startSpeculativeExecution validates the proposed block in a background
 // goroutine and populates the speculative cache so InsertChain can skip
 // re-execution. Cancels any prior in-flight execution. Caller (the machine)
 // owns the decision of when to trigger; this method owns the execution.
-func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
+//
+// From Amber, with the checked BAL of the PRE-PREPARE, the block first runs
+// in parallel with it. That result is taken only if it is valid with the BAL
+// of the PRE-PREPARE as the BAL of the execution; anything else, including a
+// failure of the parallel execution or an invalid block, runs the block in
+// order, which alone decides that a proposal is invalid. So a wrong BAL or a
+// failure of this node never rejects a proposal by itself. A proposal invalid
+// in order is recorded as a bad block.
+func (b *backend) startSpeculativeExecution(proposal bft.Proposal, list *access.BlockAccessList) {
 	block, ok := proposal.(*types.Block)
 	if !ok || b.specCache == nil || b.executor == nil {
 		return
@@ -863,6 +897,12 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 			go b.eventMux.Post(ev)
 		}
 	}
+	reject := func(receipts types.Receipts, err error) {
+		if amber && b.badBlocks != nil {
+			b.badBlocks.ReportBadBlock(block, receipts, err)
+		}
+		report(execResultEvent{Err: err})
+	}
 
 	signer := types.MakeSigner(b.chain.Config(), block.Number())
 	executor := b.executor.Clone()
@@ -880,17 +920,43 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 	// synchronously so execution and prefetch always see warmed senders.
 	blockchain.WarmSenders(signer, block, b.chain.TxLookup())
 
+	if !amber || b.parallel == nil {
+		list = nil
+	}
+
 	// Warm trie-node cache for spec-exec; ctx ties prefetch to this round.
-	b.specWg.Add(1)
-	go func() {
-		defer b.specWg.Done()
-		blockchain.PrefetchBlockState(ctx, b.chain, parentHeader.Root, block.NumberU64(), block.Transactions(), signer)
-	}()
+	// With a BAL the parallel execution prefetches its keys.
+	if list == nil {
+		b.specWg.Add(1)
+		go func() {
+			defer b.specWg.Done()
+			blockchain.PrefetchBlockState(ctx, b.chain, parentHeader.Root, block.NumberU64(), block.Transactions(), signer)
+		}()
+	}
 
 	b.specWg.Add(1)
 	go func() {
 		defer b.specWg.Done()
 		defer cancel()
+
+		if list != nil {
+			if res, err := b.parallel.ExecuteWithAccessList(ctx, block, parentHeader, list); err == nil {
+				accessList, local, verr := verifyExecution(b.chain.Config(), b.validator, block, res)
+				if verr == nil {
+					report(execResultEvent{AccessList: accessList})
+					entry.Complete(res, nil)
+					logger.Info("Speculative execution completed in parallel",
+						"number", block.NumberU64(), "hash", blockHash, "txs", len(block.Transactions()))
+					return
+				}
+				logger.Debug("Executing the proposal in order, its parallel result is invalid", "number", block.NumberU64(), "hash", blockHash, "local", local, "err", verr)
+			} else if ctx.Err() != nil {
+				entry.Complete(nil, ctx.Err())
+				return
+			} else {
+				logger.Debug("Executing the proposal in order, parallel execution with its block access list failed", "number", block.NumberU64(), "hash", blockHash, "err", err)
+			}
+		}
 
 		// PrunableStateAt marks obsolete trie nodes for live pruning the same
 		// way InsertChain's normal path does; falls back to StateAt when
@@ -924,7 +990,11 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 			// A cancelled execution has no outcome. A failed one is a bad
 			// block unless the state could not be read.
 			if ctx.Err() == nil {
-				report(execResultEvent{Err: err, Local: parentState.Error() != nil})
+				if parentState.Error() != nil {
+					report(execResultEvent{Err: err, Local: true})
+				} else {
+					reject(nil, err)
+				}
 			}
 			return
 		}
@@ -952,7 +1022,18 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal) {
 		}
 		if amber {
 			accessList, local, err := verifyExecution(b.chain.Config(), b.validator, block, specResult)
-			report(execResultEvent{AccessList: accessList, Err: err, Local: local})
+			if local {
+				// No outcome: a later PRE-PREPARE or re-proposal of the block
+				// executes it again.
+				entry.Complete(nil, err)
+				report(execResultEvent{Err: err, Local: true})
+				return
+			}
+			if err != nil {
+				reject(specResult.Receipts, err)
+			} else {
+				report(execResultEvent{AccessList: accessList})
+			}
 		}
 		entry.Complete(specResult, nil)
 

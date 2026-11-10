@@ -115,6 +115,10 @@ type StateDB struct {
 	// Optional recorder of the accesses, nil unless set.
 	access AccessRecorder
 
+	// Optional values of the earlier phases of a block access list, given to
+	// the accounts this state loads, see SetAccessOverlay.
+	overlay AccessOverlay
+
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
 	AccountHashes        time.Duration
@@ -721,8 +725,15 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 		return obj
 	}
 	obj := s.loadStateObject(addr)
+	if s.overlay != nil {
+		obj = s.overlayAccount(addr, obj)
+	}
 	if s.access != nil {
-		s.accessLoaded(addr, obj)
+		if obj != nil && obj.deleted {
+			s.accessLoaded(addr, nil)
+		} else {
+			s.accessLoaded(addr, obj)
+		}
 	}
 	return obj
 }
@@ -1007,6 +1018,7 @@ func copyStateDB(dst, src *StateDB) {
 
 	// The recorder is copied too, so that a state restored from a copy keeps
 	// the changes recorded until the copy.
+	dst.overlay = src.overlay
 	dst.access = nil
 	if src.access != nil {
 		dst.access = src.access.Copy()

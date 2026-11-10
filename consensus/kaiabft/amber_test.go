@@ -28,9 +28,11 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/bft"
+	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
 	valset_mock "github.com/kaiachain/kaia/kaiax/valset/mock"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +52,13 @@ func amberBlock(t *testing.T, number int64) (*types.Block, []byte) {
 	require.NoError(t, err)
 	enc, err := list.Encode()
 	require.NoError(t, err)
-	header := &types.Header{Number: big.NewInt(number), ParentHash: common.Hash{1}, Time: big.NewInt(0), BlockAccessListHash: &hash}
+	// An istanbul extra without committed seals, as a proposal has.
+	extra, err := rlp.EncodeToBytes(&istanbul.IstanbulExtra{})
+	require.NoError(t, err)
+	header := &types.Header{
+		Number: big.NewInt(number), ParentHash: common.Hash{1}, Time: big.NewInt(0), BlockAccessListHash: &hash,
+		Extra: append(make([]byte, istanbul.IstanbulExtraVanity), extra...),
+	}
 	return types.NewBlockWithHeader(header), enc
 }
 

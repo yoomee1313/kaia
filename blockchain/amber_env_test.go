@@ -17,17 +17,23 @@
 package blockchain
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"math/big"
 	"testing"
 
+	"github.com/holiman/uint256"
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/types/account"
+	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/faker"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +43,7 @@ import (
 
 var (
 	balSystemAddr = common.HexToAddress("0x000000000000000000000000000000000000ba50")
+	balFactory    = common.HexToAddress("0x000000000000000000000000000000000000fac7")
 	balReward     = big.NewInt(params.KAIA)
 	balGasPrice   = big.NewInt(25 * params.Gkei)
 	balFunds      = new(big.Int).Mul(big.NewInt(1000), big.NewInt(params.KAIA))
@@ -78,6 +85,7 @@ func newBALTestEnv(t *testing.T, hardfork string, numKeys int) *balTestEnv {
 	env.signer = types.LatestSignerForChainID(env.config.ChainID)
 	alloc := GenesisAlloc{
 		balSystemAddr: {Code: []byte{byte(vm.STOP)}, Balance: common.Big0},
+		balFactory:    {Code: balFactoryCode(), Balance: common.Big0},
 		// The store contract is the delegation target of EIP-7702 tests.
 		balStoreAddr: {Code: balStoreCode(), Balance: common.Big0},
 	}
@@ -174,4 +182,225 @@ func commitBeforeAmber(g *Genesis, db database.DBManager) *types.Block {
 	g.Config.AmberCompatibleBlock = nil
 	defer func() { g.Config.AmberCompatibleBlock = amber }()
 	return g.MustCommit(db)
+}
+
+// balDestructibleCode works like balStoreCode, and self-destructs on empty calldata.
+func balDestructibleCode() []byte {
+	return []byte{
+		byte(vm.CALLDATASIZE), byte(vm.ISZERO), byte(vm.PUSH1), 13, byte(vm.JUMPI),
+		byte(vm.PUSH1), 0x20, byte(vm.CALLDATALOAD),
+		byte(vm.PUSH1), 0x00, byte(vm.CALLDATALOAD),
+		byte(vm.SSTORE),
+		byte(vm.STOP),
+		byte(vm.JUMPDEST), byte(vm.CALLER), byte(vm.SELFDESTRUCT),
+	}
+}
+
+// balFactoryCode deploys calldata as init code with CREATE2 and salt 0.
+func balFactoryCode() []byte {
+	return []byte{
+		byte(vm.CALLDATASIZE), byte(vm.PUSH1), 0x00, byte(vm.PUSH1), 0x00, byte(vm.CALLDATACOPY),
+		byte(vm.PUSH1), 0x00, byte(vm.CALLDATASIZE), byte(vm.PUSH1), 0x00, byte(vm.PUSH1), 0x00, byte(vm.CREATE2),
+		byte(vm.POP), byte(vm.STOP),
+	}
+}
+
+// balInitCode stores 0x11 at slot 1 and 0x22 at slot 2, then returns runtime.
+func balInitCode(runtime []byte) []byte {
+	ctor := []byte{
+		byte(vm.PUSH1), 0x11, byte(vm.PUSH1), 0x01, byte(vm.SSTORE),
+		byte(vm.PUSH1), 0x22, byte(vm.PUSH1), 0x02, byte(vm.SSTORE),
+	}
+	// CODECOPY(0, offset, size) and RETURN(0, size), 12 bytes in total.
+	offset := len(ctor) + 12
+	ctor = append(ctor,
+		byte(vm.PUSH1), byte(len(runtime)), byte(vm.PUSH1), byte(offset), byte(vm.PUSH1), 0x00, byte(vm.CODECOPY),
+		byte(vm.PUSH1), byte(len(runtime)), byte(vm.PUSH1), 0x00, byte(vm.RETURN),
+	)
+	return append(ctor, runtime...)
+}
+
+func (env *balTestEnv) kaiaTx(txType types.TxType, values map[types.TxValueKeyType]interface{}, keys, feePayerKeys []*ecdsa.PrivateKey) *types.Transaction {
+	values[types.TxValueKeyGasLimit] = uint64(1_000_000)
+	values[types.TxValueKeyGasPrice] = balGasPrice
+	tx, err := types.NewTransactionWithMap(txType, values)
+	require.NoError(env.t, err)
+	require.NoError(env.t, tx.SignWithKeys(env.signer, keys))
+	if feePayerKeys != nil {
+		require.NoError(env.t, tx.SignFeePayerWithKeys(env.signer, feePayerKeys))
+	}
+	return tx
+}
+
+func (env *balTestEnv) setCodeTx(b *BlockGen, from int, target common.Address, data []byte) *types.Transaction {
+	addr := env.addrs[from]
+	nonce := b.TxNonce(addr)
+	auth, err := types.SignSetCode(env.keys[from], types.SetCodeAuthorization{
+		ChainID: *uint256.MustFromBig(env.config.ChainID),
+		Address: target,
+		Nonce:   nonce + 1, // the sender is the authority, so its nonce is already bumped
+	})
+	require.NoError(env.t, err)
+	authList := []types.SetCodeAuthorization{auth}
+	intrinsicGas, err := types.IntrinsicGas(data, nil, authList, false, env.config.Rules(b.Number()))
+	require.NoError(env.t, err)
+	tx, err := types.SignTx(types.NewMessage(addr, &addr, nonce, nil, 1_000_000, nil, balGasPrice,
+		balGasPrice, nil, data, false, intrinsicGas, nil, nil, nil, nil, authList), env.signer, env.keys[from])
+	require.NoError(env.t, err)
+	return tx
+}
+
+func mustKey(t *testing.T) *ecdsa.PrivateKey {
+	key, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	return key
+}
+
+// checkBAL re-executes every block with and without the recorder, then checks
+// that the recorded list survives encoding and reproduces the state root when
+// applied to the parent state.
+func checkBAL(t *testing.T, chain *BlockChain, blocks []*types.Block) []*access.BlockAccessList {
+	lists := make([]*access.BlockAccessList, len(blocks))
+	for i, block := range blocks {
+		parent := chain.GetHeaderByHash(block.ParentHash())
+		require.NotNil(t, parent)
+
+		process := func(record bool) (types.Receipts, uint64, common.Hash, *state.StateDB) {
+			statedb, err := chain.StateAt(parent.Root)
+			require.NoError(t, err)
+			if record {
+				access.EnableRecorder(statedb)
+			}
+			receipts, _, usedGas, _, _, err := chain.Processor().Process(context.Background(), block, statedb, vm.Config{})
+			require.NoError(t, err)
+			return receipts, usedGas, statedb.IntermediateRoot(true), statedb
+		}
+		receiptsOff, gasOff, rootOff := func() (types.Receipts, uint64, common.Hash) {
+			r, g, root, statedb := process(false)
+			require.Nil(t, access.Recorded(statedb))
+			return r, g, root
+		}()
+		receiptsOn, gasOn, rootOn, statedb := process(true)
+
+		require.Equal(t, block.Root(), rootOff, "block %d", block.NumberU64())
+		require.Equal(t, rootOff, rootOn, "block %d: recording changed the root", block.NumberU64())
+		require.Equal(t, gasOff, gasOn, "block %d: recording changed the gas", block.NumberU64())
+		encOff, err := rlp.EncodeToBytes(receiptsOff)
+		require.NoError(t, err)
+		encOn, err := rlp.EncodeToBytes(receiptsOn)
+		require.NoError(t, err)
+		require.Equal(t, encOff, encOn, "block %d: recording changed the receipts", block.NumberU64())
+
+		list := access.Recorded(statedb)
+		enc, err := list.Encode()
+		require.NoError(t, err)
+		decoded, err := access.Decode(enc)
+		require.NoError(t, err)
+		reenc, err := decoded.Encode()
+		require.NoError(t, err)
+		require.Equal(t, enc, reenc)
+
+		applied, err := chain.StateAt(parent.Root)
+		require.NoError(t, err)
+		require.NoError(t, access.Apply(applied, decoded))
+		require.Equal(t, block.Root(), applied.IntermediateRoot(true), "block %d: applied root mismatch", block.NumberU64())
+		lists[i] = decoded
+	}
+	return lists
+}
+
+func findAccess(t *testing.T, list *access.BlockAccessList, addr common.Address) *access.AccountAccess {
+	for i := range list.Accounts {
+		if list.Accounts[i].Address == addr {
+			return &list.Accounts[i]
+		}
+	}
+	t.Fatalf("account %s is not in the access list", addr.Hex())
+	return nil
+}
+
+// balHistoryChain is a chain whose lists exercise every kind of change.
+type balHistoryChain struct {
+	env                      *balTestEnv
+	chain                    *BlockChain
+	blocks                   []*types.Block
+	lists                    []*access.BlockAccessList
+	contract, child, untouch common.Address
+}
+
+func newBALHistoryChain(t *testing.T, hardfork string) *balHistoryChain {
+	env := newBALTestEnv(t, hardfork, 6)
+	addrs := env.addrs
+	var (
+		newEOA   = common.HexToAddress("0x00000000000000000000000000000000000e0a02")
+		untouch  = common.HexToAddress("0x00000000000000000000000000000000000e0a03")
+		contract = crypto.CreateAddress(addrs[0], 0)
+		initCode = balInitCode(balDestructibleCode())
+		child    = crypto.CreateAddress2(balFactory, [32]byte{}, crypto.Keccak256(initCode))
+		roleKeys = []*ecdsa.PrivateKey{mustKey(t), mustKey(t), mustKey(t)}
+	)
+	roleBased := accountkey.NewAccountKeyRoleBasedWithValues(accountkey.AccountKeyRoleBased{
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[0].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[1].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[2].PublicKey),
+	})
+
+	chain, blocks := env.generate(9, func(i int, b *BlockGen) {
+		b.SetRewardbase(common.Address{0xbe, byte(i % 3)})
+		switch i {
+		case 0:
+			b.AddTx(env.legacyTx(b, 0, nil, common.Big0, balInitCode(balStoreCode())))
+			b.AddTx(env.legacyTx(b, 1, &newEOA, big.NewInt(params.KAIA), nil))
+		case 1:
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(1, 0)))
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(5, 0x55)))
+			b.AddTx(env.legacyTx(b, 2, &balFactory, common.Big0, initCode))
+		case 2:
+			b.AddTx(env.kaiaTx(types.TxTypeAccountUpdate, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:      b.TxNonce(addrs[3]),
+				types.TxValueKeyFrom:       addrs[3],
+				types.TxValueKeyAccountKey: roleBased,
+			}, env.keys[3:4], nil))
+			b.AddTx(env.legacyTx(b, 2, &child, common.Big0, balSlotData(3, 0x33)))
+		case 3:
+			// Destroy, recreate with fresh storage, write again.
+			b.AddTx(env.legacyTx(b, 2, &child, common.Big0, nil))
+			b.AddTx(env.legacyTx(b, 2, &balFactory, common.Big0, initCode))
+			b.AddTx(env.legacyTx(b, 2, &child, common.Big0, balSlotData(4, 0x44)))
+		case 4:
+			if hardfork == "prague" {
+				b.AddTx(env.setCodeTx(b, 4, balStoreAddr, nil))
+			}
+		case 5:
+			// Destroy and leave it deleted.
+			b.AddTx(env.legacyTx(b, 2, &child, common.Big0, nil))
+			if hardfork == "prague" {
+				b.AddTx(env.legacyTx(b, 4, &addrs[4], common.Big0, balSlotData(7, 0x77)))
+			}
+		case 7:
+			// Recreate in a later block.
+			b.AddTx(env.legacyTx(b, 2, &balFactory, common.Big0, initCode))
+			b.AddTx(env.legacyTx(b, 0, &contract, common.Big0, balSlotData(5, 0)))
+		}
+		b.AddTx(env.legacyTx(b, 5, &addrs[1], big.NewInt(int64(i+1)), nil))
+	})
+	return &balHistoryChain{
+		env: env, chain: chain, blocks: blocks, lists: checkBAL(t, chain, blocks),
+		contract: contract, child: child, untouch: untouch,
+	}
+}
+
+// accountFields encodes an account without its storage root, which History
+// does not track.
+func accountFields(t *testing.T, acc account.Account) []byte {
+	if acc == nil {
+		return nil
+	}
+	acc = acc.DeepCopy()
+	if pa := account.GetProgramAccount(acc); pa != nil {
+		pa.SetStorageRoot(common.ExtHash{})
+	}
+	enc, err := rlp.EncodeToBytes(account.NewAccountSerializerWithAccount(acc))
+	require.NoError(t, err)
+	return enc
 }

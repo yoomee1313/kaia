@@ -113,6 +113,10 @@ type stateObject struct {
 	created bool
 
 	encoded atomic.Value // RLP-encoded data
+
+	// overlay, if set, gives the slots their value at the start of a phase of
+	// a block access list, see StateDB.SetAccessOverlay.
+	overlay func(slot common.Hash) (common.Hash, bool)
 }
 
 type encodedData struct {
@@ -212,6 +216,12 @@ func (s *stateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	value, cached := s.originStorage[key]
 	if cached {
 		return value
+	}
+	if s.overlay != nil {
+		if v, ok := s.overlay(key); ok {
+			s.originStorage[key] = v
+			return v
+		}
 	}
 	// Track the amount of time wasted on reading the storage trie
 	var (
@@ -484,6 +494,7 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 	stateObject.selfDestructed = s.selfDestructed
 	stateObject.dirtyCode = s.dirtyCode
 	stateObject.deleted = s.deleted
+	stateObject.overlay = s.overlay
 	return stateObject
 }
 

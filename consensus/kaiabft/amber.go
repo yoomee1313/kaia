@@ -153,8 +153,7 @@ func encodeAccessList(statedb *state.StateDB) ([]byte, error) {
 
 // isRejected reports whether this node found the proposal invalid by
 // executing it in this sequence. Such a proposal is never committed or kept
-// locked, even if the block itself is not marked bad: the BAL entry limit is
-// checked by consensus nodes only.
+// locked; the backend also records it as a bad block.
 func (m *machine) isRejected(hash common.Hash) bool {
 	_, ok := m.rejected[hash]
 	return ok
@@ -245,7 +244,7 @@ func (m *machine) proposeVerified(proposal bft.Proposal) {
 		return
 	}
 	m.reproposal = proposal
-	m.b.startSpeculativeExecution(proposal)
+	m.b.startSpeculativeExecution(proposal, nil)
 }
 
 // needsExecution reports whether this node must still execute an Amber
