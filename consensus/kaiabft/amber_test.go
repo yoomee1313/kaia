@@ -75,7 +75,7 @@ func newAmberMachine(t *testing.T, cfg *params.ChainConfig, block *types.Block, 
 	mValset.EXPECT().GetProposer(gomock.Any(), gomock.Any()).Return(other, nil).AnyTimes()
 	b.valsetModule = mValset
 	m := newTestMachine(b, 10, 0, block, []common.Address{self})
-	m.preprepare.AccessList = accessList
+	m.preprepare.Parts = bft.WithAccessList(nil, accessList)
 	m.state = statePrepared
 	m.proposer = other
 	return m, self
@@ -90,19 +90,19 @@ func TestCheckProposalAccessList(t *testing.T) {
 	block, enc := amberBlock(t, 10)
 	view := &bft.View{Sequence: big.NewInt(10), Round: big.NewInt(0)}
 	pp := func(b *types.Block, list []byte) *bft.Preprepare {
-		return &bft.Preprepare{View: view, Proposal: b, AccessList: list}
+		return &bft.Preprepare{View: view, Proposal: b, Parts: bft.WithAccessList(nil, list)}
 	}
 	check := func(cfg *params.ChainConfig, pp *bft.Preprepare) error {
-		_, err := checkProposalAccessList(cfg, pp)
+		_, err := checkProposalAccessList(cfg, pp, 0, 0)
 		return err
 	}
 
-	list, err := checkProposalAccessList(amberConfig(), pp(block, enc))
+	list, err := checkProposalAccessList(amberConfig(), pp(block, enc), 0, 0)
 	require.NoError(t, err)
 	got, err := list.Encode()
 	require.NoError(t, err)
 	require.Equal(t, enc, got)
-	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil))
+	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil), 0, 0)
 	require.NoError(t, err)
 	require.Nil(t, list)
 
@@ -225,7 +225,7 @@ func TestAmberInvalidExecutionReleasesLock(t *testing.T) {
 	// The next round, whose proposer proposes it again.
 	m.state, m.waitingForRoundChange = stateAcceptRequest, false
 	m.proposer = m.b.address
-	pp := &bft.Preprepare{View: m.currentView(), Proposal: block, AccessList: enc}
+	pp := &bft.Preprepare{View: m.currentView(), Proposal: block, Parts: bft.WithAccessList(nil, enc)}
 	require.ErrorIs(t, m.handlePreprepare(&wireMessage{Code: bft.MsgPreprepare, Msg: mustEncode(t, pp)}, m.b.address), errRejectedProposal)
 }
 
@@ -268,14 +268,14 @@ func TestAmberReproposeLockedWithOwnAccessList(t *testing.T) {
 	requireCode(t, msg, bft.MsgPreprepare)
 	var pp *bft.Preprepare
 	require.NoError(t, msg.Decode(&pp))
-	require.Equal(t, enc, pp.AccessList, "its own BAL, not the one it received")
+	require.Equal(t, enc, pp.AccessList(), "its own BAL, not the one it received")
 	require.Nil(t, m.reproposal)
 
 	// Verified already: proposed at once.
 	m.reproposeLocked()
 	msg = recvMessage(t, msgs)
 	require.NoError(t, msg.Decode(&pp))
-	require.Equal(t, enc, pp.AccessList)
+	require.Equal(t, enc, pp.AccessList())
 }
 
 // A round change keeps the execution of the locked block only.

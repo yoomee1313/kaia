@@ -125,6 +125,11 @@ type Task struct {
 	computationCost uint64
 	pendingSize     uint64
 
+	// onCommit, if set, is called with the txs each time some are kept, in
+	// the order of the block. A KaiaBFT proposer sends them ahead of its
+	// proposal with it.
+	onCommit func(txs []*types.Transaction)
+
 	createdAt time.Time
 }
 
@@ -969,6 +974,9 @@ func (env *Task) commitTransaction(tx *types.Transaction, bc BlockChain, nodeAdd
 	env.txs = append(env.txs, tx)
 	env.receipts = append(env.receipts, receipt)
 	env.size += uint64(tx.Size())
+	if env.onCommit != nil {
+		env.onCommit([]*types.Transaction{tx})
+	}
 	if tx.Type() == types.TxTypeEthereumBlob {
 		env.blobs += len(tx.BlobHashes())
 		*env.header.BlobGasUsed += tx.BlobGas()
@@ -1056,6 +1064,9 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 	env.size += totalTxSize
 	env.txs = append(env.txs, txs...)
 	env.receipts = append(env.receipts, receipts...)
+	if env.onCommit != nil && len(txs) > 0 {
+		env.onCommit(txs)
+	}
 
 	return nil, nil, logs
 }

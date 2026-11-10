@@ -84,29 +84,33 @@ func (b *backend) isAmberAt(num uint64) bool {
 // execution against the header. A failure is not a property of the block, so
 // the proposal is not voted for in its round only. It returns the hint, nil
 // before Amber.
-func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*access.BlockAccessList, error) {
+//
+// For a proposal sent in fragments, fragmentHintBytes and fragmentHintEntries
+// are the bytes and the entries of the hints of its fragments, which count
+// against the same limits.
+func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare, fragmentHintBytes int, fragmentHintEntries uint64) (*access.BlockAccessList, error) {
 	number := pp.Proposal.Number()
 	if !config.IsAmberForkEnabled(number) {
-		if len(pp.AccessList) != 0 {
+		if len(pp.AccessList()) != 0 {
 			return nil, errUnexpectedAccessList
 		}
 		return nil, nil
 	}
-	if len(pp.AccessList) == 0 {
+	if len(pp.AccessList()) == 0 {
 		return nil, errMissingAccessList
 	}
-	hint, err := access.Decode(pp.AccessList)
+	hint, err := access.Decode(pp.AccessList())
 	if err != nil {
 		return nil, fmt.Errorf("block access list: %w", err)
 	}
-	if entries := hint.EntryCount(); entries > accessListHintEntryLimit {
+	if entries := hint.EntryCount() + fragmentHintEntries; entries > accessListHintEntryLimit {
 		return nil, fmt.Errorf("%w: %d > %d", errAccessListHintEntryLimit, entries, accessListHintEntryLimit)
 	}
 	block, ok := pp.Proposal.(*types.Block)
 	if !ok {
 		return nil, errors.New("kaiabft: invalid proposal type")
 	}
-	if err := blockchain.CheckProposalSize(config, number, uint64(block.Size()), uint64(len(pp.AccessList))); err != nil {
+	if err := blockchain.CheckProposalSize(config, number, uint64(block.Size()), uint64(len(pp.AccessList())+fragmentHintBytes)); err != nil {
 		return nil, err
 	}
 	return hint, nil
@@ -236,7 +240,7 @@ func (m *machine) handleExecResult(ev execResultEvent) {
 	if !current {
 		return
 	}
-	if !bytes.Equal(m.preprepare.AccessList, ev.AccessList) {
+	if !bytes.Equal(m.preprepare.AccessList(), ev.AccessList) {
 		// The block is valid; only its hint differs from the one of this
 		// node, which says nothing about the block.
 		accessListHintMismatchCounter.Inc(1)

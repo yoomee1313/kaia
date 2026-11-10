@@ -17,11 +17,13 @@
 package blockchain
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
 	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/params"
 	"github.com/stretchr/testify/require"
@@ -131,4 +133,86 @@ func TestInsertChainWithAccessListHint(t *testing.T) {
 	require.Equal(t, int64(amber), parallelBlockCounter.Count()-parallel, "every Amber block runs in parallel")
 	require.Equal(t, int64(0), parallelFailedCounter.Count()-failed)
 	require.Equal(t, blocks[len(blocks)-1].Hash(), imported.CurrentBlock().Hash())
+}
+
+// The hints of the fragments a producer makes while it executes a block give
+// the changes of the hint of the block, phase by phase, and every key read by
+// the block that the hint of the block reads too.
+func TestFragmentHinter(t *testing.T) {
+	c := newBALHistoryChain(t, "prague")
+	for i, block := range c.blocks {
+		parent := c.chain.GetHeaderByHash(block.ParentHash())
+		s, err := c.chain.StateAt(parent.Root)
+		require.NoError(t, err)
+		access.EnableRecorder(s)
+		header := block.Header()
+		hinter, err := c.chain.NewFragmentHinter(header)
+		require.NoError(t, err)
+		require.NoError(t, c.chain.Processor().InitializeState(header, s))
+		author, _ := c.chain.Sealer().Author(header)
+
+		var (
+			frags   []*access.BlockAccessList
+			usedGas uint64
+			txs     = block.Transactions()
+		)
+		for j, tx := range txs {
+			s.SetTxContext(tx.Hash(), block.Hash(), j)
+			_, _, err := c.chain.ApplyTransaction(c.chain.Config(), &author, s, header, tx, &usedGas, &vm.Config{})
+			require.NoError(t, err)
+			if j%2 == 1 || j == len(txs)-1 {
+				frag, err := hinter.Next(access.Recorded(s), txs[:j+1])
+				require.NoError(t, err)
+				frags = append(frags, frag)
+			}
+		}
+
+		hint, err := c.chain.AccessListHint(block, c.lists[i])
+		require.NoError(t, err)
+		// The changes of the phases before FinalizeState.
+		changes := func(l *access.BlockAccessList) map[string]bool {
+			m := make(map[string]bool)
+			for _, a := range l.Accounts {
+				for _, ch := range a.BalanceChanges {
+					if int(ch.Index) <= len(txs) {
+						m[fmt.Sprintf("%s b%d %s", a.Address.Hex(), ch.Index, ch.Balance)] = true
+					}
+				}
+				for _, ch := range a.NonceChanges {
+					if int(ch.Index) <= len(txs) {
+						m[fmt.Sprintf("%s n%d %d", a.Address.Hex(), ch.Index, ch.Nonce)] = true
+					}
+				}
+				for _, w := range a.StorageWrites {
+					for _, ch := range w.Changes {
+						if int(ch.Index) <= len(txs) {
+							m[fmt.Sprintf("%s s%x %d %x", a.Address.Hex(), w.Slot, ch.Index, ch.Value)] = true
+						}
+					}
+				}
+			}
+			return m
+		}
+		got := make(map[string]bool)
+		reads := make(map[string]bool)
+		for _, f := range frags {
+			for k := range changes(f) {
+				require.False(t, got[k], "block %d: %s given twice", block.NumberU64(), k)
+				got[k] = true
+			}
+			for _, a := range f.Accounts {
+				for _, slot := range a.StorageReads {
+					k := a.Address.Hex() + slot.Hex()
+					require.False(t, reads[k], "block %d: read %s given twice", block.NumberU64(), k)
+					reads[k] = true
+				}
+			}
+		}
+		require.Equal(t, changes(hint), got, "block %d", block.NumberU64())
+		for _, a := range hint.Accounts {
+			for _, slot := range a.StorageReads {
+				require.True(t, reads[a.Address.Hex()+slot.Hex()], "block %d: read of %s", block.NumberU64(), a.Address.Hex())
+			}
+		}
+	}
 }

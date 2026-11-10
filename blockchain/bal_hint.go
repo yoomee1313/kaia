@@ -437,3 +437,146 @@ func (bc *BlockChain) RebuildAccessList(block *types.Block, parent *types.Header
 	}
 	return rebuildAccessList(bc.chainConfig, block, s, hint)
 }
+
+// FragmentHinter makes the block access list hints of the fragments of an
+// Amber proposal while the producer executes it, see bft.Fragment. The hint of
+// a fragment holds the changes of its phases and the keys first read in them,
+// without what the prediction gets right, as AccessListHint leaves them out.
+// The hints of the fragments are for validators to prefetch: the final message
+// of the proposal carries the hint of the whole block, which they execute
+// with.
+type FragmentHinter struct {
+	p    *hintPredictor
+	s    *state.StateDB
+	done int // phases already given, from 0: InitializeState
+	sent map[common.Address]map[common.Hash]struct{}
+}
+
+// NewFragmentHinter returns a FragmentHinter for a block with header, built on
+// the state of its parent.
+func (bc *BlockChain) NewFragmentHinter(header *types.Header) (*FragmentHinter, error) {
+	parent := bc.GetHeaderByHash(header.ParentHash)
+	if parent == nil {
+		return nil, errNoParentHeader
+	}
+	s, err := bc.StateAt(parent.Root)
+	if err != nil {
+		return nil, err
+	}
+	return &FragmentHinter{
+		p:    newHintPredictor(bc.chainConfig, header),
+		s:    s,
+		done: -1,
+		sent: make(map[common.Address]map[common.Hash]struct{}),
+	}, nil
+}
+
+// Next returns the hint of the txs applied after the last call, given list,
+// the block access list recorded so far, and txs, every tx applied so far. The
+// first call gives InitializeState too.
+func (f *FragmentHinter) Next(list *access.BlockAccessList, txs []*types.Transaction) (*access.BlockAccessList, error) {
+	h := newHintList(list)
+	from := uint32(f.done + 1)
+	type key struct {
+		addr  common.Address
+		nonce bool
+		k     uint32
+	}
+	strip := make(map[key]struct{})
+	predictedReads := make(map[common.Address]struct{})
+	for k := f.done + 1; k <= len(txs); k++ {
+		if k > 0 {
+			preds, reads := f.p.predict(txs[k-1], f.s)
+			for addr, pa := range preds {
+				a := h.accounts[addr]
+				if a == nil {
+					continue
+				}
+				if j, ok := balanceAt(a, uint32(k)); ok && pa.balance != nil && a.BalanceChanges[j].Balance.Cmp(pa.balance) == 0 {
+					strip[key{addr, false, uint32(k)}] = struct{}{}
+				}
+				if j, ok := nonceAt(a, uint32(k)); ok && pa.nonce != nil && a.NonceChanges[j].Nonce == *pa.nonce {
+					strip[key{addr, true, uint32(k)}] = struct{}{}
+				}
+			}
+			for _, addr := range reads {
+				predictedReads[addr] = struct{}{}
+			}
+		}
+		if err := h.apply(f.s, uint32(k)); err != nil {
+			return nil, err
+		}
+	}
+	to := uint32(len(txs))
+	f.done = len(txs)
+
+	inRange := func(k uint32) bool { return k >= from && k <= to }
+	out := &access.BlockAccessList{}
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		frag := access.AccountAccess{Address: a.Address}
+		for _, w := range a.StorageWrites {
+			var changes []access.SlotChange
+			for _, c := range w.Changes {
+				if inRange(c.Index) {
+					changes = append(changes, c)
+				}
+			}
+			if len(changes) > 0 {
+				frag.StorageWrites = append(frag.StorageWrites, access.SlotWrites{Slot: w.Slot, Changes: changes})
+			}
+		}
+		for _, c := range a.BalanceChanges {
+			if _, s := strip[key{a.Address, false, c.Index}]; inRange(c.Index) && !s {
+				frag.BalanceChanges = append(frag.BalanceChanges, c)
+			}
+		}
+		for _, c := range a.NonceChanges {
+			if _, s := strip[key{a.Address, true, c.Index}]; inRange(c.Index) && !s {
+				frag.NonceChanges = append(frag.NonceChanges, c)
+			}
+		}
+		for _, c := range a.CodeChanges {
+			if inRange(c.Index) {
+				frag.CodeChanges = append(frag.CodeChanges, c)
+			}
+		}
+		for _, c := range a.AccountChanges {
+			if inRange(c.Index) {
+				frag.AccountChanges = append(frag.AccountChanges, c)
+			}
+		}
+		for _, k := range a.Deleted {
+			if inRange(k) {
+				frag.Deleted = append(frag.Deleted, k)
+			}
+		}
+		for _, k := range a.StorageCleared {
+			if inRange(k) {
+				frag.StorageCleared = append(frag.StorageCleared, k)
+			}
+		}
+		sent, known := f.sent[a.Address]
+		for _, slot := range a.StorageReads {
+			if _, ok := sent[slot]; !ok {
+				frag.StorageReads = append(frag.StorageReads, slot)
+			}
+		}
+		if !known {
+			sent = make(map[common.Hash]struct{})
+			f.sent[a.Address] = sent
+		}
+		for _, slot := range frag.StorageReads {
+			sent[slot] = struct{}{}
+		}
+		if isEmptyAccess(&frag) {
+			// A read of the account is given once, and not at all if the
+			// prediction gives it.
+			if _, predicted := predictedReads[a.Address]; known || predicted {
+				continue
+			}
+		}
+		out.Accounts = append(out.Accounts, frag)
+	}
+	return out, nil
+}

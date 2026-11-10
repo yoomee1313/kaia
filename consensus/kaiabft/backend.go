@@ -279,6 +279,17 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 			return
 		}
 
+		// From Amber the txs go ahead in fragments while they are executed.
+		frag := b.newFragmenter(header, statedb)
+		if frag != nil {
+			if h, ok := b.executor.(commitHooker); ok {
+				h.SetCommitHook(frag.commit)
+				defer h.SetCommitHook(nil)
+			} else {
+				frag = nil
+			}
+		}
+
 		executeStart := time.Now()
 		result, err := b.executor.Execute(txs, mux)
 		if err != nil {
@@ -318,7 +329,11 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 			"finalizeTime", common.PrettyDuration(result.FinalizeTime))
 
 		sealStart := time.Now()
-		sealedBlock, err := b.seal(block, accessList)
+		var fragments []bft.Part
+		if frag != nil {
+			fragments = frag.fragments(block)
+		}
+		sealedBlock, err := b.seal(block, accessList, fragments)
 		result.SealTime = time.Since(sealStart)
 
 		if err != nil {
@@ -491,7 +506,7 @@ func (b *backend) SignalPeerRegistrable() {
 // Seal — triggers BFT consensus on a proposed block
 // ---------------------------------------------------------------------------
 
-func (b *backend) seal(block *types.Block, accessList []byte) (*types.Block, error) {
+func (b *backend) seal(block *types.Block, accessList []byte, fragments []bft.Part) (*types.Block, error) {
 	header := block.Header()
 	number := header.Number.Uint64()
 
@@ -506,7 +521,7 @@ func (b *backend) seal(block *types.Block, accessList []byte) (*types.Block, err
 	}
 	defer b.cleanupSealState(commitCh)
 
-	go b.eventMux.Post(requestEvent{Proposal: block, AccessList: accessList})
+	go b.eventMux.Post(requestEvent{Proposal: block, AccessList: accessList, Fragments: fragments})
 
 	for result := range commitCh {
 		if result == nil {
@@ -1099,7 +1114,8 @@ func (b *backend) cancelSpeculativeExecutionExcept(keep common.Hash) {
 
 type requestEvent struct {
 	Proposal   bft.Proposal
-	AccessList []byte // RLP of the BAL of the proposal, from Amber
+	AccessList []byte     // RLP of the BAL hint of the proposal, from Amber
+	Fragments  []bft.Part // fragments of the proposal already sent, from Amber
 }
 
 type messageEvent struct {

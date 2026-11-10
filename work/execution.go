@@ -52,6 +52,10 @@ type DefaultExecutor struct {
 	nodeAddr common.Address
 	vmConfig vm.Config
 
+	// commitHook, if set, is called by Execute with the txs it keeps, see
+	// SetCommitHook.
+	commitHook func(txs []*types.Transaction)
+
 	// Current execution state
 	state    *state.StateDB
 	header   *types.Header
@@ -133,6 +137,7 @@ func (e *DefaultExecutor) Execute(txs *types.TransactionsByPriceAndNonce, mux *e
 
 	// Create Task for transaction execution with bundle handling and time limits
 	task := NewTask(e.config, e.signer, e.state, e.header)
+	task.onCommit = e.commitHook
 
 	// Execute transactions using CommitTransactions (includes posting pending events)
 	task.CommitTransactions(mux, txs, e.chain, e.nodeAddr, e.txBundlingModules)
@@ -145,6 +150,16 @@ func (e *DefaultExecutor) Execute(txs *types.TransactionsByPriceAndNonce, mux *e
 	// Execute (proposer path) does not collect internal tx traces;
 	// they are only needed for the speculative validation path.
 	return e.buildResult(nil), nil
+}
+
+// SetCommitHook makes Execute call hook with the txs it keeps, in the order of
+// the block, right after they are applied to the state. A KaiaBFT proposer
+// uses it to send fragments of its proposal while it executes it. A nil hook
+// removes it.
+func (e *DefaultExecutor) SetCommitHook(hook func(txs []*types.Transaction)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.commitHook = hook
 }
 
 // ProcessBlock executes the given transactions in the provided order

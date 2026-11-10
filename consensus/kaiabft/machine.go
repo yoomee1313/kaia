@@ -121,10 +121,17 @@ type machine struct {
 	// instead of being recorded as bad blocks. commitPending is set while a COMMIT waits for the execution,
 	// and reproposal is a proposal of this node that waits for it to be
 	// proposed again in a new round.
-	verified      map[common.Hash][]byte
-	invalid       map[common.Hash]error
-	commitPending bool
-	reproposal    bft.Proposal
+	verified map[common.Hash][]byte
+	invalid  map[common.Hash]error
+
+	// Amber: the fragments of proposals received for the current and the
+	// next sequence, and the fragments this node sent for its proposal of
+	// sentFragmentsView. See fragment.go.
+	fragments         map[fragmentKey]*fragmentSet
+	sentFragmentsView *bft.View
+	sentFragments     []common.Hash
+	commitPending     bool
+	reproposal        bft.Proposal
 
 	// Backlog
 	backlogs                  map[common.Address]*prque.Prque
@@ -160,6 +167,7 @@ func newMachine(b *backend) *machine {
 		roundChangeSets:      make(map[uint64]*messageSet),
 		verified:             make(map[common.Hash][]byte),
 		invalid:              make(map[common.Hash]error),
+		fragments:            make(map[fragmentKey]*fragmentSet),
 		metrics:              bft.NewCoreMetrics("consensus/istanbul/core"),
 	}
 	m.resetPreparedEvidence()
@@ -176,6 +184,7 @@ func (m *machine) start() error {
 		messageEvent{},
 		backlogEvent{},
 		execResultEvent{},
+		fragmentEvent{},
 	)
 	m.timeoutSub = m.b.eventMux.Subscribe(timeoutEvent{})
 	m.chainHead = m.b.eventMux.Subscribe(chainHeadEvent{})
@@ -213,12 +222,14 @@ func (m *machine) runLoop() {
 			}
 			switch e := ev.Data.(type) {
 			case requestEvent:
-				request := &bft.Request{Proposal: e.Proposal, AccessList: e.AccessList}
+				request := &bft.Request{Proposal: e.Proposal, AccessList: e.AccessList, Fragments: e.Fragments}
 				if err := m.handleRequest(request); err == errFutureMessage {
 					m.storePendingRequest(request)
 				}
 			case execResultEvent:
 				m.handleExecResult(e)
+			case fragmentEvent:
+				m.sendFragment(e)
 			case messageEvent:
 				if err := m.handleMsg(e.Payload); err == nil {
 					m.b.gossipSubPeer(e.Hash, e.Payload)
@@ -339,6 +350,15 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		return bft.ErrInvalidMessage
 	}
 
+	// A fragment of an Amber proposal changes no state; it may come for the
+	// next sequence before this node gets there.
+	if data := pp.Part(bft.PartFragment); data != nil {
+		if !m.b.isAmberAt(pp.View.Sequence.Uint64()) {
+			return bft.ErrInvalidMessage
+		}
+		return m.handleFragment(pp, data, src)
+	}
+
 	if err := m.checkMessage(bft.MsgPreprepare, pp.View); err != nil {
 		if err == errOldMessage {
 			// This PRE-PREPARE targets an already-finalized height. Reply with a
@@ -367,6 +387,26 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 
 	if m.proposer != src {
 		return errNotFromProposer
+	}
+
+	// A final message of a proposal sent in fragments: the block is
+	// assembled from them, waiting for the missing ones.
+	var fragmentHintBytes int
+	var fragmentHintEntries uint64
+	if data := pp.Part(bft.PartFinal); data != nil && m.b.isAmberAt(pp.View.Sequence.Uint64()) {
+		block, hintBytes, hintEntries, err := m.assembleProposal(pp, data, msg, src)
+		if err == errFragmentsMissing {
+			return err
+		}
+		if err != nil {
+			m.sendNextRoundChange("handlePreprepare: invalid fragments")
+			return err
+		}
+		assembled := *pp
+		assembled.Proposal = block
+		assembled.Parts = bft.WithAccessList(nil, pp.AccessList())
+		pp = &assembled
+		fragmentHintBytes, fragmentHintEntries = hintBytes, hintEntries
 	}
 
 	// Amber: this node found the block invalid by executing it in this
@@ -409,7 +449,7 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		}
 	}
 
-	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp)
+	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp, fragmentHintBytes, fragmentHintEntries)
 	if err != nil {
 		m.sendNextRoundChange("handlePreprepare: invalid block access list")
 		return err
@@ -851,6 +891,7 @@ func (m *machine) startNewRound(round *big.Int) {
 		m.verified = make(map[common.Hash][]byte)
 		m.invalid = make(map[common.Hash]error)
 		m.reproposal = nil
+		m.clearFragments()
 	}
 
 	m.processPendingRequests()
@@ -977,7 +1018,7 @@ func (m *machine) sendPreprepare(request *bft.Request) {
 		m.verified[request.Proposal.Hash()] = request.AccessList
 	}
 	curView := m.currentView()
-	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal, AccessList: request.AccessList}
+	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal, Parts: bft.WithAccessList(nil, request.AccessList)}
 	var prepared *bft.PreparedCertificate
 	if m.b.isPermissionlessAt(curView.Sequence.Uint64()) && curView.Round.Sign() > 0 {
 		certificate, highest, err := m.roundChangeJustification(m.roundChangeCertificate, curView)
@@ -998,7 +1039,16 @@ func (m *machine) sendPreprepare(request *bft.Request) {
 		}
 		prepared = highest
 	}
-	encoded, err := bft.Encode(pp)
+	// A proposal sent in fragments in this view goes as its header and the
+	// names of its fragments; this node keeps the whole block.
+	wire := pp
+	if parts := m.finalParts(request); parts != nil {
+		final := *pp
+		final.Proposal = types.NewBlockWithHeader(request.Proposal.Header())
+		final.Parts = parts
+		wire = &final
+	}
+	encoded, err := bft.Encode(wire)
 	if err != nil {
 		return
 	}
