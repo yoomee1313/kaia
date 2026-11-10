@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/kaiachain/kaia/cmd/utils"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/klauspost/compress/zstd"
 	"github.com/urfave/cli/v2"
 )
 
@@ -72,6 +74,14 @@ var (
 		Usage: "With --check, the block to prove and check alone (-1 = every stored segment)",
 		Value: -1,
 	}
+	dbStatFromFlag = &cli.Uint64Flag{
+		Name:  "from",
+		Usage: "First block (0 = the first stored block access list)",
+	}
+	dbStatToFlag = &cli.Uint64Flag{
+		Name:  "end",
+		Usage: "End block, exclusive (0 = after the last stored block access list)",
+	}
 )
 
 var DBCommand = &cli.Command{
@@ -101,15 +111,41 @@ checks the stored lists against a chain: every segment they hold in full, or
 one block with a proof. With --pub the signature of the chain, a file or a
 package directory, is checked too.`,
 		},
+		{
+			Name:   "rebuild",
+			Usage:  "Rebuild the state from the BALs, without executing, into a new live pruned chain database",
+			Action: utils.MigrateFlags(dbRebuild),
+			Flags:  append(rebuildFlags, utils.SnapshotFlags...),
+			Description: `
+db rebuild --out DIR
+applies the stored block access lists from the genesis block, without
+executing any block, checking the state root of the header at the end of
+every batch, and writes a chain database of a live pruned node to DIR: the
+block data of this node with the rebuilt state. It works in DIR.rebuild and
+resumes from there after a restart.`,
+		},
+		{
+			Name:   "stat",
+			Usage:  "Summarize the stored block access lists",
+			Action: utils.MigrateFlags(dbStat),
+			Flags:  append([]cli.Flag{dbStatFromFlag, dbStatToFlag}, utils.SnapshotFlags...),
+			Description: `
+db stat [--from N] [--end M]
+prints the sizes of the stored block access lists, raw and zstd, the sizes of
+their reads stored apart, and per block the accounts, slots and changes.`,
+		},
 	},
 }
 
-func openDBForTool(ctx *cli.Context) database.DBManager {
-	return MakeFullNode(ctx).OpenDatabase(getConfig(ctx))
+func openDBForTool(ctx *cli.Context) (database.DBManager, string) {
+	stack := MakeFullNode(ctx)
+	dbc := getConfig(ctx)
+	db := stack.OpenDatabase(dbc)
+	return db, dbc.Dir
 }
 
 func dbHashChain(ctx *cli.Context) error {
-	db := openDBForTool(ctx)
+	db, _ := openDBForTool(ctx)
 	defer db.Close()
 	if path := ctx.String(hashChainCheckFlag.Name); path != "" {
 		return checkHashChain(db, path, ctx.String(hashChainPubFlag.Name), ctx.Int64(hashChainBlockFlag.Name), os.Stdout)
@@ -288,5 +324,117 @@ func checkHashChain(db database.DBManager, path, pubHex string, block int64, w i
 		checked++
 	}
 	fmt.Fprintf(w, "checked %d of %d segments in %s\n", checked, len(chain.Roots), time.Since(start).Round(time.Millisecond))
+	return nil
+}
+
+func dbStat(ctx *cli.Context) error {
+	db, _ := openDBForTool(ctx)
+	defer db.Close()
+	end := ctx.Uint64(dbStatToFlag.Name)
+	if end == 0 {
+		end = ^uint64(0)
+	}
+	return balStat(db, ctx.Uint64(dbStatFromFlag.Name), end, os.Stdout)
+}
+
+type balStats struct {
+	blocks, noNonce, raw, readBytes, noReads                       uint64
+	accounts, changed, writes, slotReads, acctChanges, codeChanges uint64
+	balances, nonces, deleted, cleared, accountBytes               uint64
+	sizes                                                          []int
+	all                                                            bytes.Buffer
+}
+
+// balStat prints the statistics of the lists stored in db for the blocks
+// from to end-1.
+func balStat(db database.DBManager, from, end uint64, w io.Writer) error {
+	s := new(balStats)
+	first, next := db.ReadBALRange()
+	fmt.Fprintf(w, "stored lists        blocks %d-%d\n", first, max(next, 1)-1)
+	for number := max(from, first); number < min(end, next); number++ {
+		enc, err := bal.ReadRaw(db, number)
+		if err != nil {
+			return err
+		}
+		list, err := access.Decode(enc)
+		if err != nil {
+			return fmt.Errorf("block %d: %w", number, err)
+		}
+		readsEnc := db.ReadBALReads(db.ReadCanonicalHash(number), number)
+		if readsEnc == nil {
+			s.noReads++
+		} else {
+			reads, err := access.DecodeReads(readsEnc)
+			if err == nil {
+				list, err = access.Combine(list, reads)
+			}
+			if err != nil {
+				return fmt.Errorf("block %d: reads: %w", number, err)
+			}
+		}
+		s.add(enc, readsEnc, list)
+	}
+	return s.print(w)
+}
+
+func (s *balStats) add(enc, readsEnc []byte, list *access.BlockAccessList) {
+	s.blocks++
+	s.raw += uint64(len(enc))
+	s.readBytes += uint64(len(readsEnc))
+	s.sizes = append(s.sizes, len(enc))
+	s.all.Write(enc)
+
+	nonceChanged := false
+	for _, a := range list.Accounts {
+		s.accounts++
+		if a.Changed() {
+			s.changed++
+		}
+		s.slotReads += uint64(len(a.StorageReads))
+		for _, sw := range a.StorageWrites {
+			s.writes += uint64(len(sw.Changes))
+		}
+		s.balances += uint64(len(a.BalanceChanges))
+		s.nonces += uint64(len(a.NonceChanges))
+		s.acctChanges += uint64(len(a.AccountChanges))
+		for _, c := range a.AccountChanges {
+			s.accountBytes += uint64(len(c.Account))
+		}
+		s.codeChanges += uint64(len(a.CodeChanges))
+		s.deleted += uint64(len(a.Deleted))
+		s.cleared += uint64(len(a.StorageCleared))
+		if len(a.NonceChanges) > 0 {
+			nonceChanged = true
+		}
+	}
+	if !nonceChanged {
+		s.noNonce++
+	}
+}
+
+func (s *balStats) print(w io.Writer) error {
+	if s.blocks == 0 {
+		fmt.Fprintln(w, "no blocks")
+		return nil
+	}
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		return err
+	}
+	compressed := len(enc.EncodeAll(s.all.Bytes(), nil))
+	sort.Ints(s.sizes)
+	pct := func(p float64) int { return s.sizes[int(float64(len(s.sizes)-1)*p)] }
+	per := func(n uint64) float64 { return float64(n) / float64(s.blocks) }
+
+	fmt.Fprintf(w, "blocks              %d (no nonce change: %d)\n", s.blocks, s.noNonce)
+	fmt.Fprintf(w, "raw bytes (writes)  %d (%.1f/block)\n", s.raw, per(s.raw))
+	fmt.Fprintf(w, "reads bytes         %d (%.1f/block, %d blocks without reads)\n", s.readBytes, per(s.readBytes), s.noReads)
+	fmt.Fprintf(w, "zstd (concatenated) %d (%.1f/block, ratio %.2f)\n", compressed, per(uint64(compressed)), float64(s.raw)/float64(compressed))
+	fmt.Fprintf(w, "size p50/p90/p99/max %d / %d / %d / %d\n", pct(0.5), pct(0.9), pct(0.99), s.sizes[len(s.sizes)-1])
+	fmt.Fprintf(w, "per block: accounts %.2f (changed %.2f), slot writes %.2f, slot reads %.2f\n",
+		per(s.accounts), per(s.changed), per(s.writes), per(s.slotReads))
+	fmt.Fprintf(w, "per block: balance %.2f, nonce %.2f, whole account %.3f (%.0f B avg), code %.3f, deleted %d, cleared %d\n",
+		per(s.balances), per(s.nonces), per(s.acctChanges),
+		float64(s.accountBytes)/float64(max(s.acctChanges, 1)), per(s.codeChanges), s.deleted, s.cleared)
 	return nil
 }

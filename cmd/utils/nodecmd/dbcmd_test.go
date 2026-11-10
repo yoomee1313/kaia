@@ -17,6 +17,7 @@
 package nodecmd
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/hex"
@@ -28,11 +29,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/bal"
 	"github.com/kaiachain/kaia/blockchain/bal/access"
+	"github.com/kaiachain/kaia/blockchain/state"
+	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/consensus/faker"
 	"github.com/kaiachain/kaia/crypto"
+	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/require"
 )
 
@@ -124,4 +132,65 @@ func TestDBHashChain(t *testing.T) {
 	require.ErrorIs(t, checkHashChain(db, file, "", -1, out), bal.ErrHashChain)
 	require.ErrorIs(t, checkHashChain(db, file, "", 8300, out), bal.ErrHashChain)
 	require.NoError(t, checkHashChain(db, file, "", 5, out), "the other segment still holds")
+
+	var stat bytes.Buffer
+	require.NoError(t, balStat(db, 0, ^uint64(0), &stat))
+	require.Contains(t, stat.String(), "blocks              8492")
+}
+
+// TestDBRebuild records the lists of a chain, rebuilds its state from them
+// into a live pruned chain database, and opens the head state there.
+func TestDBRebuild(t *testing.T) {
+	key, _ := crypto.GenerateKey()
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	config := params.TestKaiaConfig("prague")
+	gspec := &blockchain.Genesis{Config: config, Alloc: blockchain.GenesisAlloc{addr: {Balance: big.NewInt(params.KAIA)}}}
+	signer := types.LatestSignerForChainID(config.ChainID)
+
+	dir := filepath.Join(t.TempDir(), "chaindata")
+	db := openTestChainDB(dir)
+	genesis := gspec.MustCommit(db)
+	chain, err := blockchain.NewBlockChain(db, &blockchain.CacheConfig{
+		ArchiveMode: true, CacheSize: 64, BlockInterval: blockchain.DefaultBlockInterval,
+		TriesInMemory: blockchain.DefaultTriesInMemory, TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
+		BALRecord: true,
+	}, config, faker.NewFaker(), vm.Config{})
+	require.NoError(t, err)
+	const n = 40
+	sent := new(big.Int)
+	blocks, _ := blockchain.GenerateChain(config, genesis, faker.NewFaker(), db, n, func(i int, b *blockchain.BlockGen) {
+		to := common.BigToAddress(big.NewInt(int64(0x10000 + i%7 + 1)))
+		if i%7 == 0 {
+			sent.Add(sent, big.NewInt(int64(i+1)))
+		}
+		tx, err := types.SignTx(types.NewTransaction(b.TxNonce(addr), to, big.NewInt(int64(i+1)), 21000, big.NewInt(25*params.Gkei), nil), signer, key)
+		require.NoError(t, err)
+		b.AddTx(tx)
+	})
+	_, err = chain.InsertChain(blocks)
+	require.NoError(t, err)
+	chain.Stop()
+	first, next := db.ReadBALRange()
+	require.Equal(t, [2]uint64{1, n + 1}, [2]uint64{first, next})
+
+	out := filepath.Join(t.TempDir(), "rebuilt")
+	o := rebuildOptions{
+		out: out, commitEvery: 8, batch: 4, retention: 8, dirtyMiB: 64, cacheMiB: 64, workers: 2,
+		stateShards: 1, dbType: database.LevelDB, genesis: gspec,
+	}
+	require.NoError(t, rebuildState(db, dir, o, io.Discard))
+	require.NoDirExists(t, out+".rebuild")
+
+	rebuilt := openTestChainDB(out)
+	defer rebuilt.Close()
+	require.True(t, rebuilt.ReadPruningEnabled())
+	require.Equal(t, blocks[n-1].Hash(), rebuilt.ReadHeadBlockHash())
+	sdb, err := state.New(blocks[n-1].Root(), state.NewDatabase(rebuilt), nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, sent, sdb.GetBalance(common.BigToAddress(big.NewInt(0x10001))))
+	_, err = state.New(blocks[10].Root(), state.NewDatabase(rebuilt), nil, nil)
+	require.Error(t, err, "older states are pruned")
+	require.Equal(t, uint64(n), rebuilt.ReadBlockByHash(blocks[n-1].Hash()).NumberU64())
+
+	require.Error(t, rebuildState(openTestChainDB(dir), dir, o, io.Discard), "the output exists")
 }
