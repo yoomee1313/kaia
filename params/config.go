@@ -292,7 +292,7 @@ type ChainConfig struct {
 
 	// Limits of a block from the Amber hardfork. Zero means the default.
 	AmberBlockComputationCostLimit uint64 `json:"amberBlockComputationCostLimit,omitempty"` // Sum of the opcode computation costs of the txs of a block
-	AmberBlockAccessListEntryLimit uint64 `json:"amberBlockAccessListEntryLimit,omitempty"` // Accounts plus storage slots, read or written, in the block access list
+	AmberBlockAccessListEntryLimit uint64 `json:"amberBlockAccessListEntryLimit,omitempty"` // Changed accounts plus written storage slots in the block access list
 
 	// Kip103 is a special purpose hardfork feature that can be executed only once
 	// Both Kip103CompatibleBlock and Kip103ContractAddress should be specified to enable KIP103
@@ -583,9 +583,9 @@ func (c *ChainConfig) BlockComputationCostLimit() uint64 {
 	return DefaultAmberBlockComputationCostLimit
 }
 
-// BlockAccessListEntryLimit returns the limit of the entries of the block
-// access list of a block from the Amber hardfork: its accounts plus its storage
-// slots, read or written.
+// BlockAccessListEntryLimit returns the limit of the write entries of the
+// block access list of a block from the Amber hardfork: its changed accounts
+// plus their written storage slots. Reads are not counted.
 func (c *ChainConfig) BlockAccessListEntryLimit() uint64 {
 	if c.AmberBlockAccessListEntryLimit != 0 {
 		return c.AmberBlockAccessListEntryLimit

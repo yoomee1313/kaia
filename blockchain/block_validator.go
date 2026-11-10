@@ -605,7 +605,7 @@ func (v *BlockValidator) validateBlockAccessListHash(block *types.Block, statedb
 	if hash != *header.BlockAccessListHash {
 		return fmt.Errorf("invalid block access list hash (remote: %x local: %x)", *header.BlockAccessListHash, hash)
 	}
-	return nil
+	return CheckBlockAccessListEntries(v.config, header.Number, list.WriteEntryCount())
 }
 
 func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, receiptHash, root common.Hash, usedGas uint64) error {

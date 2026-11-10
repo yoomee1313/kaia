@@ -94,7 +94,7 @@ func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*a
 	} else if got != *want {
 		return nil, fmt.Errorf("%w: header %x, list %x", errAccessListHashMismatch, *want, got)
 	}
-	if err := blockchain.CheckBlockAccessListEntries(config, number, list.EntryCount()); err != nil {
+	if err := blockchain.CheckBlockAccessListEntries(config, number, list.WriteEntryCount()); err != nil {
 		return nil, err
 	}
 	block, ok := pp.Proposal.(*types.Block)
@@ -134,7 +134,7 @@ func verifyExecution(config *params.ChainConfig, validator blockchain.Validator,
 	if err != nil {
 		return nil, true, err
 	}
-	if err := blockchain.CheckBlockAccessListEntries(config, block.Number(), list.EntryCount()); err != nil {
+	if err := blockchain.CheckBlockAccessListEntries(config, block.Number(), list.WriteEntryCount()); err != nil {
 		return nil, false, err
 	}
 	if err := blockchain.CheckProposalSize(config, block.Number(), uint64(block.Size()), uint64(len(enc))); err != nil {

@@ -137,3 +137,52 @@ func TestAmberInsertedBlockAccessListHash(t *testing.T) {
 	require.ErrorContains(t, err, "does not match the hash in its header")
 	require.Equal(t, 2, n)
 }
+
+// TestAmberWriteEntryLimit checks that a block whose list has more write
+// entries than the limit is invalid on import, whether it is executed or
+// inserted with its list: the limit counts the writes, which every node has.
+func TestAmberWriteEntryLimit(t *testing.T) {
+	env := newAmberTestEnv(t)
+	src, blocks := env.generate(3, amberTestTxs(env))
+	lists := checkBAL(t, src, blocks)
+	writes := lists[2].WriteEntryCount()
+	require.Less(t, writes, lists[2].WriteEntryCount()+uint64(len(lists[2].Accounts)), "reads are not counted")
+
+	open := func(limit uint64) *blockchain.BlockChain {
+		db := database.NewMemoryDBManager()
+		amber := env.gspec.Config.AmberCompatibleBlock
+		env.gspec.Config.AmberCompatibleBlock = nil // see newAmberTestEnv
+		env.gspec.MustCommit(db)
+		env.gspec.Config.AmberCompatibleBlock = amber
+		cfg := *env.config
+		cfg.AmberBlockAccessListEntryLimit = limit
+		chain, err := blockchain.NewBlockChain(db, regenCacheConfig(true), &cfg, env.sealer, vm.Config{})
+		require.NoError(t, err)
+		t.Cleanup(chain.Stop)
+		chain.Processor().RegisterBlockStateModule(env.sealer)
+		return chain
+	}
+	withLists := func() []*Block {
+		out := make([]*Block, len(blocks))
+		for i, block := range blocks {
+			enc, err := lists[i].Writes().Encode()
+			require.NoError(t, err)
+			out[i] = &Block{Block: block, Receipts: src.GetReceiptsByBlockHash(block.Hash()), BAL: enc}
+		}
+		return out
+	}
+
+	// At the limit the blocks are valid.
+	limit := max(writes, lists[0].WriteEntryCount(), lists[1].WriteEntryCount())
+	_, err := open(limit).InsertChain(blocks)
+	require.NoError(t, err)
+	_, err = InsertChain(open(limit), withLists())
+	require.NoError(t, err)
+
+	// One below the largest block, executed and inserted with its list.
+	limit--
+	_, err = open(limit).InsertChain(blocks)
+	require.ErrorIs(t, err, blockchain.ErrBlockAccessListEntryLimit)
+	_, err = InsertChain(open(limit), withLists())
+	require.ErrorIs(t, err, blockchain.ErrBlockAccessListEntryLimit)
+}

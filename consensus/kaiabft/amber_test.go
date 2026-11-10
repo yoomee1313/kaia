@@ -47,6 +47,7 @@ func amberBlock(t *testing.T, number int64) (*types.Block, []byte) {
 	b := access.NewBuilder()
 	b.ReadSlot(common.HexToAddress("0x01"), common.HexToHash("0x11"))
 	b.SetBalance(common.HexToAddress("0x02"), 1, big.NewInt(5))
+	b.SetBalance(common.HexToAddress("0x03"), 1, big.NewInt(7))
 	list := b.Build()
 	hash, err := list.Hash()
 	require.NoError(t, err)
@@ -117,11 +118,11 @@ func TestCheckProposalAccessList(t *testing.T) {
 	header.BlockAccessListHash = &common.Hash{9}
 	require.ErrorIs(t, check(amberConfig(), pp(types.NewBlockWithHeader(header), otherEnc)), errAccessListHashMismatch)
 
-	// The entry limit: the list has 3 entries.
+	// The entry limit: the list has 2 write entries; its read is not counted.
 	cfg := amberConfig()
-	cfg.AmberBlockAccessListEntryLimit = 3
-	require.NoError(t, check(cfg, pp(block, enc)))
 	cfg.AmberBlockAccessListEntryLimit = 2
+	require.NoError(t, check(cfg, pp(block, enc)))
+	cfg.AmberBlockAccessListEntryLimit = 1
 	require.ErrorIs(t, check(cfg, pp(block, enc)), blockchain.ErrBlockAccessListEntryLimit)
 
 	// The size limit of the block and the list together.
@@ -298,6 +299,7 @@ func TestVerifyExecution(t *testing.T) {
 	access.EnableRecorder(statedb)
 	statedb.GetState(common.HexToAddress("0x01"), common.HexToHash("0x11"))
 	statedb.AddBalance(common.HexToAddress("0x02"), big.NewInt(5))
+	statedb.AddBalance(common.HexToAddress("0x03"), big.NewInt(7))
 	statedb.IntermediateRoot(true)
 	block := newEmptyBlock(10, common.Hash{1})
 	res := &blockchain.SpeculativeResult{State: statedb, ProcessStats: blockchain.ProcessStats{ComputationCost: 1000}}
@@ -317,7 +319,7 @@ func TestVerifyExecution(t *testing.T) {
 	require.False(t, local, "the proposal is invalid")
 
 	cfg.AmberBlockComputationCostLimit = 0
-	cfg.AmberBlockAccessListEntryLimit = access.Recorded(statedb).EntryCount() - 1
+	cfg.AmberBlockAccessListEntryLimit = access.Recorded(statedb).WriteEntryCount() - 1
 	_, local, err = verifyExecution(cfg, nil, block, res)
 	require.ErrorIs(t, err, blockchain.ErrBlockAccessListEntryLimit)
 	require.False(t, local)

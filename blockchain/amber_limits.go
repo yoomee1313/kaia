@@ -51,9 +51,10 @@ func CheckBlockComputationCost(config *params.ChainConfig, number *big.Int, cost
 	return nil
 }
 
-// CheckBlockAccessListEntries checks the entries of the block access list of a
-// block, reads included, against the Amber limit. Blocks before Amber have none.
-// The reads are not part of the block, so only consensus nodes can check it.
+// CheckBlockAccessListEntries checks the write entries of the block access list
+// of a block, see access.BlockAccessList.WriteEntryCount, against the Amber
+// limit. Blocks before Amber have none. It is a rule of the block: the writes
+// are what the header commits, so every node that has them can check it.
 func CheckBlockAccessListEntries(config *params.ChainConfig, number *big.Int, entries uint64) error {
 	if !config.IsAmberForkEnabled(number) {
 		return nil

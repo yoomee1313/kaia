@@ -269,9 +269,9 @@ func TestEntryCountAndStats(t *testing.T) {
 	b.ClearStorage(a3, 3)
 
 	list := b.Build()
-	require.Equal(t, uint64(3+3), list.EntryCount(), "3 accounts, slots s1 and s2 of a1, s3 of a2")
+	require.Equal(t, uint64(3+2), list.WriteEntryCount(), "3 changed accounts, written slots s2 of a1 and s3 of a2; the read of s1 is not counted")
 	entries, size := b.Stats()
-	require.Equal(t, list.EntryCount(), entries)
+	require.Equal(t, list.WriteEntryCount(), entries)
 	enc, err := list.Encode()
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, size, uint64(len(enc)))
@@ -284,4 +284,19 @@ func TestEntryCountAndStats(t *testing.T) {
 	require.False(t, hasSlot)
 	has, _ = b.Has(common.HexToAddress("0x04"), nil)
 	require.False(t, has)
+
+	// An account that is only read is not a write entry.
+	a4 := common.HexToAddress("0x04")
+	b.ReadAccount(a4)
+	b.ReadSlot(a4, s1)
+	require.Equal(t, uint64(3+2), b.Build().WriteEntryCount())
+	entries, _ = b.Stats()
+	require.Equal(t, uint64(3+2), entries)
+	written, _ := b.Written(a4, nil)
+	require.False(t, written)
+	written, writtenSlot := b.Written(a1, &s2)
+	require.True(t, written)
+	require.True(t, writtenSlot)
+	_, writtenSlot = b.Written(a1, &s1)
+	require.False(t, writtenSlot, "s1 of a1 is only read")
 }

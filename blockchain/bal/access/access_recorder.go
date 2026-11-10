@@ -341,58 +341,66 @@ func (r *accessRecorder) captureAccount(c *state.AccessChange) {
 // balance, a nonce, a code hash and a storage root with their headers.
 const wholeAccountExtraSize = 33 + 9 + 33 + 40 + 4*9
 
-// Stats returns the entries of the block access list recorded so far on s, as
-// BlockAccessList.EntryCount counts them, and an upper bound of its encoded
-// size. It includes the accesses of the running tx that are not finalised yet,
-// so a block producer can check a tx before it keeps it. The changes not
-// recorded yet are bounded by a change of every field of each changed account
-// and of each written slot. It returns zeros if s has no recorder.
+// Stats returns the write entries of the block access list recorded so far on
+// s, as BlockAccessList.WriteEntryCount counts them, and an upper bound of the
+// encoded size of the whole list, reads included. It includes the accesses of
+// the running tx that are not finalised yet, so a block producer can check a
+// tx before it keeps it: every account changed by the journal and every
+// written slot count as writes, even if the value ends up the same, and the
+// changes not recorded yet are bounded by a change of every field. It returns
+// zeros if s has no recorder.
 func Stats(s *state.StateDB) (entries, size uint64) {
 	r, ok := s.AccessRecorder().(*accessRecorder)
 	if !ok {
 		return 0, 0
 	}
 	entries, size = r.builder.Stats()
-	newAccounts := make(map[common.Address]struct{})
-	newSlots := make(map[common.Address]map[common.Hash]struct{})
-	addAccount := func(addr common.Address) {
-		if _, ok := newAccounts[addr]; ok {
+	// Reads only add to the size.
+	readAccounts := make(map[common.Address]struct{})
+	readSlots := make(map[common.Address]map[common.Hash]struct{})
+	readAccount := func(addr common.Address) {
+		if _, ok := readAccounts[addr]; ok {
 			return
 		}
+		readAccounts[addr] = struct{}{}
 		if has, _ := r.builder.Has(addr, nil); !has {
-			newAccounts[addr] = struct{}{}
-			entries++
 			size += MaxAccountSize
 		}
 	}
-	addSlot := func(addr common.Address, slot common.Hash) {
-		addAccount(addr)
-		if _, ok := newSlots[addr][slot]; ok {
+	readSlot := func(addr common.Address, slot common.Hash) {
+		readAccount(addr)
+		if _, ok := readSlots[addr][slot]; ok {
 			return
 		}
+		if readSlots[addr] == nil {
+			readSlots[addr] = make(map[common.Hash]struct{})
+		}
+		readSlots[addr][slot] = struct{}{}
 		if _, has := r.builder.Has(addr, &slot); !has {
-			if newSlots[addr] == nil {
-				newSlots[addr] = make(map[common.Hash]struct{})
-			}
-			newSlots[addr][slot] = struct{}{}
-			entries++
 			size += MaxSlotSize
 		}
 	}
 	for addr := range r.pendingAccounts {
-		addAccount(addr)
+		readAccount(addr)
 	}
 	for addr, slots := range r.pendingSlots {
 		for slot := range slots {
-			addSlot(addr, slot)
+			readSlot(addr, slot)
 		}
 	}
+	// Changes of the journal are writes.
 	changes, _ := s.AccessChanges(r.journalOffset, false, false)
 	for i := range changes {
 		c := &changes[i]
-		addAccount(c.Address)
+		if written, _ := r.builder.Written(c.Address, nil); !written {
+			entries++
+		}
+		readAccount(c.Address)
 		for slot := range c.Slots {
-			addSlot(c.Address, slot)
+			if _, written := r.builder.Written(c.Address, &slot); !written {
+				entries++
+			}
+			readSlot(c.Address, slot)
 			size += MaxChangeSize
 		}
 		// A balance, a nonce and the whole account, which adds a balance, a

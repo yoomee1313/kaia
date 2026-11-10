@@ -76,6 +76,9 @@ func (c *chain) ApplyBlock(block *types.Block, statedb *state.StateDB, check fun
 		if want := block.Header().BlockAccessListHash; want == nil || *want != hash {
 			return nil, nil, 0, fmt.Errorf("block access list of block %d does not match the hash in its header", block.NumberU64())
 		}
+		if err := blockchain.CheckBlockAccessListEntries(c.bc.Config(), block.Number(), list.WriteEntryCount()); err != nil {
+			return nil, nil, 0, fmt.Errorf("block access list of block %d: %w", block.NumberU64(), err)
+		}
 	}
 	receipts := make(types.Receipts, len(b.Receipts))
 	for i, r := range b.Receipts {

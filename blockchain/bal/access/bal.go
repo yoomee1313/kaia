@@ -363,12 +363,16 @@ func (a *AccountAccess) LastWriteIndex() (idx uint32, ok bool) {
 	return idx, ok
 }
 
-// EntryCount returns the accounts plus the storage slots of the list, read or
-// written. It is what the Amber entry limit counts.
-func (s *BlockAccessList) EntryCount() uint64 {
-	n := uint64(len(s.Accounts))
+// WriteEntryCount returns the entries of the writes of the list, which the
+// Amber entry limit counts: the accounts of Writes() plus their written storage
+// slots. Reads are not counted, so every node that has the writes of a block,
+// whose hash the header commits, counts the same.
+func (s *BlockAccessList) WriteEntryCount() uint64 {
+	var n uint64
 	for i := range s.Accounts {
-		n += uint64(len(s.Accounts[i].StorageWrites) + len(s.Accounts[i].StorageReads))
+		if a := &s.Accounts[i]; a.Changed() {
+			n += 1 + uint64(len(a.StorageWrites))
+		}
 	}
 	return n
 }

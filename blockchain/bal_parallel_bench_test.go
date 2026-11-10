@@ -338,7 +338,7 @@ func BenchmarkAccessListExecution(b *testing.B) {
 	for _, c := range cases {
 		b.Run(c.name, func(b *testing.B) {
 			bb := makeBenchBlock(b, c.spec)
-			b.Logf("%s: %d txs, %d list entries (limit %d)", c.name, len(bb.block.Transactions()), bb.list.EntryCount(), params.DefaultAmberBlockAccessListEntryLimit)
+			b.Logf("%s: %d txs, %d list entries (limit %d)", c.name, len(bb.block.Transactions()), bb.list.WriteEntryCount(), params.DefaultAmberBlockAccessListEntryLimit)
 			b.Run("in-order", func(b *testing.B) { benchInOrder(b, bb) })
 			for _, w := range workerCounts {
 				b.Run(fmt.Sprintf("parallel-%d", w), func(b *testing.B) { benchParallel(b, bb, w) })
