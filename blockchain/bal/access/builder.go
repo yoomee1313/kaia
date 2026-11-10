@@ -221,3 +221,64 @@ func appendIndex(list []uint32, idx uint32) []uint32 {
 	}
 	return append(list, idx)
 }
+
+// Upper bounds of the RLP size of the parts of a list, used by Stats and by a
+// block producer that adds the accesses of a running tx.
+const (
+	listHeaderSize = 9 // the longest RLP list or string header
+	indexSize      = 5
+
+	MaxAccountSize = 21 + 9*listHeaderSize           // an address and the headers of the account and its lists
+	MaxSlotSize    = 33 + listHeaderSize             // a slot, read or with the header of its writes
+	MaxChangeSize  = indexSize + 33 + listHeaderSize // an index and a value of up to 32 bytes
+)
+
+// MaxBytesChangeSize bounds the size of a change that holds n bytes, a code or
+// a whole account.
+func MaxBytesChangeSize(n int) uint64 {
+	return indexSize + 2*listHeaderSize + uint64(n)
+}
+
+// Stats returns the entries of the list being built, as EntryCount counts
+// them, and an upper bound of its encoded size.
+func (b *Builder) Stats() (entries, size uint64) {
+	size = listHeaderSize
+	for _, a := range b.accounts {
+		entries++
+		size += MaxAccountSize
+		for _, changes := range a.slots {
+			entries++
+			size += MaxSlotSize + uint64(len(changes))*MaxChangeSize
+		}
+		for slot := range a.reads {
+			if _, written := a.slots[slot]; !written {
+				entries++
+				size += MaxSlotSize
+			}
+		}
+		size += uint64(len(a.balances)+len(a.nonces)) * MaxChangeSize
+		for _, c := range a.codes {
+			size += MaxBytesChangeSize(len(c.Code))
+		}
+		for _, c := range a.accounts {
+			size += MaxBytesChangeSize(len(c.Account))
+		}
+		size += uint64(len(a.deleted)+len(a.cleared)) * indexSize
+	}
+	return entries, size
+}
+
+// Has reports whether the builder has the account, and whether it has the
+// slot of the account, read or written.
+func (b *Builder) Has(addr common.Address, slot *common.Hash) (account, hasSlot bool) {
+	a := b.accounts[addr]
+	if a == nil {
+		return false, false
+	}
+	if slot == nil {
+		return true, false
+	}
+	_, read := a.reads[*slot]
+	_, written := a.slots[*slot]
+	return true, read || written
+}

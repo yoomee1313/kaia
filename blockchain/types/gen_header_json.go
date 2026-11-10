@@ -16,27 +16,29 @@ var _ = (*headerMarshaling)(nil)
 // MarshalJSON marshals as JSON.
 func (h Header) MarshalJSON() ([]byte, error) {
 	type Header struct {
-		ParentHash    common.Hash     `json:"parentHash"       gencodec:"required"`
-		Rewardbase    common.Address  `json:"reward"           gencodec:"required"`
-		Root          common.Hash     `json:"stateRoot"        gencodec:"required"`
-		TxHash        common.Hash     `json:"transactionsRoot" gencodec:"required"`
-		ReceiptHash   common.Hash     `json:"receiptsRoot"     gencodec:"required"`
-		Bloom         Bloom           `json:"logsBloom"        gencodec:"required"`
-		BlockScore    *hexutil.Big    `json:"blockScore"       gencodec:"required"`
-		Number        *hexutil.Big    `json:"number"           gencodec:"required"`
-		GasUsed       hexutil.Uint64  `json:"gasUsed"          gencodec:"required"`
-		Time          *hexutil.Big    `json:"timestamp"        gencodec:"required"`
-		TimeFoS       hexutil.Uint    `json:"timestampFoS"              gencodec:"required"`
-		Extra         hexutil.Bytes   `json:"extraData"                 gencodec:"required"`
-		Governance    hexutil.Bytes   `json:"governanceData"            gencodec:"required"`
-		Vote          hexutil.Bytes   `json:"voteData,omitempty"`
-		BaseFee       *hexutil.Big    `json:"baseFeePerGas,omitempty" rlp:"optional"`
-		RandomReveal  hexutil.Bytes   `json:"randomReveal,omitempty" rlp:"optional"`
-		MixHash       hexutil.Bytes   `json:"mixHash,omitempty" rlp:"optional"`
-		BlobGasUsed   *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
-		ExcessBlobGas *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
-		VRank         hexutil.Bytes   `json:"vrank,omitempty" rlp:"optional"`
-		Hash          common.Hash     `json:"hash"`
+		ParentHash          common.Hash     `json:"parentHash"       gencodec:"required"`
+		Rewardbase          common.Address  `json:"reward"           gencodec:"required"`
+		Root                common.Hash     `json:"stateRoot"        gencodec:"required"`
+		TxHash              common.Hash     `json:"transactionsRoot" gencodec:"required"`
+		ReceiptHash         common.Hash     `json:"receiptsRoot"     gencodec:"required"`
+		Bloom               Bloom           `json:"logsBloom"        gencodec:"required"`
+		BlockScore          *hexutil.Big    `json:"blockScore"       gencodec:"required"`
+		Number              *hexutil.Big    `json:"number"           gencodec:"required"`
+		GasUsed             hexutil.Uint64  `json:"gasUsed"          gencodec:"required"`
+		Time                *hexutil.Big    `json:"timestamp"        gencodec:"required"`
+		TimeFoS             hexutil.Uint    `json:"timestampFoS"              gencodec:"required"`
+		Extra               hexutil.Bytes   `json:"extraData"                 gencodec:"required"`
+		Governance          hexutil.Bytes   `json:"governanceData"            gencodec:"required"`
+		Vote                hexutil.Bytes   `json:"voteData,omitempty"`
+		BaseFee             *hexutil.Big    `json:"baseFeePerGas,omitempty" rlp:"optional"`
+		RandomReveal        hexutil.Bytes   `json:"randomReveal,omitempty" rlp:"optional"`
+		MixHash             hexutil.Bytes   `json:"mixHash,omitempty" rlp:"optional"`
+		BlobGasUsed         *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
+		ExcessBlobGas       *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
+		VRank               hexutil.Bytes   `json:"vrank,omitempty" rlp:"optional"`
+		BlockAccessListHash *common.Hash    `json:"blockAccessListHash,omitempty" rlp:"optional"`
+		CumulativeRoot      *common.Hash    `json:"cumulativeRoot,omitempty" rlp:"optional"`
+		Hash                common.Hash     `json:"hash"`
 	}
 	var enc Header
 	enc.ParentHash = h.ParentHash
@@ -59,6 +61,8 @@ func (h Header) MarshalJSON() ([]byte, error) {
 	enc.BlobGasUsed = (*hexutil.Uint64)(h.BlobGasUsed)
 	enc.ExcessBlobGas = (*hexutil.Uint64)(h.ExcessBlobGas)
 	enc.VRank = h.VRank
+	enc.BlockAccessListHash = h.BlockAccessListHash
+	enc.CumulativeRoot = h.CumulativeRoot
 	enc.Hash = h.Hash()
 	return json.Marshal(&enc)
 }
@@ -66,26 +70,28 @@ func (h Header) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON unmarshals from JSON.
 func (h *Header) UnmarshalJSON(input []byte) error {
 	type Header struct {
-		ParentHash    *common.Hash    `json:"parentHash"       gencodec:"required"`
-		Rewardbase    *common.Address `json:"reward"           gencodec:"required"`
-		Root          *common.Hash    `json:"stateRoot"        gencodec:"required"`
-		TxHash        *common.Hash    `json:"transactionsRoot" gencodec:"required"`
-		ReceiptHash   *common.Hash    `json:"receiptsRoot"     gencodec:"required"`
-		Bloom         *Bloom          `json:"logsBloom"        gencodec:"required"`
-		BlockScore    *hexutil.Big    `json:"blockScore"       gencodec:"required"`
-		Number        *hexutil.Big    `json:"number"           gencodec:"required"`
-		GasUsed       *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
-		Time          *hexutil.Big    `json:"timestamp"        gencodec:"required"`
-		TimeFoS       *hexutil.Uint   `json:"timestampFoS"              gencodec:"required"`
-		Extra         *hexutil.Bytes  `json:"extraData"                 gencodec:"required"`
-		Governance    *hexutil.Bytes  `json:"governanceData"            gencodec:"required"`
-		Vote          *hexutil.Bytes  `json:"voteData,omitempty"`
-		BaseFee       *hexutil.Big    `json:"baseFeePerGas,omitempty" rlp:"optional"`
-		RandomReveal  *hexutil.Bytes  `json:"randomReveal,omitempty" rlp:"optional"`
-		MixHash       *hexutil.Bytes  `json:"mixHash,omitempty" rlp:"optional"`
-		BlobGasUsed   *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
-		ExcessBlobGas *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
-		VRank         *hexutil.Bytes  `json:"vrank,omitempty" rlp:"optional"`
+		ParentHash          *common.Hash    `json:"parentHash"       gencodec:"required"`
+		Rewardbase          *common.Address `json:"reward"           gencodec:"required"`
+		Root                *common.Hash    `json:"stateRoot"        gencodec:"required"`
+		TxHash              *common.Hash    `json:"transactionsRoot" gencodec:"required"`
+		ReceiptHash         *common.Hash    `json:"receiptsRoot"     gencodec:"required"`
+		Bloom               *Bloom          `json:"logsBloom"        gencodec:"required"`
+		BlockScore          *hexutil.Big    `json:"blockScore"       gencodec:"required"`
+		Number              *hexutil.Big    `json:"number"           gencodec:"required"`
+		GasUsed             *hexutil.Uint64 `json:"gasUsed"          gencodec:"required"`
+		Time                *hexutil.Big    `json:"timestamp"        gencodec:"required"`
+		TimeFoS             *hexutil.Uint   `json:"timestampFoS"              gencodec:"required"`
+		Extra               *hexutil.Bytes  `json:"extraData"                 gencodec:"required"`
+		Governance          *hexutil.Bytes  `json:"governanceData"            gencodec:"required"`
+		Vote                *hexutil.Bytes  `json:"voteData,omitempty"`
+		BaseFee             *hexutil.Big    `json:"baseFeePerGas,omitempty" rlp:"optional"`
+		RandomReveal        *hexutil.Bytes  `json:"randomReveal,omitempty" rlp:"optional"`
+		MixHash             *hexutil.Bytes  `json:"mixHash,omitempty" rlp:"optional"`
+		BlobGasUsed         *hexutil.Uint64 `json:"blobGasUsed" rlp:"optional"`
+		ExcessBlobGas       *hexutil.Uint64 `json:"excessBlobGas" rlp:"optional"`
+		VRank               *hexutil.Bytes  `json:"vrank,omitempty" rlp:"optional"`
+		BlockAccessListHash *common.Hash    `json:"blockAccessListHash,omitempty" rlp:"optional"`
+		CumulativeRoot      *common.Hash    `json:"cumulativeRoot,omitempty" rlp:"optional"`
 	}
 	var dec Header
 	if err := json.Unmarshal(input, &dec); err != nil {
@@ -163,6 +169,12 @@ func (h *Header) UnmarshalJSON(input []byte) error {
 	}
 	if dec.VRank != nil {
 		h.VRank = *dec.VRank
+	}
+	if dec.BlockAccessListHash != nil {
+		h.BlockAccessListHash = dec.BlockAccessListHash
+	}
+	if dec.CumulativeRoot != nil {
+		h.CumulativeRoot = dec.CumulativeRoot
 	}
 	return nil
 }

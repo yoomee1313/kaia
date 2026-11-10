@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -97,6 +98,10 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, b
 	if h == nil || !h.Inserted(block.Hash()) {
 		if h != nil {
 			h.Executing(statedb)
+		}
+		// From the Amber hardfork the header commits the hash of the list.
+		if bc.chainConfig.IsAmberForkEnabled(block.Number()) && !access.Recording(statedb) {
+			access.EnableRecorder(statedb)
 		}
 		return bc.processor.Process(context.Background(), block, statedb, bc.vmConfig)
 	}

@@ -60,6 +60,21 @@ func TestChainConfig_CheckPermissionlessConfig(t *testing.T) {
 	assert.NoError(t, KairosChainConfig.CheckPermissionlessConfig())
 }
 
+func TestChainConfig_CheckConfigForkOrderAmberBlock(t *testing.T) {
+	for _, tc := range []struct {
+		amber int64
+		ok    bool
+	}{{0, true}, {HeaderSegmentSize, true}, {3 * HeaderSegmentSize, true}, {1, false}, {HeaderSegmentSize - 1, false}, {HeaderSegmentSize + 1, false}} {
+		c := TestKaiaConfig("prague")
+		c.AmberCompatibleBlock = big.NewInt(tc.amber)
+		if err := c.CheckConfigForkOrder(); tc.ok {
+			assert.NoError(t, err, "amber %d", tc.amber)
+		} else {
+			assert.ErrorContains(t, err, "not a multiple of 8192", "amber %d", tc.amber)
+		}
+	}
+}
+
 func TestChainConfig_Copy(t *testing.T) {
 	// Temporarily modify MainnetChainConfig to simulate copying `nil` field.
 	savedBlock := MainnetChainConfig.LondonCompatibleBlock

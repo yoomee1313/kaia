@@ -66,6 +66,17 @@ func (c *chain) ApplyBlock(block *types.Block, statedb *state.StateDB, check fun
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("block access list of block %d: %w", block.NumberU64(), err)
 	}
+	// From the Amber hardfork the header commits the hash of the list, which
+	// BlockValidator.ValidateState does not check for a block inserted with it.
+	if c.bc.Config().IsAmberForkEnabled(block.Number()) {
+		hash, err := list.Hash()
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("block access list of block %d: %w", block.NumberU64(), err)
+		}
+		if want := block.Header().BlockAccessListHash; want == nil || *want != hash {
+			return nil, nil, 0, fmt.Errorf("block access list of block %d does not match the hash in its header", block.NumberU64())
+		}
+	}
 	receipts := make(types.Receipts, len(b.Receipts))
 	for i, r := range b.Receipts {
 		logs := make([]*types.Log, len(r.Logs))

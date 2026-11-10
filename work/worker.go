@@ -23,6 +23,7 @@
 package work
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -33,6 +34,7 @@ import (
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -117,6 +119,11 @@ type Task struct {
 	txs      []*types.Transaction
 	receipts []*types.Receipt
 	blobs    int
+
+	// From the Amber hardfork: the opcode computation cost of the kept txs,
+	// and the size of the txs being applied, not yet counted in size.
+	computationCost uint64
+	pendingSize     uint64
 
 	createdAt time.Time
 }
@@ -473,6 +480,7 @@ func (self *worker) commitNewWork() {
 	self.current.stateMu.Lock()
 	defer self.current.stateMu.Unlock()
 
+	startBlockAccessRecorder(self.config, self.current.state, header)
 	if err := self.chain.Processor().InitializeState(header, self.current.state); err != nil {
 		logger.Error("Failed to initialize state for mining", "number", header.Number, "err", err)
 		return
@@ -734,6 +742,9 @@ func (env *Task) ApplyTransactions(txs *types.TransactionsByPriceAndNonce, bc Bl
 	vmConfig := &vm.Config{
 		RunningEVM: chEVM,
 	}
+	if env.config.IsAmberForkEnabled(env.header.Number) {
+		vmConfig.BeforeTxFinalise = env.checkAmberLimits
+	}
 
 	txLimit := params.BlockGenerationTxLimit
 	arrayTxs := builder.ArrayifyByCount(txs, txLimit)
@@ -844,6 +855,15 @@ CommitTransactionLoop:
 			err, logs = env.commitTransaction(tx, bc, nodeAddr, vmConfig)
 		}
 
+		if isBlockLimitError(err) {
+			// The tx is left out and the block is closed, as when the block is full.
+			logger.Debug("Block limit reached", "hash", tx.Hash().String(), "err", err)
+			if len(targetBundle.BundleTxs) != 0 {
+				isExecutingBundleTxs.Store(0)
+			}
+			break CommitTransactionLoop
+		}
+
 		switch err {
 		case blockchain.ErrNonceTooLow:
 			// New head notification data race between the transaction pool and miner, shift
@@ -934,9 +954,11 @@ CommitTransactionLoop:
 func (env *Task) commitTransaction(tx *types.Transaction, bc BlockChain, nodeAddr common.Address, vmConfig *vm.Config) (error, []*types.Log) {
 	snap := env.state.Snapshot()
 
+	env.pendingSize = uint64(tx.Size())
 	receipt, _, err := bc.ApplyTransaction(env.config, &nodeAddr, env.state, env.header, tx, &env.header.GasUsed, vmConfig)
+	env.pendingSize = 0
 	if err != nil {
-		if err != vm.ErrInsufficientBalance && err != vm.ErrTotalTimeLimitReached {
+		if err != vm.ErrInsufficientBalance && err != vm.ErrTotalTimeLimitReached && !isBlockLimitError(err) {
 			tx.MarkUnexecutable(true)
 		}
 		env.state.RevertToSnapshot(snap)
@@ -961,6 +983,7 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 	blobGasUsedSnapshot := env.header.BlobGasUsed
 	blobsSnapshot := env.blobs
 	tcountSnapshot := env.tcount
+	computationCostSnapshot := env.computationCost
 	txs := []*types.Transaction{}
 	receipts := []*types.Receipt{}
 	logs := []*types.Log{}
@@ -981,6 +1004,7 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 		// blob related env are restored to the snapshot
 		env.header.BlobGasUsed = blobGasUsedSnapshot
 		env.blobs = blobsSnapshot
+		env.computationCost = computationCostSnapshot
 	}
 
 	var totalTxSize uint64 = 0
@@ -994,11 +1018,13 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 		}
 
 		env.state.SetTxContext(tx.Hash(), common.Hash{}, env.tcount)
+		env.pendingSize = totalTxSize + uint64(tx.Size())
 		receipt, _, err := bc.ApplyTransaction(env.config, &nodeAddr, env.state, env.header, tx, &env.header.GasUsed, vmConfig)
+		env.pendingSize = 0
 		// Bundled tx will be rejected with any receipt.Status other than success.
 		// There may be cases where a revert occurs within the EVM, which could result in an attack on a tx sender in an already executed bundle.
 		if err != nil || receipt.Status != types.ReceiptStatusSuccessful {
-			if err != vm.ErrInsufficientBalance && err != vm.ErrTotalTimeLimitReached {
+			if err != vm.ErrInsufficientBalance && err != vm.ErrTotalTimeLimitReached && !isBlockLimitError(err) {
 				markAllTxUnexecutable()
 			}
 			receiptStatus := ""
@@ -1032,6 +1058,37 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 	env.receipts = append(env.receipts, receipts...)
 
 	return nil, nil, logs
+}
+
+// amberFinalizeEntryReserve is the room a block producer leaves under the
+// entry limit of the block access list for FinalizeState, which runs after the
+// txs and adds the accounts of the block rewards.
+const amberFinalizeEntryReserve = 64
+
+// checkAmberLimits is the BeforeTxFinalise hook of a block producer from the
+// Amber hardfork. It leaves out the tx that would make the block cross the
+// computation cost limit, the entry limit of its block access list, or the
+// size limit of the block and its list together. The tx is counted only if it
+// is kept.
+func (env *Task) checkAmberLimits(computationCost uint64) error {
+	if err := blockchain.CheckBlockComputationCost(env.config, env.header.Number, env.computationCost+computationCost); err != nil {
+		return err
+	}
+	entries, size := access.Stats(env.state)
+	if err := blockchain.CheckBlockAccessListEntries(env.config, env.header.Number, entries+amberFinalizeEntryReserve); err != nil {
+		return err
+	}
+	if env.size+env.pendingSize+size >= params.MaxProposalSize-maxBlockSizeBufferZone {
+		return blockchain.ErrProposalSizeLimit
+	}
+	env.computationCost += computationCost
+	return nil
+}
+
+func isBlockLimitError(err error) bool {
+	return errors.Is(err, blockchain.ErrBlockComputationCostLimit) ||
+		errors.Is(err, blockchain.ErrBlockAccessListEntryLimit) ||
+		errors.Is(err, blockchain.ErrProposalSizeLimit)
 }
 
 func (env *Task) shouldDiscardBundle(bundle *builder.Bundle) (bool, error) {

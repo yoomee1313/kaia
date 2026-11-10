@@ -3071,6 +3071,11 @@ func (bc *BlockChain) ApplyTransaction(chainConfig *params.ChainConfig, author *
 			logger.Error("failed to get tracing result from a transaction", "txHash", tx.Hash().String(), "err", err)
 		}
 	}
+	if vmConfig.BeforeTxFinalise != nil {
+		if err := vmConfig.BeforeTxFinalise(vmenv.GetOpCodeComputationCost()); err != nil {
+			return nil, nil, err
+		}
+	}
 	// Update the state with pending changes
 	statedb.Finalise(true, false)
 	*usedGas += result.UsedGas

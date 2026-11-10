@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -52,6 +53,10 @@ type ProcessStats struct {
 	BeforeApplyTxs time.Time
 	AfterApplyTxs  time.Time
 	AfterFinalize  time.Time
+
+	// ComputationCost is the sum of the opcode computation costs of the txs,
+	// which the Amber block limit bounds.
+	ComputationCost uint64
 }
 
 // NewStateProcessor initialises a new StateProcessor.
@@ -84,6 +89,18 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 
 	// Extract author from the header
 	author, _ := p.bc.sealer.Author(header) // Ignore error, we're past header validation
+
+	// Sum the computation costs of the txs, keeping a hook the caller set.
+	hook := cfg.BeforeTxFinalise
+	cfg.BeforeTxFinalise = func(cost uint64) error {
+		if hook != nil {
+			if err := hook(cost); err != nil {
+				return err
+			}
+		}
+		processStats.ComputationCost += cost
+		return nil
+	}
 
 	processStats.BeforeApplyTxs = time.Now()
 	// Iterate over and process the individual transactions
@@ -164,6 +181,9 @@ func (p *StateProcessor) FinalizeState(header *types.Header, statedb *state.Stat
 
 	header.Root = statedb.IntermediateRoot(true)
 	<-derived
+	if err := p.setBlockAccessListHash(header, statedb); err != nil {
+		return nil, err
+	}
 
 	// Assemble and return the final block for sealing
 	return types.NewBlockWithRoots(header, txs, receipts, txRoot, receiptRoot, bloom), nil
@@ -176,6 +196,23 @@ func (p *StateProcessor) finalizeStateRoot(header *types.Header, statedb *state.
 		return err
 	}
 	header.Root = statedb.IntermediateRoot(true)
+	return p.setBlockAccessListHash(header, statedb)
+}
+
+// setBlockAccessListHash commits the block access list hash in the header from
+// the Amber hardfork. The list is complete after IntermediateRoot. Without a
+// recorder the hash is left unset and the block fails ValidateState.
+func (p *StateProcessor) setBlockAccessListHash(header *types.Header, statedb *state.StateDB) error {
+	if !p.config.IsAmberForkEnabled(header.Number) {
+		return nil
+	}
+	if list := access.Recorded(statedb); list != nil {
+		hash, err := list.Hash()
+		if err != nil {
+			return err
+		}
+		header.BlockAccessListHash = &hash
+	}
 	return nil
 }
 

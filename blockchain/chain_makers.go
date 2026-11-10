@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/vm"
@@ -280,6 +281,9 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 		statedb, err := state.New(parent.Root(), state.NewDatabase(db), nil, nil)
 		if err != nil {
 			panic(err)
+		}
+		if config.IsAmberForkEnabled(new(big.Int).Add(parent.Number(), common.Big1)) {
+			access.EnableRecorder(statedb)
 		}
 		block, receipt := genblock(i, parent, statedb)
 		blocks[i] = block

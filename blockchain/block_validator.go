@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/bal/access"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
@@ -553,13 +554,51 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 // itself. ValidateState returns a database batch if the validation was a success
 // otherwise nil and an error is returned.
 func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *state.StateDB, receipts types.Receipts, usedGas uint64) error {
-	return v.validateState(block, types.CreateBloom(receipts), types.DeriveReceiptsRoot(receipts, block.Number()), statedb.IntermediateRoot(true), usedGas)
+	if err := v.validateState(block, types.CreateBloom(receipts), types.DeriveReceiptsRoot(receipts, block.Number()), statedb.IntermediateRoot(true), usedGas); err != nil {
+		return err
+	}
+	return v.validateBlockAccessListHash(block, statedb)
 }
 
 // ValidateStateWithCache performs the same checks as ValidateState but reuses
 // the bloom and receipt root that were computed during speculative execution.
 func (v *BlockValidator) ValidateStateWithCache(block *types.Block, cached *SpeculativeResult) error {
-	return v.validateState(block, cached.Bloom, cached.ReceiptHash, cached.State.IntermediateRoot(true), cached.UsedGas)
+	if err := v.validateState(block, cached.Bloom, cached.ReceiptHash, cached.State.IntermediateRoot(true), cached.UsedGas); err != nil {
+		return err
+	}
+	return v.validateBlockAccessListHash(block, cached.State)
+}
+
+// validateBlockAccessListHash checks the block access list hash committed from
+// the Amber hardfork against the list recorded while executing the block. A
+// block inserted with its list was checked against the hash before the list
+// was applied, see BALHooks.ApplyBlock.
+func (v *BlockValidator) validateBlockAccessListHash(block *types.Block, statedb *state.StateDB) error {
+	header := block.Header()
+	if !v.config.IsAmberForkEnabled(header.Number) {
+		if header.BlockAccessListHash != nil {
+			return errors.New("block access list hash before the Amber hardfork")
+		}
+		return nil
+	}
+	if header.BlockAccessListHash == nil {
+		return errors.New("missing block access list hash")
+	}
+	list := access.Recorded(statedb)
+	if list == nil {
+		if v.bc != nil && v.bc.balHooks != nil && v.bc.balHooks.Inserted(block.Hash()) {
+			return nil
+		}
+		return errors.New("block access list not recorded")
+	}
+	hash, err := list.Hash()
+	if err != nil {
+		return err
+	}
+	if hash != *header.BlockAccessListHash {
+		return fmt.Errorf("invalid block access list hash (remote: %x local: %x)", *header.BlockAccessListHash, hash)
+	}
+	return nil
 }
 
 func (v *BlockValidator) validateState(block *types.Block, bloom types.Bloom, receiptHash, root common.Hash, usedGas uint64) error {
