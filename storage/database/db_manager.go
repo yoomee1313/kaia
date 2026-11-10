@@ -130,6 +130,8 @@ type DBManager interface {
 	ReadReceiptsByBlockHash(hash common.Hash) types.Receipts
 	WriteReceipts(hash common.Hash, number uint64, receipts types.Receipts)
 	PutReceiptsToBatch(batch Batch, hash common.Hash, number uint64, receipts types.Receipts)
+	WriteBlockReceipts(block *types.Block, receipts types.Receipts)
+	PutBlockReceiptsToBatch(batch Batch, block *types.Block, receipts types.Receipts)
 	DeleteReceipts(hash common.Hash, number uint64)
 
 	// Block access list operations (experimental)
@@ -1580,14 +1582,10 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 		return nil
 	}
 	// Convert the revceipts from their database form to their internal representation
-	storageReceipts := []*types.ReceiptForStorage{}
-	if err := rlp.DecodeBytes(data, &storageReceipts); err != nil {
+	receipts, err := decodeReceipts(data, blockHash, number, func() *types.Body { return dbm.ReadBody(blockHash, number) })
+	if err != nil {
 		logger.Error("Invalid receipt array RLP", "blockHash", blockHash, "err", err)
 		return nil
-	}
-	receipts := make(types.Receipts, len(storageReceipts))
-	for i, receipt := range storageReceipts {
-		receipts[i] = (*types.Receipt)(receipt)
 	}
 	return receipts
 }
@@ -1618,24 +1616,55 @@ func (dbm *databaseManager) PutReceiptsToBatch(batch Batch, hash common.Hash, nu
 	dbm.putReceiptsToPutter(batch, hash, number, receipts, false)
 }
 
+// WriteBlockReceipts stores the receipts of a block like WriteReceipts, in
+// the smallest format they can be restored from with the block, see
+// blockReceiptsItem.
+func (dbm *databaseManager) WriteBlockReceipts(block *types.Block, receipts types.Receipts) {
+	dbm.cm.writeBlockReceiptsCache(block.Hash(), receipts)
+	dbm.putBlockReceiptsToPutter(dbm.getDatabase(ReceiptsDB), block, receipts, true)
+}
+
+// PutBlockReceiptsToBatch is WriteBlockReceipts into a batch.
+func (dbm *databaseManager) PutBlockReceiptsToBatch(batch Batch, block *types.Block, receipts types.Receipts) {
+	dbm.putBlockReceiptsToPutter(batch, block, receipts, false)
+}
+
+func (dbm *databaseManager) putBlockReceiptsToPutter(putter KeyValueWriter, block *types.Block, receipts types.Receipts, addToCache bool) {
+	if addToCache {
+		for _, receipt := range receipts {
+			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
+		}
+	}
+	item := blockReceiptsItem(block.Hash(), block.NumberU64(), block.Transactions(), receipts)
+	if err := putter.Put(blockReceiptsKey(block.NumberU64(), block.Hash()), item); err != nil {
+		logger.Crit("Failed to store block receipts", "err", err)
+	}
+}
+
 func (dbm *databaseManager) putReceiptsToPutter(putter KeyValueWriter, hash common.Hash, number uint64, receipts types.Receipts, addToCache bool) {
-	// Convert the receipts into their database form and serialize them
+	if addToCache {
+		for _, receipt := range receipts {
+			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
+		}
+	}
+	bytes := encodeStorageReceipts(receipts)
+	// Store the flattened receipt slice
+	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
+		logger.Crit("Failed to store block receipts", "err", err)
+	}
+}
+
+// encodeStorageReceipts serializes the receipts in their database form.
+func encodeStorageReceipts(receipts types.Receipts) []byte {
 	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
 	for i, receipt := range receipts {
 		storageReceipts[i] = (*types.ReceiptForStorage)(receipt)
-
-		if addToCache {
-			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
-		}
 	}
 	bytes, err := rlp.EncodeToBytes(storageReceipts)
 	if err != nil {
 		logger.Crit("Failed to encode block receipts", "err", err)
 	}
-	// Store the flattened receipt slice
-	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
-		logger.Crit("Failed to store block receipts", "err", err)
-	}
+	return bytes
 }
 
 // ReadBAL returns the RLP-encoded writes of the block access list of a block,
@@ -2301,11 +2330,35 @@ func (dbm *databaseManager) ReadTxLookupEntry(hash common.Hash) (common.Hash, ui
 		return common.Hash{}, 0, 0
 	}
 	var entry TxLookupEntry
-	if err := rlp.DecodeBytes(data, &entry); err != nil {
+	if err := rlp.DecodeBytes(data, &entry); err == nil {
+		return entry.BlockHash, entry.BlockIndex, entry.Index
+	}
+	var slim slimTxLookupEntry
+	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		logger.Error("Invalid transaction lookup entry RLP", "hash", hash, "err", err)
 		return common.Hash{}, 0, 0
 	}
-	return entry.BlockHash, entry.BlockIndex, entry.Index
+	// A slim entry names the block by number only. The canonical block must hold
+	// the transaction, in case the entry outlived a reorg.
+	blockHash := dbm.ReadCanonicalHash(slim.BlockIndex)
+	if common.EmptyHash(blockHash) {
+		return common.Hash{}, 0, 0
+	}
+	body := dbm.ReadBody(blockHash, slim.BlockIndex)
+	if body == nil || uint64(len(body.Transactions)) <= slim.Index || body.Transactions[slim.Index].Hash() != hash {
+		return common.Hash{}, 0, 0
+	}
+	return blockHash, slim.BlockIndex, slim.Index
+}
+
+// encodeTxLookupEntry encodes the lookup entry of the index-th transaction of
+// the block. It leaves out the block hash, which the canonical chain gives.
+func encodeTxLookupEntry(block *types.Block, index int) []byte {
+	data, err := rlp.EncodeToBytes(slimTxLookupEntry{BlockIndex: block.NumberU64(), Index: uint64(index)})
+	if err != nil {
+		logger.Crit("Failed to encode transaction lookup entry", "err", err)
+	}
+	return data
 }
 
 // WriteTxLookupEntries stores a positional metadata for every transaction from
@@ -2324,11 +2377,7 @@ func (dbm *databaseManager) WriteAndCacheTxLookupEntries(block *types.Block) err
 			BlockIndex: block.NumberU64(),
 			Index:      uint64(i),
 		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := batch.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := batch.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 
@@ -2348,16 +2397,7 @@ func (dbm *databaseManager) PutTxLookupEntriesToBatch(batch Batch, block *types.
 
 func putTxLookupEntriesToPutter(putter KeyValueWriter, block *types.Block) {
 	for i, tx := range block.Transactions() {
-		entry := TxLookupEntry{
-			BlockHash:  block.Hash(),
-			BlockIndex: block.NumberU64(),
-			Index:      uint64(i),
-		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := putter.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := putter.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 	}

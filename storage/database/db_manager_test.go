@@ -639,6 +639,9 @@ func TestDBManager_TxLookupEntry(t *testing.T) {
 		header := &types.Header{Number: big.NewInt(int64(num1))}
 		block := types.NewBlockWithHeader(header)
 		block = block.WithBody(body.Transactions)
+		// An entry names the block by number, so the canonical block resolves it.
+		dbm.WriteBlock(block)
+		dbm.WriteCanonicalHash(block.Hash(), block.NumberU64())
 
 		dbm.WriteTxLookupEntries(block)
 

@@ -1367,7 +1367,7 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		}
 		// Write all the data out into the database
 		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
-		bc.db.PutReceiptsToBatch(receiptsBatch, block.Hash(), block.NumberU64(), receipts)
+		bc.db.PutBlockReceiptsToBatch(receiptsBatch, block, receipts)
 		bc.db.PutTxLookupEntriesToBatch(txLookupEntriesBatch, block)
 
 		stats.processed++
@@ -1436,8 +1436,8 @@ func (bc *BlockChain) writeBlock(block *types.Block) {
 
 // writeReceipts writes receipts to persistent database.
 // If write through caching is enabled, it also writes blockReceipts to the cache.
-func (bc *BlockChain) writeReceipts(hash common.Hash, number uint64, receipts types.Receipts) {
-	bc.db.WriteReceipts(hash, number, receipts)
+func (bc *BlockChain) writeReceipts(block *types.Block, receipts types.Receipts) {
+	bc.db.WriteBlockReceipts(block, receipts)
 }
 
 // writeStateTrie writes state trie to database if possible.
@@ -1756,7 +1756,7 @@ func (bc *BlockChain) writeBlockWithStateSerial(block *types.Block, receipts []*
 	}
 	trieWriteTime := time.Since(trieWriteStart)
 
-	bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+	bc.writeReceipts(block, receipts)
 
 	// TODO-Klaytn-Issue264 If we are using istanbul BFT, then we always have a canonical chain.
 	//         Later we may be able to refine below code.
@@ -1837,7 +1837,7 @@ func (bc *BlockChain) writeBlockWithStateParallel(block *types.Block, receipts [
 
 	go func() {
 		defer parallelDBWriteWG.Done()
-		bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+		bc.writeReceipts(block, receipts)
 	}()
 
 	// Wait until all writing goroutines are terminated.

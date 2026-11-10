@@ -160,6 +160,13 @@ type TxLookupEntry struct {
 	Index      uint64
 }
 
+// slimTxLookupEntry is a TxLookupEntry without the block hash, which is the
+// canonical hash of the block number.
+type slimTxLookupEntry struct {
+	BlockIndex uint64
+	Index      uint64
+}
+
 // headerKey = headerPrefix + num (uint64 big endian) + hash
 func headerKey(number uint64, hash common.Hash) []byte {
 	return append(append(headerPrefix, common.Int64ToByteBigEndian(number)...), hash.Bytes()...)
