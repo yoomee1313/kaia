@@ -2,12 +2,14 @@ package engine
 
 import (
 	"crypto/ecdsa"
+	"errors"
 
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/consensus/istanbul"
 	istanbulBackend "github.com/kaiachain/kaia/consensus/istanbul/backend"
 	"github.com/kaiachain/kaia/consensus/kaiabft"
+	"github.com/kaiachain/kaia/params"
 )
 
 // EngineType identifies the consensus engine variant.
@@ -24,6 +26,19 @@ type Opts struct {
 	IstanbulConfig *istanbul.Config
 	PrivateKey     *ecdsa.PrivateKey
 	NodeType       common.ConnType
+}
+
+// ErrIstanbulWithAmber is returned when the Istanbul engine is selected for a
+// chain with the Amber hardfork, which only KaiaBFT implements.
+var ErrIstanbulWithAmber = errors.New(`the Amber hardfork needs the "kaiabft" consensus engine`)
+
+// CheckEngine checks that the engine type implements the hardforks of the
+// chain. Amber (block access lists in consensus) is implemented by KaiaBFT only.
+func CheckEngine(engineType EngineType, config *params.ChainConfig) error {
+	if engineType != KaiaBFT && config != nil && config.AmberCompatibleBlock != nil {
+		return ErrIstanbulWithAmber
+	}
+	return nil
 }
 
 // NewEngine creates the consensus engine selected by the given configuration.
