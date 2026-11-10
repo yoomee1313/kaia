@@ -242,7 +242,7 @@ func TestPreprepareProvidesAccessList(t *testing.T) {
 	defer m.stopTimer()
 	m.state = stateAcceptRequest
 	m.proposer = proposer
-	pp := &bft.Preprepare{View: &bft.View{Sequence: big.NewInt(10), Round: big.NewInt(0)}, Proposal: block, AccessList: enc}
+	pp := &bft.Preprepare{View: &bft.View{Sequence: big.NewInt(10), Round: big.NewInt(0)}, Proposal: block, Parts: bft.WithAccessList(nil, enc)}
 	require.NoError(t, m.handlePreprepare(&wireMessage{Code: bft.MsgPreprepare, Msg: mustEncode(t, pp)}, proposer))
 	got, err := parallel.provided[block.Hash()].Encode()
 	require.NoError(t, err)

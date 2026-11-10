@@ -51,10 +51,12 @@ type Proposal interface {
 }
 
 // Request wraps a proposal to be processed by a BFT engine. From the Amber
-// hardfork a block producer adds the block access list of the proposal.
+// hardfork a block producer adds the block access list hint of the proposal,
+// and the fragments of its txs it already sent, if any.
 type Request struct {
 	Proposal   Proposal
 	AccessList []byte
+	Fragments  []Part
 }
 
 // View includes a round number and a sequence number.
@@ -122,17 +124,90 @@ type ConsensusMsg struct {
 // votes proving the highest claim for Proposal. The prepared block is therefore
 // sent once, as the Proposal itself, instead of once per ROUND CHANGE.
 //
-// From the Amber hardfork it carries AccessList, the RLP of the block access
-// list of the proposal with its reads. It is not part of the block: only the
-// hash of the writes is in the header. It is covered by the signature of the
-// message, so the proposer answers for it. Before Amber it is empty and is not
-// encoded, so the message is the same as before.
+// From the Amber hardfork it carries Parts, typed payloads that new kinds of
+// content can be added to without a new message: the block access list hint
+// of the proposal (PartHint), a fragment of its txs sent ahead while the
+// proposer executes them (PartFragment), and the final message that names the
+// fragments of the block (PartFinal). The parts are covered by the signature
+// of the message, so the proposer answers for them; they are not part of the
+// block, whose header commits the hash of the writes of its block access list.
+// A node ignores the parts of a kind it does not know: kinds that a node needs
+// to get the block are enabled by a hardfork. Before Amber there are none and
+// they are not encoded, so the message is the same as before.
 type Preprepare struct {
 	View                   *View
 	Proposal               Proposal
 	RoundChangeCertificate []*Message
 	PreparedMessages       []*Message
-	AccessList             []byte
+	Parts                  []Part
+}
+
+// Kinds of the parts of a PRE-PREPARE.
+const (
+	// PartHint is the RLP of the block access list hint of the proposal.
+	PartHint uint64 = 1
+	// PartFragment is the RLP of a Fragment. A PRE-PREPARE that has one is a
+	// fragment message: its Proposal holds only the number and the parent of
+	// the block, and it changes no state of the consensus.
+	PartFragment uint64 = 2
+	// PartFinal is the RLP of a Final. A PRE-PREPARE that has one has the
+	// header of the block as its Proposal, without the txs.
+	PartFinal uint64 = 3
+)
+
+// Part is a typed payload of a PRE-PREPARE.
+type Part struct {
+	Kind uint64
+	Data []byte
+}
+
+// Fragment holds the txs of a proposal from index Start on, which the proposer
+// sends while it executes them, with the block access list hint of their
+// phases.
+type Fragment struct {
+	Start uint64
+	Txs   types.Transactions
+	Hint  []byte
+}
+
+// Final names the fragments of a proposal by the hashes of their part data,
+// in the order of their txs, and the number of its txs.
+type Final struct {
+	TxCount   uint64
+	Fragments []common.Hash
+}
+
+// Part returns the data of the first part of the given kind, nil if none.
+func (b *Preprepare) Part(kind uint64) []byte {
+	for _, p := range b.Parts {
+		if p.Kind == kind {
+			return p.Data
+		}
+	}
+	return nil
+}
+
+// AccessList returns the block access list hint of the PRE-PREPARE.
+func (b *Preprepare) AccessList() []byte {
+	return b.Part(PartHint)
+}
+
+// WithAccessList returns the parts with the hint set to hint, nil if hint is
+// empty.
+func WithAccessList(parts []Part, hint []byte) []Part {
+	out := make([]Part, 0, len(parts)+1)
+	for _, p := range parts {
+		if p.Kind != PartHint {
+			out = append(out, p)
+		}
+	}
+	if len(hint) != 0 {
+		out = append(out, Part{Kind: PartHint, Data: hint})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // EncodeRLP serializes a Preprepare into the Kaia RLP format.
@@ -142,8 +217,8 @@ func (b *Preprepare) EncodeRLP(w io.Writer) error {
 		Proposal               Proposal
 		RoundChangeCertificate []*Message `rlp:"optional"`
 		PreparedMessages       []*Message `rlp:"optional"`
-		AccessList             []byte     `rlp:"optional"`
-	}{b.View, b.Proposal, b.RoundChangeCertificate, b.PreparedMessages, b.AccessList})
+		Parts                  []Part     `rlp:"optional"`
+	}{b.View, b.Proposal, b.RoundChangeCertificate, b.PreparedMessages, b.Parts})
 }
 
 // DecodeRLP deserializes a Preprepare from a Kaia RLP stream.
@@ -155,14 +230,14 @@ func (b *Preprepare) DecodeRLP(s *rlp.Stream) error {
 		Proposal               *types.Block
 		RoundChangeCertificate []*Message `rlp:"optional"`
 		PreparedMessages       []*Message `rlp:"optional"`
-		AccessList             []byte     `rlp:"optional"`
+		Parts                  []Part     `rlp:"optional"`
 	}
 	if err := s.Decode(&preprepare); err != nil {
 		return err
 	}
 	b.View, b.Proposal = preprepare.View, preprepare.Proposal
 	b.RoundChangeCertificate, b.PreparedMessages = preprepare.RoundChangeCertificate, preprepare.PreparedMessages
-	b.AccessList = preprepare.AccessList
+	b.Parts = preprepare.Parts
 	return nil
 }
 
