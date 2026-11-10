@@ -226,6 +226,15 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 		config = params.TestChainConfig
 	}
 	blocks, receipts := make(types.Blocks, n), make([]types.Receipts, n)
+	// hashOf returns the hash of an earlier block, from db up to the first
+	// parent and from the blocks generated after it.
+	base := parent.NumberU64()
+	hashOf := func(number uint64) common.Hash {
+		if number <= base {
+			return db.ReadCanonicalHash(number)
+		}
+		return blocks[number-base-1].Hash()
+	}
 	genblock := func(i int, parent *types.Block, stateDB *state.StateDB) (*types.Block, types.Receipts) {
 		// TODO(karalabe): This is needed for consensus engines, which depends on multiple blocks.
 		// It's nonetheless ugly to spin up a blockchain here. Get rid of this somehow.
@@ -263,6 +272,14 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 			gen(i, b)
 		}
 
+		// The first block of a quarter commits the earlier header segments.
+		if config.IsAmberForkEnabled(b.header.Number) && IsFirstBlockOfQuarter(parent.Time().Uint64(), b.header.Time.Uint64()) {
+			root, err := cumulativeRootOf(b.header.Number.Uint64(), hashOf)
+			if err != nil {
+				panic(fmt.Sprintf("cumulative root: %v", err))
+			}
+			b.header.CumulativeRoot = &root
+		}
 		block, err := processor.FinalizeState(b.header, stateDB, b.txs, b.receipts)
 		if err != nil {
 			panic(fmt.Sprintf("block finalize error: %v", err))
