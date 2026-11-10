@@ -73,6 +73,7 @@ func init() {
 
 		// See utils/nodecmd/snapshot.go:
 		nodecmd.SnapshotCommand,
+		nodecmd.DBCommand,
 	}
 	sort.Sort(cli.CommandsByName(app.Commands))
 

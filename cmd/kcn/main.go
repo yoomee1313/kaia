@@ -73,6 +73,7 @@ func init() {
 
 		// See utils/nodecmd/snapshot.go:
 		nodecmd.SnapshotCommand,
+		nodecmd.DBCommand,
 
 		// See cmd/kcn/abv2.go:
 		ValOpsCommand,
