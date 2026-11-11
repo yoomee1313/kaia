@@ -41,6 +41,7 @@ var (
 	_ kaiax.ExecutionStateModule  = (*BALModule)(nil)
 	_ kaiax.BlockApplyModule      = (*BALModule)(nil)
 	_ kaiax.HistoricalStateModule = (*BALModule)(nil)
+	_ kaiax.TriePruningModule     = (*BALModule)(nil)
 	_ kaiax.RewindableModule      = (*BALModule)(nil)
 	_ kaiax.JsonRpcModule         = (*BALModule)(nil)
 
@@ -52,7 +53,7 @@ var (
 )
 
 // BALModule keeps the block access lists of a chain: it records them, serves
-// past states from them and regenerates lists.
+// past states from them, regenerates lists and builds past state tries.
 type BALModule struct {
 	bc       *blockchain.BlockChain
 	db       database.DBManager
@@ -66,19 +67,23 @@ type BALModule struct {
 	wg        sync.WaitGroup
 
 	rec      *recorder     // nil unless recording
+	sync     *Sync         // kaia/69 syncer of the node, nil without one
 	archive  *chainArchive // serves past states from the lists, nil unless indexed
+	hsegDone atomic.Uint64 // segments from the first one whose header segment roots are stored
 	inserted sync.Map      // block hash -> *Block, blocks inserted by InsertChain
 
 	genesis atomic.Pointer[blockchain.Genesis]
 	regenMu sync.Mutex
 	regen   *regen // last regeneration, nil if none
+	tries   tries
 }
 
 // Config are the settings of a BAL module.
 type Config struct {
-	Record    bool // Records the block access lists of inserted blocks in the database (experimental)
-	SkipReads bool // Records the writes of the lists only, without their reads
-	NoIndex   bool // Does not index the recorded lists, so past states are not read from them
+	Record             bool // Records the block access lists of inserted blocks in the database (experimental)
+	SkipReads          bool // Records the writes of the lists only, without their reads
+	NoIndex            bool // Does not index the recorded lists, so past states are not read from them
+	HeaderSegmentRoots bool // Stores the root of the block hashes of every finished segment
 }
 
 // InitOpts are the chain and the settings of a BAL module.
@@ -119,11 +124,12 @@ func (c *BALModule) RegisterTo() {
 	c.bc.RegisterExecutionStateModule(c)
 	c.bc.RegisterBlockApplyModule(c)
 	c.bc.RegisterHistoricalStateModule(c)
+	c.bc.RegisterTriePruningModule(c)
 	c.bc.RegisterRewindableModule(c)
 }
 
-// Start starts the loops that index the lists. A rewind stops the module and
-// starts it again.
+// Start starts the loops that index the lists and store the header segment
+// roots. A rewind stops the module and starts it again.
 func (c *BALModule) Start() error {
 	c.lifeMu.Lock()
 	defer c.lifeMu.Unlock()
@@ -136,6 +142,10 @@ func (c *BALModule) Start() error {
 		c.wg.Add(1)
 		go c.indexLoop()
 	}
+	if c.cfg.HeaderSegmentRoots {
+		c.wg.Add(1)
+		go c.headerSegmentLoop()
+	}
 	return nil
 }
 
@@ -147,8 +157,8 @@ func (c *BALModule) Close() {
 	}
 }
 
-// Stop stops the loops and a regeneration. A rewind stops the module and starts
-// it again, so the index database stays open until Close.
+// Stop stops the loops, a regeneration and a trie build. A rewind stops the
+// module and starts it again, so the index database stays open until Close.
 func (c *BALModule) Stop() {
 	c.lifeMu.Lock()
 	defer c.lifeMu.Unlock()

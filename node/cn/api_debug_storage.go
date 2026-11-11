@@ -134,5 +134,8 @@ func storageRangeAt(st state.Trie, start []byte, maxResult int) (StorageRangeRes
 		next := common.BytesToHash(it.Key)
 		result.NextKey = &next
 	}
+	if it.Err != nil {
+		return StorageRangeResult{}, it.Err
+	}
 	return result, nil
 }

@@ -79,6 +79,10 @@ func NewChannelManager(channelSize int) *ChannelManager {
 	channelMgr.RegisterMsgCode(MiscChannel, VRankPreprepareMsg)
 	channelMgr.RegisterMsgCode(MiscChannel, VRankCandidateMsg)
 
+	for code := uint64(HistoryRangeMsg); code <= BlocksMsg; code++ {
+		channelMgr.RegisterMsgCode(MiscChannel, code)
+	}
+
 	return channelMgr
 }
 

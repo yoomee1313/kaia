@@ -27,10 +27,17 @@ var (
 	balPrefix      = []byte("j")               // balPrefix + num (uint64 big endian) + hash -> writes of the block access list
 	balReadsPrefix = []byte("J")               // balReadsPrefix + num (uint64 big endian) + hash -> reads of the block access list
 	balRangeKey    = []byte("AccessListRange") // first and next block of the stored block access lists
+
+	historyModeKey          = []byte("HistoryMode") // full or history
+	headerSegmentRootPrefix = []byte("hseg")        // headerSegmentRootPrefix + segment (uint64 big endian) -> root of its block hashes
 )
 
 func balKey(prefix []byte, number uint64, hash common.Hash) []byte {
 	return append(append(append([]byte{}, prefix...), common.Int64ToByteBigEndian(number)...), hash.Bytes()...)
+}
+
+func headerSegmentRootKey(segment uint64) []byte {
+	return binary.BigEndian.AppendUint64(append([]byte{}, headerSegmentRootPrefix...), segment)
 }
 
 // ReadBAL returns the RLP-encoded writes of the block access list of a block,
@@ -93,4 +100,31 @@ func ReadBALRange(db database.DBManager) (first, next uint64) {
 func WriteBALRange(db database.DBManager, first, next uint64) error {
 	enc := binary.BigEndian.AppendUint64(binary.BigEndian.AppendUint64(nil, first), next)
 	return db.GetBALDB().Put(balRangeKey, enc)
+}
+
+// ReadHistoryMode returns the history mode the database was made for, or ""
+// for a database made before the modes.
+func ReadHistoryMode(db database.DBManager) string {
+	enc, _ := db.GetMiscDB().Get(historyModeKey)
+	return string(enc)
+}
+
+// WriteHistoryMode stores the history mode of the database.
+func WriteHistoryMode(db database.DBManager, mode string) error {
+	return db.GetMiscDB().Put(historyModeKey, []byte(mode))
+}
+
+// ReadHeaderSegmentRoot returns the root of the block hashes of a segment
+// whose blocks were deleted.
+func ReadHeaderSegmentRoot(db database.DBManager, segment uint64) (common.Hash, bool) {
+	enc, err := db.GetMiscDB().Get(headerSegmentRootKey(segment))
+	if err != nil || len(enc) != common.HashLength {
+		return common.Hash{}, false
+	}
+	return common.BytesToHash(enc), true
+}
+
+// WriteHeaderSegmentRoot stores the root of the block hashes of a segment.
+func WriteHeaderSegmentRoot(db database.DBManager, segment uint64, root common.Hash) error {
+	return db.GetMiscDB().Put(headerSegmentRootKey(segment), root[:])
 }

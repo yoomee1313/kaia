@@ -182,6 +182,8 @@ func getDatabase(dbm database.DBManager, dbName string) (database.Database, erro
 		db = dbm.GetBodyDB()
 	case "receipts":
 		db = dbm.GetReceiptsDB()
+	case "bal":
+		db = dbm.GetBALDB()
 	case "txlookup":
 		db = dbm.GetTxLookupEntryDB()
 	case "statetrie":

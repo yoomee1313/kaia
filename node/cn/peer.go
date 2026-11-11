@@ -37,6 +37,7 @@ import (
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/kaiax/auction"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/kaiax/vrank"
 	"github.com/kaiachain/kaia/networks/p2p"
 	"github.com/kaiachain/kaia/networks/p2p/discover"
@@ -222,7 +223,12 @@ type Peer interface {
 
 	// Handshake executes the Kaia protocol handshake, negotiating version number,
 	// network IDs, difficulties, head, and genesis blocks and returning error.
-	Handshake(network uint64, chainID, td *big.Int, head common.Hash, genesis common.Hash) error
+	// From kaia/69 the peers also exchange the history ranges they hold.
+	Handshake(network uint64, chainID, td *big.Int, head common.Hash, genesis common.Hash, history *bal_impl.HistoryRange) error
+
+	// HistoryRange returns the history range the peer sent in the handshake,
+	// nil before kaia/69.
+	HistoryRange() *bal_impl.HistoryRange
 
 	// ConnType returns the conntype of the peer.
 	ConnType() common.ConnType
@@ -319,6 +325,7 @@ type basePeer struct {
 	term                  chan struct{}               // Termination channel to stop the broadcaster
 
 	chainID *big.Int // ChainID to sign a transaction
+	history *bal_impl.HistoryRange
 
 	snapExt *snap.Peer // Satellite `snap` connection
 }
@@ -798,21 +805,29 @@ func (p *basePeer) RequestBlobSidecars(request []blobSidecarsRequestData) error 
 }
 
 // Handshake executes the Kaia protocol handshake, negotiating version number,
-// network IDs, difficulties, head and genesis blocks.
-func (p *basePeer) Handshake(network uint64, chainID, td *big.Int, head common.Hash, genesis common.Hash) error {
+// network IDs, difficulties, head and genesis blocks, and from kaia/69 the
+// history ranges.
+func (p *basePeer) Handshake(network uint64, chainID, td *big.Int, head common.Hash, genesis common.Hash, history *bal_impl.HistoryRange) error {
 	// Send out own handshake in a new thread
 	errc := make(chan error, 2)
 	var status statusData // safe to read after two values have been received from errc
 
+	own := &statusData{
+		ProtocolVersion: uint32(p.version),
+		NetworkId:       network,
+		TD:              td,
+		CurrentBlock:    head,
+		GenesisBlock:    genesis,
+		ChainID:         chainID,
+	}
+	if p.version >= kaia69 {
+		if history == nil {
+			return errors.New("no history range to send")
+		}
+		own.History = history
+	}
 	go func() {
-		errc <- p2p.Send(p.rw, StatusMsg, &statusData{
-			ProtocolVersion: uint32(p.version),
-			NetworkId:       network,
-			TD:              td,
-			CurrentBlock:    head,
-			GenesisBlock:    genesis,
-			ChainID:         chainID,
-		})
+		errc <- p2p.Send(p.rw, StatusMsg, own)
 	}()
 	go func() {
 		errc <- p.readStatus(network, &status, genesis, chainID)
@@ -830,7 +845,14 @@ func (p *basePeer) Handshake(network uint64, chainID, td *big.Int, head common.H
 		}
 	}
 	p.td, p.head, p.chainID = status.TD, status.CurrentBlock, status.ChainID
+	if p.version >= kaia69 {
+		p.history = status.History
+	}
 	return nil
+}
+
+func (p *basePeer) HistoryRange() *bal_impl.HistoryRange {
+	return p.history
 }
 
 func (p *basePeer) readStatus(network uint64, status *statusData, genesis common.Hash, chainID *big.Int) error {
@@ -859,6 +881,9 @@ func (p *basePeer) readStatus(network uint64, status *statusData, genesis common
 	}
 	if int(status.ProtocolVersion) != p.version {
 		return errResp(ErrProtocolVersionMismatch, "%d (!= %d)", status.ProtocolVersion, p.version)
+	}
+	if p.version >= kaia69 && status.History == nil {
+		return errResp(ErrDecode, "no history range in the status of kaia/%d", p.version)
 	}
 	return nil
 }
@@ -1328,7 +1353,8 @@ func (p *multiChannelPeer) Handle(pm *ProtocolManager) error {
 		td      = pm.blockchain.GetTd(hash, number)
 	)
 
-	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash()); err != nil {
+	history := pm.handshakeRange(p.GetVersion())
+	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash(), history); err != nil {
 		p.GetP2PPeer().Log().Debug("Kaia peer handshake failed", "err", err)
 		return err
 	}
@@ -1362,6 +1388,8 @@ func (p *multiChannelPeer) Handle(pm *ProtocolManager) error {
 	if err := pm.downloader.RegisterPeer(p.GetID(), p.GetVersion(), p); err != nil {
 		return err
 	}
+	pm.balSync.AddPeer(p, history, p.HistoryRange())
+	defer pm.balSync.RemovePeer(p.GetID())
 	if snap != nil {
 		if err := pm.downloader.GetSnapSyncer().Register(snap); err != nil {
 			p.GetP2PPeer().Log().Info("Failed to register peer in snap syncer", "err", err)

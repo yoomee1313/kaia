@@ -41,4 +41,11 @@ func TestAdminBALAPI(t *testing.T) {
 	require.Empty(t, status.Error)
 	require.Equal(t, uint64(len(f.blocks)+1), status.Next)
 	f.requireLists(t, chain, 1, uint64(len(f.blocks)))
+
+	var trie TrieBuildStatus
+	require.NoError(t, client.Call(&trie, "admin_stateTrieBuildStatus"))
+	require.False(t, trie.Running)
+
+	err := client.Call(nil, "admin_balPeers")
+	require.ErrorContains(t, err, "not supported by this node")
 }

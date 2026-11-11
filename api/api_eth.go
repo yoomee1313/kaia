@@ -42,6 +42,7 @@ import (
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/crypto"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/networks/rpc"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
@@ -310,6 +311,9 @@ func doGetProof(ctx context.Context, b Backend, address common.Address, storageK
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return nil, err
+	}
+	if bal_impl.ReadOnly(state.Database()) {
+		return nil, bal_impl.ErrNoProof
 	}
 	codeHash := state.GetCodeHash(address)
 

@@ -32,6 +32,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/networks/rpc"
 	"github.com/kaiachain/kaia/storage/statedb"
 )
@@ -76,6 +77,9 @@ func (api *DebugCNAPI) DumpBlock(ctx context.Context, blockNrOrHash rpc.BlockNum
 	if err != nil {
 		return state.Dump{}, err
 	}
+	if bal_impl.ReadOnly(stateDb.Database()) {
+		return state.Dump{}, bal_impl.ErrNoIteration
+	}
 	return stateDb.RawDump(), nil
 }
 
@@ -104,8 +108,7 @@ func (api *DebugCNAPI) DumpStateTrie(ctx context.Context, blockNrOrHash rpc.Bloc
 		Tries: make([]Trie, 0),
 	}
 
-	db := state.NewDatabaseWithExistingCache(api.cn.chainDB, api.cn.blockchain.StateCache().TrieDB().TrieNodeCache())
-	stateDB, err := state.New(block.Root(), db, nil, nil)
+	stateDB, err := api.cn.blockchain.StateAt(block.Root())
 	if err != nil {
 		return DumpStateTrieResult{}, err
 	}
@@ -119,6 +122,9 @@ func (api *DebugCNAPI) DumpStateTrie(ctx context.Context, blockNrOrHash rpc.Bloc
 		}
 
 		result.Tries = append(result.Tries, t)
+	}
+	if it.Error != nil {
+		return DumpStateTrieResult{}, it.Error
 	}
 	return result, nil
 }
