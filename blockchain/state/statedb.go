@@ -112,6 +112,9 @@ type StateDB struct {
 
 	prefetching bool
 
+	// Optional recorder of the accesses, nil unless set.
+	access AccessRecorder
+
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
 	AccountHashes        time.Duration
@@ -393,6 +396,9 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves a value from the given account's storage trie.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	if s.access != nil {
+		s.access.SlotRead(addr, hash)
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(s.db, hash)
@@ -402,6 +408,9 @@ func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
 
 // GetCommittedState retrieves a value from the given account's committed storage trie.
 func (s *StateDB) GetCommittedState(addr common.Address, hash common.Hash) common.Hash {
+	if s.access != nil {
+		s.access.SlotRead(addr, hash)
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetCommittedState(s.db, hash)
@@ -706,8 +715,21 @@ func (s *StateDB) getStateObject(addr common.Address) *stateObject {
 func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 	// First, check stateObjects if there is "live" object.
 	if obj := s.stateObjects[addr]; obj != nil {
+		if s.access != nil {
+			s.access.AccountRead(addr)
+		}
 		return obj
 	}
+	obj := s.loadStateObject(addr)
+	if s.access != nil {
+		s.accessLoaded(addr, obj)
+	}
+	return obj
+}
+
+// loadStateObject loads the object for the given address from the snapshot or
+// the database and inserts it into the live set. It returns nil if not found.
+func (s *StateDB) loadStateObject(addr common.Address) *stateObject {
 	// If no live objects are available, attempt to use snapshots
 	var (
 		acc account.Account
@@ -813,6 +835,19 @@ func (s *StateDB) createObject(addr common.Address) (newobj, prev *stateObject) 
 func (s *StateDB) createObjectWithMap(addr common.Address, accountType account.AccountType,
 	values map[account.AccountValueKeyType]interface{},
 ) (newobj, prev *stateObject) {
+	acc, err := account.NewAccountWithMap(accountType, values)
+	if err != nil {
+		logger.Error("An error occurred on call NewAccountWithMap", "err", err)
+	}
+	newobj, prev = s.createObjectWithAccount(addr, acc)
+	newobj.setNonce(0) // sets the object to dirty
+	return newobj, prev
+}
+
+// createObjectWithAccount creates a new state object holding the given account.
+// If there is an existing account with the given address, it is overwritten and
+// returned as the second return value.
+func (s *StateDB) createObjectWithAccount(addr common.Address, acc account.Account) (newobj, prev *stateObject) {
 	prev = s.getDeletedStateObject(addr) // Note, prev might have been deleted, we need that!
 
 	var prevdestruct bool
@@ -822,12 +857,7 @@ func (s *StateDB) createObjectWithMap(addr common.Address, accountType account.A
 			s.snapDestructs[prev.addrHash] = struct{}{}
 		}
 	}
-	acc, err := account.NewAccountWithMap(accountType, values)
-	if err != nil {
-		logger.Error("An error occurred on call NewAccountWithMap", "err", err)
-	}
 	newobj = newObject(s, addr, acc)
-	newobj.setNonce(0) // sets the object to dirty
 	if prev == nil {
 		s.journal.append(createObjectChange{account: &addr})
 	} else {
@@ -975,6 +1005,13 @@ func copyStateDB(dst, src *StateDB) {
 	dst.transientStorage = src.transientStorage.Copy()
 	dst.journal = newJournal()
 
+	// The recorder is copied too, so that a state restored from a copy keeps
+	// the changes recorded until the copy.
+	dst.access = nil
+	if src.access != nil {
+		dst.access = src.access.Copy()
+	}
+
 	// Copy the dirty states, logs, and preimages
 	for addr := range src.journal.dirties {
 		// As documented [here](https://github.com/ethereum/go-ethereum/pull/16485#issuecomment-380438527),
@@ -1060,6 +1097,14 @@ func (s *StateDB) RevertToSnapshot(revid int) {
 	// Replay the journal to undo changes and remove invalidated snapshots
 	s.journal.revert(s, snapshot)
 	s.validRevisions = s.validRevisions[:idx]
+
+	// Reverting to the start of the journal drops a whole tx, as a block
+	// producer does with a tx it cannot include, so its reads are dropped too.
+	// A tx that reverts in the EVM keeps its reads: it is still included, and
+	// its first snapshot is taken after the gas is bought.
+	if snapshot == 0 && s.access != nil {
+		s.access.RevertedTx()
+	}
 }
 
 // GetRefund returns the current value of the refund counter.
@@ -1070,6 +1115,9 @@ func (s *StateDB) GetRefund() uint64 {
 // Finalise finalises the state by removing the self destructed objects
 // and clears the journal as well as the refunds.
 func (stateDB *StateDB) Finalise(deleteEmptyObjects bool, setStorageRoot bool) {
+	if stateDB.access != nil {
+		stateDB.access.Finalise(stateDB, deleteEmptyObjects)
+	}
 	for addr := range stateDB.journal.dirties {
 		so, exist := stateDB.stateObjects[addr]
 		if !exist {
@@ -1134,6 +1182,7 @@ func (s *StateDB) SetTxContext(thash, bhash common.Hash, ti int) {
 	s.thash = thash
 	s.bhash = bhash
 	s.txIndex = ti
+	s.SetBlockAccessIndex(ti + 1)
 }
 
 func (s *StateDB) clearJournalAndRefund() {

@@ -132,6 +132,10 @@ var (
 
 	migrationOldDBPathKey = []byte("migrationOldDBPath")
 
+	// lastMigratedBlockKey is the block of the last finished state migration:
+	// the states of earlier blocks were dropped with the old database.
+	lastMigratedBlockKey = []byte("lastMigratedBlockNumber")
+
 	stakingInfoPrefix = []byte("stakingInfo")
 
 	supplyCheckpointPrefix        = []byte("supplyCheckpoint")
