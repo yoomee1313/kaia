@@ -120,6 +120,7 @@ func (p *StateProcessor) InitializeState(header *types.Header, statedb *state.St
 			return err
 		}
 	}
+	statedb.EndBlockAccessInitialization()
 	return nil
 }
 
@@ -140,6 +141,9 @@ func (p *StateProcessor) FinalizeState(header *types.Header, statedb *state.Stat
 		logger.Error("A block before Magma hardfork shouldn't have baseFee", "blockNum", header.Number.Uint64())
 		return nil, ErrInvalidBaseFee
 	}
+
+	// Changes of FinalizeState belong to the phase after the last tx.
+	statedb.SetBlockAccessIndex(len(txs) + 1)
 
 	for _, module := range p.blockStateModules {
 		if err := module.FinalizeState(header, statedb, txs, receipts); err != nil {

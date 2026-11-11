@@ -547,6 +547,20 @@ func (v *BlockValidator) ValidateBody(block *types.Block) error {
 // itself. ValidateState returns a database batch if the validation was a success
 // otherwise nil and an error is returned.
 func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *state.StateDB, receipts types.Receipts, usedGas uint64) error {
+	if err := validateReceipts(block, receipts, usedGas); err != nil {
+		return err
+	}
+	// Validate the state root against the received state root and throw
+	// an error if they don't match.
+	if root := statedb.IntermediateRoot(true); block.Root() != root {
+		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", block.Root(), root)
+	}
+	return nil
+}
+
+// validateReceipts checks the gas used, bloom and receipts root of a block
+// against its receipts.
+func validateReceipts(block *types.Block, receipts types.Receipts, usedGas uint64) error {
 	header := block.Header()
 	if block.GasUsed() != usedGas {
 		return fmt.Errorf("invalid gas used (remote: %d local: %d)", block.GasUsed(), usedGas)
@@ -561,11 +575,6 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 	receiptSha := types.DeriveReceiptsRoot(receipts, block.Number())
 	if receiptSha != header.ReceiptHash {
 		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
-	}
-	// Validate the state root against the received state root and throw
-	// an error if they don't match.
-	if root := statedb.IntermediateRoot(true); header.Root != root {
-		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
 	}
 	return nil
 }

@@ -35,6 +35,7 @@ import (
 	"github.com/kaiachain/kaia/crypto/bls"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/kaiax"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	gov_impl "github.com/kaiachain/kaia/kaiax/gov/impl"
 	randao_impl "github.com/kaiachain/kaia/kaiax/randao/impl"
 	staking_impl "github.com/kaiachain/kaia/kaiax/staking/impl"
@@ -73,10 +74,16 @@ func init() {
 }
 
 type testOverrides struct {
-	node0Key       *ecdsa.PrivateKey // Override node[0] key
-	node0BlsKey    bls.SecretKey     // Override node[0] bls key
-	blockPeriod    *uint64           // Override block generation interval. If not set, 1 second is used.
-	stakingAmounts []uint64          // Override staking amounts. If not set, 0 for all nodes.
+	node0Key       *ecdsa.PrivateKey   // Override node[0] key
+	node0BlsKey    bls.SecretKey       // Override node[0] bls key
+	blockPeriod    *uint64             // Override block generation interval. If not set, 1 second is used.
+	stakingAmounts []uint64            // Override staking amounts. If not set, 0 for all nodes.
+	nodeKeys       []*ecdsa.PrivateKey // Override node[1:] keys
+	genesisTime    uint64              // Override the genesis timestamp. If not set, now.
+	cacheConfig    *blockchain.CacheConfig
+	balConfig      *bal_impl.Config
+	alloc          blockchain.GenesisAlloc // Extra genesis accounts
+	livePruning    bool                    // Enable live pruning in the database
 }
 
 type testContext struct {
@@ -125,7 +132,11 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 	nodeAddrs[0] = crypto.PubkeyToAddress(nodeKeys[0].PublicKey)
 	nodeBlsKeys[0] = overrides.node0BlsKey
 	for i := 1; i < numNodes; i++ {
-		nodeKeys[i], _ = crypto.GenerateKey()
+		if i < len(overrides.nodeKeys) {
+			nodeKeys[i] = overrides.nodeKeys[i]
+		} else {
+			nodeKeys[i], _ = crypto.GenerateKey()
+		}
 		nodeAddrs[i] = crypto.PubkeyToAddress(nodeKeys[i].PublicKey)
 		nodeBlsKeys[i], _ = bls.DeriveFromECDSA(nodeKeys[i])
 	}
@@ -138,6 +149,9 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 	genesis.Config = config
 	genesis.ExtraData = makeGenesisExtra(nodeAddrs)
 	genesis.Timestamp = uint64(time.Now().Unix())
+	if overrides.genesisTime != 0 {
+		genesis.Timestamp = overrides.genesisTime
+	}
 	if config.IsRandaoForkEnabled(big.NewInt(0)) {
 		allocRegistryStorage := system.AllocRegistry(&params.RegistryConfig{
 			Records: map[string]common.Address{
@@ -170,6 +184,9 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 		}
 		genesis.Alloc = alloc
 	}
+	for addr, acc := range overrides.alloc {
+		genesis.Alloc[addr] = acc
+	}
 	genesis.MustCommit(dbm)
 
 	// Create istanbul engine
@@ -196,9 +213,15 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 		TriesInMemory:     blockchain.DefaultTriesInMemory,
 		SnapshotCacheSize: 0, // Disable state snapshot
 	}
+	if overrides.cacheConfig != nil {
+		cacheConfig = overrides.cacheConfig
+	}
+	if overrides.livePruning {
+		dbm.WritePruningEnabled()
+	}
 	chainSealer := istanbul.NewSealerImpl(nodeKeys[0])
 	types.SetHeaderHashFn(chainSealer.HeaderHash)
-	chain, err := blockchain.NewBlockChain(dbm, cacheConfig, config, chainSealer, vm.Config{})
+	chain, err := bal_impl.NewBlockChain(dbm, cacheConfig, overrides.balConfig, config, chainSealer, vm.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -345,7 +368,7 @@ func prepareCommittedSealForTest(hash common.Hash) []byte {
 }
 
 func (ctx *testContext) Cleanup() {
-	ctx.chain.Stop()
+	bal_impl.StopChain(ctx.chain)
 	ctx.engine.Stop()
 	params.BlockGenerationInterval = ctx.oldInterval
 }

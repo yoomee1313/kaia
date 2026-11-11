@@ -329,6 +329,11 @@ func (self *worker) makeCurrent(parent *types.Block, header *types.Header) error
 	if err != nil {
 		return err
 	}
+	// The execution state modules see the parent state of a block this node
+	// builds, as of the blocks the chain inserts.
+	if r, ok := self.chain.(interface{ PreExecuteBlock(*state.StateDB) }); ok {
+		r.PreExecuteBlock(stateDB)
+	}
 	work := NewTask(self.config, types.MakeSigner(self.config, header.Number), stateDB, header)
 
 	// Keep track of transactions which return errors so they can be removed

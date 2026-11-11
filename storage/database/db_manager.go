@@ -57,6 +57,7 @@ type DBManager interface {
 	IsSingle() bool
 	InMigration() bool
 	MigrationBlockNumber() uint64
+	ReadLastMigratedBlockNumber() (uint64, bool)
 	MigrationOldDBPath() string
 	getStateTrieMigrationInfo() uint64
 
@@ -77,6 +78,7 @@ type DBManager interface {
 	GetHeaderDB() Database
 	GetBodyDB() Database
 	GetReceiptsDB() Database
+	GetBALDB() Database
 	GetStateTrieDB() Database
 	GetStateTrieMigrationDB() Database
 	GetTxLookupEntryDB() Database
@@ -326,6 +328,7 @@ const (
 	TxLookUpEntryDB
 	bridgeServiceDB
 	SnapshotDB
+	BALDB
 	// databaseEntryTypeSize should be the last item in this list!!
 	databaseEntryTypeSize
 )
@@ -367,6 +370,7 @@ var dbBaseDirs = [databaseEntryTypeSize]string{
 	"txlookup",
 	"bridgeservice",
 	"snapshot",
+	"bal",
 }
 
 // Sum of dbConfigRatio should be 100.
@@ -377,10 +381,11 @@ var dbConfigRatio = [databaseEntryTypeSize]int{
 	5,  // BodyDB
 	5,  // ReceiptsDB
 	40, // StateTrieDB
-	37, // StateTrieMigrationDB
+	35, // StateTrieMigrationDB
 	2,  // TXLookUpEntryDB
 	1,  // bridgeServiceDB
 	3,  // SnapshotDB
+	2,  // BALDB
 }
 
 // checkDBEntryConfigRatio checks if sum of dbConfigRatio is 100.
@@ -654,6 +659,16 @@ func (dbm *databaseManager) MigrationBlockNumber() uint64 {
 	return dbm.migrationBlockNumber
 }
 
+// ReadLastMigratedBlockNumber returns the block of the last finished state
+// migration, recorded since the key was added, and whether there is one.
+func (dbm *databaseManager) ReadLastMigratedBlockNumber() (uint64, bool) {
+	enc, err := dbm.getDatabase(MiscDB).Get(lastMigratedBlockKey)
+	if err != nil || len(enc) != 8 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(enc), true
+}
+
 func (dbm *databaseManager) MigrationOldDBPath() string {
 	return dbm.migrationOldDBPath
 }
@@ -882,6 +897,13 @@ func (dbm *databaseManager) FinishStateMigration(succeed bool) chan struct{} {
 	dbm.setDBDir(StateTrieDB, dbDirToBeUsed)
 	dbm.dbs[StateTrieDB] = dbToBeUsed
 
+	// Keep the block of a finished migration: states before it are gone.
+	if succeed {
+		if err := dbm.getDatabase(MiscDB).Put(lastMigratedBlockKey, common.Int64ToByteBigEndian(dbm.migrationBlockNumber)); err != nil {
+			logger.Error("Failed to write the last migrated block number", "err", err)
+		}
+	}
+
 	// Set the completion mark.
 	// If the old database is not removed, it will be removed when the node is restarted.
 	dbm.setStateTrieMigrationStatus(0)
@@ -946,6 +968,10 @@ func (dbm *databaseManager) GetBodyDB() Database {
 
 func (dbm *databaseManager) GetReceiptsDB() Database {
 	return dbm.dbs[ReceiptsDB]
+}
+
+func (dbm *databaseManager) GetBALDB() Database {
+	return dbm.getDatabase(BALDB)
 }
 
 func (dbm *databaseManager) GetStateTrieDB() Database {

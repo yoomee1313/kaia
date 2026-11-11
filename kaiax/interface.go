@@ -22,6 +22,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/networks/rpc"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/work/builder"
 )
 
@@ -95,6 +96,75 @@ type ExecutionModule interface {
 // Any component or module that accommodate execution modules.
 type ExecutionModuleHost interface {
 	RegisterExecutionModule(modules ...ExecutionModule)
+}
+
+// ExecutionStateModule watches the states blocks are executed on, both the
+// blocks the chain inserts and the blocks the node builds.
+// e.g. Record the block access list of every written block.
+type ExecutionStateModule interface {
+	// PreExecuteBlock is called with the parent state of a block before the
+	// block is executed on it.
+	PreExecuteBlock(statedb *state.StateDB)
+
+	// PostExecuteBlock is called with the state of a validated block before
+	// the block is written.
+	PostExecuteBlock(block *types.Block, parentRoot common.Hash, statedb *state.StateDB)
+}
+
+// Any component or module that accommodate execution state modules.
+type ExecutionStateModuleHost interface {
+	RegisterExecutionStateModule(modules ...ExecutionStateModule)
+}
+
+// BlockApplyModule inserts blocks without executing them, applying their state
+// changes instead. Their state roots are checked like those of executed blocks.
+// e.g. Apply the block access lists of blocks synced from peers.
+type BlockApplyModule interface {
+	// AppliesBlock reports whether the block with the given hash is applied
+	// instead of being executed.
+	AppliesBlock(hash common.Hash) bool
+
+	// ApplyBlock returns the receipts, logs and gas of a block AppliesBlock
+	// reports, and applies its state changes to statedb, its parent state.
+	// With check, the changes are applied without hashing, after check
+	// accepts the receipts.
+	ApplyBlock(block *types.Block, statedb *state.StateDB, check func(types.Receipts, uint64) error) (types.Receipts, []*types.Log, uint64, error)
+
+	// BatchesBlocks reports whether the blocks it applies in one insertion
+	// may share one state, checked only where the state trie is committed and
+	// at the last block.
+	BatchesBlocks() bool
+}
+
+// Any component or module that accommodate block apply modules.
+type BlockApplyModuleHost interface {
+	RegisterBlockApplyModule(modules ...BlockApplyModule)
+}
+
+// HistoricalStateModule serves the states of past blocks.
+// e.g. Read a past state from the block access lists after it.
+type HistoricalStateModule interface {
+	// StateAt opens the state with the given root of a past block, and
+	// reports whether it did.
+	StateAt(root common.Hash) (*state.StateDB, bool, error)
+}
+
+// Any component or module that accommodate historical state modules.
+type HistoricalStateModuleHost interface {
+	RegisterHistoricalStateModule(modules ...HistoricalStateModule)
+}
+
+// TriePruningModule deletes the trie nodes live pruning marked obsolete.
+// e.g. Keep the nodes a past state trie built back into the database shares.
+type TriePruningModule interface {
+	// PruneTrieNodes deletes the trie nodes of the marks of blocks up to
+	// limit.
+	PruneTrieNodes(marks []database.PruningMark, limit uint64)
+}
+
+// Any component or module that accommodate trie pruning modules.
+type TriePruningModuleHost interface {
+	RegisterTriePruningModule(modules ...TriePruningModule)
 }
 
 // RewindableModule is a module that can erase its persistent data

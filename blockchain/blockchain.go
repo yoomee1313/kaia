@@ -223,10 +223,17 @@ type BlockChain struct {
 
 	prefetchTxCh chan prefetchTx
 
+	applyBatch atomic.Pointer[applyBatch]
+
 	// kaiax modules
 	headerModules     []kaiax.HeaderModule
 	executionModules  []kaiax.ExecutionModule
 	rewindableModules []kaiax.RewindableModule
+
+	executionStateModules  []kaiax.ExecutionStateModule
+	blockApplyModules      []kaiax.BlockApplyModule
+	historicalStateModules []kaiax.HistoricalStateModule
+	triePruningModules     []kaiax.TriePruningModule
 }
 
 // prefetchTx is used to prefetch transactions, when fetcher works.
@@ -547,7 +554,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bool) (uint64, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	return bc.setHeadBeyondRootLocked(head, root, repair)
+}
 
+// setHeadBeyondRootLocked is setHeadBeyondRoot with the chain mutex held.
+func (bc *BlockChain) setHeadBeyondRootLocked(head uint64, root common.Hash, repair bool) (uint64, error) {
 	// Track the block number of the requested root hash
 	var rootNumber uint64 // (no root == always 0)
 
@@ -805,7 +816,18 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
+// The state of the head block is read from the state trie with snapshots, and
+// that of another block from a historical state module if one serves it.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
+	if sdb, ok, err := bc.historicalStateAt(root); ok {
+		return sdb, err
+	}
+	return bc.trieStateAt(root)
+}
+
+// trieStateAt returns a new mutable state read from the state trie only, to
+// execute and commit blocks on.
+func (bc *BlockChain) trieStateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, bc.stateCache, bc.snaps, nil)
 }
 
@@ -817,7 +839,7 @@ func (bc *BlockChain) PrunableStateAt(root common.Hash, num uint64) (*state.Stat
 			PruningBlockNumber: num,
 		})
 	} else {
-		return bc.StateAt(root)
+		return bc.trieStateAt(root)
 	}
 }
 
@@ -827,7 +849,7 @@ func (bc *BlockChain) StateAtWithPersistent(root common.Hash) (*state.StateDB, e
 	if !exist {
 		return nil, ErrNotExistNode
 	}
-	return state.New(root, bc.stateCache, bc.snaps, nil)
+	return bc.StateAt(root)
 }
 
 // StateAtWithGCLock returns a new mutable state based on a particular point in time with read lock of the state nodes.
@@ -840,7 +862,7 @@ func (bc *BlockChain) StateAtWithGCLock(root common.Hash) (*state.StateDB, error
 		return nil, ErrNotExistNode
 	}
 
-	stateDB, err := state.New(root, bc.stateCache, bc.snaps, nil)
+	stateDB, err := bc.StateAt(root)
 	if err != nil {
 		bc.RUnlockGCCachedNode()
 		return nil, err
@@ -988,6 +1010,9 @@ func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
+	if b := bc.applyBatch.Load(); b != nil && b.has(hash) {
+		return true
+	}
 	_, err := bc.stateCache.OpenTrie(hash, nil)
 	return err == nil
 }
@@ -1430,6 +1455,9 @@ func (bc *BlockChain) writeReceipts(hash common.Hash, number uint64, receipts ty
 // If an archiving node is running, it always flushes state trie to DB.
 // If not, it flushes state trie to DB periodically. (period = bc.cacheConfig.BlockInterval)
 func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) error {
+	if b := bc.applyBatch.Load(); b != nil && b.defers(state) {
+		return nil
+	}
 	state.LockGCCachedNode()
 	defer state.UnlockGCCachedNode()
 
@@ -1571,7 +1599,7 @@ func (bc *BlockChain) pruneTrieNodeLoop() {
 
 				startTime := time.Now()
 				marks := bc.db.ReadPruningMarks(startNum, limit+1)
-				bc.db.PruneTrieNodes(marks)
+				bc.pruneTrieNodes(marks, limit)
 				bc.db.DeletePruningMarks(marks)
 				bc.db.WriteLastPrunedBlockNumber(limit)
 
@@ -1630,6 +1658,12 @@ func (bc *BlockChain) WriteBlockWithState(block *types.Block, receipts []*types.
 // If BlockChain.parallelDBWrite is true, it calls writeBlockWithStateParallel.
 // If not, it calls writeBlockWithStateSerial.
 func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, stateDB *state.StateDB) (WriteResult, error) {
+	// Both inserted blocks and the blocks this node builds come here, so the
+	// execution state modules see every written block.
+	if parent := bc.GetHeaderByHash(block.ParentHash()); parent != nil {
+		bc.postExecuteBlock(block, parent.Root, stateDB)
+	}
+
 	var status WriteResult
 	var err error
 	if bc.parallelDBWrite {
@@ -1938,6 +1972,19 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
+	batch := bc.newApplyBatch(chain)
+	if batch == nil {
+		return bc.insertBlocks(chain, nil)
+	}
+	bc.applyBatch.Store(batch)
+	defer bc.applyBatch.Store(nil)
+	n, events, logs, err := bc.insertBlocks(chain, batch)
+	return batch.finish(chain, n, events, logs, err)
+}
+
+// insertBlocks inserts the blocks of insertChain with the chain mutex held.
+// The blocks of a non-nil batch are applied to its state.
+func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *applyBatch) (int, []interface{}, []*types.Log, error) {
 	// A queued approach to delivering events. This is generally
 	// faster than direct delivery and requires much less mutex
 	// acquiring.
@@ -1986,7 +2033,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		// transactions and probabilistically some of the account/storage trie nodes.
 		var followupInterrupt uint32
 
-		if bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
+		if batch == nil && bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
 			var snaps *snapshot.Tree
 			if bc.cacheConfig.TrieNodeCacheConfig.UseSnapshotForPrefetch {
 				snaps = bc.snaps
@@ -2070,6 +2117,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			stats.queued++
 			continue
 
+		case err == consensus.ErrPrunedAncestor && batch != nil:
+			return i, events, coalescedLogs, err
+
 		case err == consensus.ErrPrunedAncestor:
 			// Block competing with the canonical chain, store in the db, but don't process
 			// until the competitor TD goes above the canonical TD
@@ -2107,13 +2157,18 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 
-		stateDB, err := bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+		var stateDB *state.StateDB
+		if batch != nil {
+			stateDB, err = batch.stateFor(parent)
+		} else {
+			stateDB, err = bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+		}
 		if err != nil {
 			return i, events, coalescedLogs, err
 		}
 
 		// Process block using the parent state as reference point.
-		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processor.Process(block, stateDB, bc.vmConfig)
+		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processBlock(block, stateDB, batch)
 		if err != nil {
 			bc.reportExecutionFailure(block, receipts, stateDB, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
@@ -2121,10 +2176,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		}
 
 		// Validate the state using the default validator
-		err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
-		if err != nil {
-			bc.reportExecutionFailure(block, receipts, stateDB, err)
-			atomic.StoreUint32(&followupInterrupt, 1)
+		if batch == nil {
+			err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
+			if err != nil {
+				bc.reportExecutionFailure(block, receipts, stateDB, err)
+				atomic.StoreUint32(&followupInterrupt, 1)
+				return i, events, coalescedLogs, err
+			}
+		} else if err = batch.validate(block, parent, receipts, usedGas, i == len(chain)-1); err != nil {
 			return i, events, coalescedLogs, err
 		}
 		afterValidate := time.Now()
@@ -2140,6 +2199,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 		atomic.StoreUint32(&followupInterrupt, 1)
+		if batch != nil {
+			batch.written(block)
+		}
 
 		// Update to-address based spam throttler when spamThrottler is enabled and a single block is fetched.
 		spamThrottler := GetSpamThrottler()
@@ -2789,6 +2851,9 @@ func (bc *BlockChain) GetHeaderByNumber(number uint64) *types.Header {
 
 // Config retrieves the blockchain's chain configuration.
 func (bc *BlockChain) Config() *params.ChainConfig { return bc.chainConfig }
+
+// CacheConfig returns the cache configuration of the chain.
+func (bc *BlockChain) CacheConfig() *CacheConfig { return bc.cacheConfig }
 
 // Sealer retrieves the blockchain's sealer.
 func (bc *BlockChain) Sealer() consensus.Sealer { return bc.sealer }
