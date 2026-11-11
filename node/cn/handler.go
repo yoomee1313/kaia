@@ -48,6 +48,7 @@ import (
 	"github.com/kaiachain/kaia/event"
 	"github.com/kaiachain/kaia/kaiax/auction"
 	auction_impl "github.com/kaiachain/kaia/kaiax/auction/impl"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/kaiax/staking"
 	"github.com/kaiachain/kaia/kaiax/vrank"
 	"github.com/kaiachain/kaia/networks/p2p"
@@ -208,6 +209,11 @@ type ProtocolManager struct {
 
 	missingBlobSidecarCh  <-chan *kaia_blockchain.MissingBlobSidecar
 	blobSidecarReqManager *sidecarReqManager
+
+	balSync *bal_impl.Sync // kaia/69 block access lists and slim receipts
+
+	segmentsFilled func() bool // nil unless a history node, which is synced once it is true
+	waitingFilled  atomic.Bool
 }
 
 // NewProtocolManager returns a new Kaia sub protocol manager. The Kaia sub protocol manages peers capable
@@ -239,6 +245,13 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 			cooldown: 10 * time.Second,
 			maxTry:   5,
 		},
+	}
+
+	if cnconfig.HistoryMode == bal_impl.HistoryModeHistory {
+		manager.segmentsFilled = func() bool {
+			bc, ok := blockchain.(*kaia_blockchain.BlockChain)
+			return !ok || bal_impl.HeaderSegmentRootsFilled(bc)
+		}
 	}
 
 	handler.SetBroadcaster(manager)
@@ -388,6 +401,17 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 			proposerPolicy = config.Istanbul.ProposerPolicy
 		}
 		manager.downloader = downloader.New(mode, chainDB, stateBloom, manager.eventMux, blockchain, nil, manager.stakingModule, manager.removePeer, proposerPolicy)
+		manager.balSync = bal_impl.NewSync(chainDB, blockchain, manager.removePeer)
+		apply, hashChain := false, ""
+		if cnconfig != nil {
+			apply, hashChain = cnconfig.SyncApplyBALs && nodetype != common.CONSENSUSNODE, cnconfig.BALHashChain
+		}
+		if err := manager.balSync.Configure(hashChain, apply, func() common.Hash { return blockchain.Genesis().Hash() }, manager.quitSync); err != nil {
+			return nil, err
+		}
+		if tc, ok := bal_impl.ChainOf(blockchain); ok && manager.balSync.ApplyBALs() {
+			manager.balSync.StartTip(tc, manager.BroadcastBlockHash, nil)
+		}
 	}
 
 	// Create and set fetcher
@@ -406,10 +430,28 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 				logger.Warn("Discarded bad propagated block", "number", blocks[0].Number(), "hash", blocks[0].Hash())
 				return 0, nil
 			}
-			manager.acceptTxs.Store(1) // Mark initial sync done on any fetcher import
+			manager.markSynced()
 			return manager.blockchain.InsertChain(blocks)
 		}
-		manager.fetcher = fetcher.New(blockchain.GetBlockByHash, validator, manager.BroadcastBlock, manager.BroadcastBlockHash, heighter, inserter, manager.removePeer)
+		getBlock := blockchain.GetBlockByHash
+		// A node applying BALs inserts the new blocks whose headers commit
+		// their BALs with them, see bal_impl.Sync.StartTip.
+		if manager.balSync.HasTip() {
+			tip, verify := manager.balSync, validator
+			getBlock = func(hash common.Hash) *types.Block {
+				if b := blockchain.GetBlockByHash(hash); b != nil {
+					return b
+				}
+				return tip.TipBlock(hash)
+			}
+			validator = func(header *types.Header) error { return tip.VerifyTipHeader(header, verify) }
+			heighter = tip.TipHeight
+			inserter = func(blocks types.Blocks) (int, error) {
+				manager.markSynced()
+				return tip.InsertTipBlocks(blocks)
+			}
+		}
+		manager.fetcher = fetcher.New(getBlock, validator, manager.BroadcastBlock, manager.BroadcastBlockHash, heighter, inserter, manager.removePeer)
 	}
 
 	if manager.nodetype != common.CONSENSUSNODE {
@@ -507,6 +549,9 @@ func (pm *ProtocolManager) Start(maxPeers int) {
 	// start sync handlers
 	go pm.syncer()
 	go pm.txsyncLoop()
+	if pm.balSync != nil {
+		go pm.balSync.AnnounceLoop(pm.quitSync)
+	}
 }
 
 func (pm *ProtocolManager) Stop() {
@@ -616,7 +661,8 @@ func (pm *ProtocolManager) handle(p Peer) error {
 		td      = pm.blockchain.GetTd(hash, number)
 	)
 
-	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash()); err != nil {
+	history := pm.handshakeRange(p.GetVersion())
+	if err := p.Handshake(pm.networkId, pm.getChainID(), td, hash, genesis.Hash(), history); err != nil {
 		p.GetP2PPeer().Log().Debug("Kaia peer handshake failed", "err", err)
 		return err
 	}
@@ -652,6 +698,8 @@ func (pm *ProtocolManager) handle(p Peer) error {
 	if err := pm.downloader.RegisterPeer(p.GetID(), p.GetVersion(), p); err != nil {
 		return err
 	}
+	pm.balSync.AddPeer(p, history, p.HistoryRange())
+	defer pm.balSync.RemovePeer(p.GetID())
 	if snap != nil {
 		if err := pm.downloader.GetSnapSyncer().Register(snap); err != nil {
 			p.GetP2PPeer().Log().Info("Failed to register peer in snap syncer", "err", err)
@@ -871,6 +919,9 @@ func (pm *ProtocolManager) handleMsg(p Peer, addr common.Address, msg p2p.Msg) e
 		if err := handleVRankPreprepareMsg(pm, p, msg); err != nil {
 			return err
 		}
+
+	case bal_impl.IsSyncMsg(msg.Code) && p.GetVersion() >= kaia69:
+		return pm.balSync.HandleMsg(p, msg)
 
 	case p.GetVersion() >= kaia68 && msg.Code == VRankCandidateMsg:
 		if err := handleVRankCandidateMsg(pm, p, msg); err != nil {
@@ -1762,6 +1813,7 @@ func (pm *ProtocolManager) BroadcastBlock(block *types.Block) {
 	for _, peer := range peersToSendBlock {
 		peer.AsyncSendNewBlock(block, td)
 	}
+	bal_impl.BroadcastBAL(pm.balSync, block, peersToSendBlock)
 }
 
 // BroadcastBlockHash will propagate a blockHash to a subset of its peers.
@@ -1775,6 +1827,13 @@ func (pm *ProtocolManager) BroadcastBlockHash(block *types.Block) {
 	for _, peer := range peersWithoutBlock {
 		// peer.SendNewBlockHashes([]common.Hash{hash}, []uint64{block.NumberU64()})
 		peer.AsyncSendNewBlockHash(block)
+	}
+	if pm.balSync != nil {
+		peers := make([]Peer, 0, len(peersWithoutBlock))
+		for _, p := range pm.peers.Peers() {
+			peers = append(peers, p)
+		}
+		bal_impl.BroadcastBAL(pm.balSync, block, peers)
 	}
 	logger.Trace("Announced block", "hash", block.Hash(),
 		"recipients", len(peersWithoutBlock), "duration", common.PrettyDuration(time.Since(block.ReceivedAt)))

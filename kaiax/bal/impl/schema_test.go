@@ -55,3 +55,19 @@ func TestSchemaBAL(t *testing.T) {
 	first, next = ReadBALRange(db)
 	assert.Equal(t, [2]uint64{3, 9}, [2]uint64{first, next})
 }
+
+func TestSchemaHistory(t *testing.T) {
+	db := database.NewMemoryDBManager()
+
+	assert.Equal(t, "", ReadHistoryMode(db))
+	assert.NoError(t, WriteHistoryMode(db, HistoryModeHistory))
+	assert.Equal(t, HistoryModeHistory, ReadHistoryMode(db))
+
+	_, ok := ReadHeaderSegmentRoot(db, 3)
+	assert.False(t, ok)
+	root := common.HexToHash("0xabcd")
+	assert.NoError(t, WriteHeaderSegmentRoot(db, 3, root))
+	got, ok := ReadHeaderSegmentRoot(db, 3)
+	assert.True(t, ok)
+	assert.Equal(t, root, got)
+}

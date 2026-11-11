@@ -524,6 +524,57 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	HistoryConvertFlag = &cli.BoolFlag{
+		Name:     "history.convert",
+		Usage:    "On a node without live pruning, record block access lists and regenerate the lists of the blocks since its first stored state by executing them again (experimental)",
+		Value:    false,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT"},
+		Category: "MISC",
+	}
+	HistoryConvertMemoryFlag = &cli.Uint64Flag{
+		Name:     "history.convert.memory",
+		Usage:    "MiB the regeneration of block access lists may use",
+		Value:    4096,
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_MEMORY"},
+		Category: "MISC",
+	}
+	HistoryConvertWorkersFlag = &cli.IntFlag{
+		Name:     "history.convert.workers",
+		Usage:    "Goroutines regenerating block access lists (0 = from the memory and the cores)",
+		EnvVars:  []string{"KAIA_HISTORY_CONVERT_WORKERS"},
+		Category: "MISC",
+	}
+	HistoryModeFlag = &cli.StringFlag{
+		Name:     "history.mode",
+		Usage:    `History mode ("full" or "history", experimental). A history node keeps its state with live pruning and starts from genesis by applying block access lists up to the last block of the BAL hash chain. A database keeps the mode it was made with`,
+		Value:    "full",
+		EnvVars:  []string{"KAIA_HISTORY_MODE"},
+		Category: "MISC",
+	}
+	SyncApplyBALsFlag = &cli.BoolFlag{
+		Name:     "sync.apply-bals",
+		Usage:    "Sync by applying the block access lists and receipts of blocks received from peers, up to the last block of the signed BAL hash chain (--bal.hash-chain), instead of executing the blocks (experimental). On by default for EN and in the history mode; consensus nodes always execute",
+		EnvVars:  []string{"KAIA_SYNC_APPLY_BALS"},
+		Category: "MISC",
+	}
+	BALHashChainFlag = &cli.StringFlag{
+		Name:     "bal.hash-chain",
+		Usage:    "Directory of the installed npm package @kaiachain/bal-hashchain (npm install @kaiachain/bal-hashchain), or a chain file with its .sig next to it. The signed pre-Amber BAL hash chain checks the block access lists fetched from peers before they are applied, and is needed with --sync.apply-bals",
+		EnvVars:  []string{"KAIA_BAL_HASH_CHAIN"},
+		Category: "MISC",
+	}
+	BALRecordFlag = &cli.BoolFlag{
+		Name:     "bal.record",
+		Usage:    "Stores the block access list of every inserted block in the chain database, after checking it reproduces the state root (experimental). On by default for EN",
+		EnvVars:  []string{"KAIA_BAL_RECORD"},
+		Category: "MISC",
+	}
+	BALSkipReadsFlag = &cli.BoolFlag{
+		Name:     "bal.skip-reads",
+		Usage:    "Stores only the writes of the block access lists, without their reads, which a BAL regeneration in reads mode can rebuild",
+		EnvVars:  []string{"KAIA_BAL_SKIP_READS"},
+		Category: "MISC",
+	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{
 		Name:     "state.cache-size",
 		Usage:    "Size of in-memory cache of the global state (in MiB) to flush matured singleton trie nodes to disk",

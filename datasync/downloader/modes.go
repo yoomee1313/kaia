@@ -68,12 +68,8 @@ func (mode *SyncMode) UnmarshalText(text []byte) error {
 	switch string(text) {
 	case "full":
 		*mode = FullSync
-	case "fast":
-		*mode = FastSync
-	case "snap":
-		*mode = SnapSync
-	case "light":
-		*mode = LightSync
+	case "fast", "snap", "light":
+		return fmt.Errorf(`sync mode %q was removed, want "full"`, text)
 	default:
 		return fmt.Errorf(`unknown sync mode %q, want "full"`, text)
 	}

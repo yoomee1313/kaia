@@ -28,9 +28,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kaiachain/kaia"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/datasync/downloader"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/networks/p2p/discover"
 	"github.com/kaiachain/kaia/params"
 )
@@ -204,6 +206,15 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 	if pTd.Cmp(td) <= 0 {
 		return
 	}
+	// A node applying BALs first inserts the blocks up to the last block of
+	// the BAL hash chain by segments, applying their BALs; the downloader then
+	// executes the blocks after it.
+	if pm.balSync.Synchronise(pm.blockchain) {
+		pm.markSynced()
+		return
+	}
+	currentBlock = pm.blockchain.CurrentBlock()
+
 	// Otherwise try to sync with the downloader
 	mode := pm.getSyncMode(currentBlock)
 	if mode == downloader.FastSync || mode == downloader.SnapSync {
@@ -225,7 +236,7 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 		logger.Info("Snap sync complete, auto disabling")
 		atomic.StoreUint32(&pm.snapSync, 0)
 	}
-	pm.acceptTxs.Store(1) // Mark initial sync done
+	pm.markSynced()
 	if head := pm.blockchain.CurrentBlock(); head.NumberU64() > 0 {
 		// We've completed a sync cycle, notify all peers of new state. This path is
 		// essential in star-topology networks where a gateway node needs to notify
@@ -235,4 +246,68 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 		// more reliably update peers or the local TD state.
 		go pm.BroadcastBlockHash(head)
 	}
+}
+
+// historyFilled reports whether a history node stored the root of the block
+// hashes of every finished segment, without which it is not synced.
+func (pm *ProtocolManager) historyFilled() bool {
+	return pm.segmentsFilled == nil || pm.segmentsFilled()
+}
+
+var historyFilledPoll = time.Second
+
+// markSynced marks the initial sync done, once a history node stored the
+// roots of its finished segments.
+func (pm *ProtocolManager) markSynced() {
+	if pm.acceptTxs.Load() == 1 {
+		return
+	}
+	if pm.historyFilled() {
+		pm.acceptTxs.Store(1)
+		return
+	}
+	if !pm.waitingFilled.CompareAndSwap(false, true) {
+		return
+	}
+	logger.Info("Waiting for the roots of the header segments before the sync is done")
+	go func() {
+		defer pm.waitingFilled.Store(false)
+		ticker := time.NewTicker(historyFilledPoll)
+		defer ticker.Stop()
+		for !pm.historyFilled() {
+			select {
+			case <-pm.quitSync:
+				return
+			case <-ticker.C:
+			}
+		}
+		pm.acceptTxs.Store(1)
+	}()
+}
+
+// SyncProgress returns the progress of the downloader, with the blocks peers
+// serve by BALs as the highest while syncing by them, and a history node
+// syncing until it marked its initial sync done.
+func (pm *ProtocolManager) SyncProgress() kaia.SyncProgress {
+	p := pm.downloader.Progress()
+	if pm.balSync != nil && pm.balSync.RangeRunning() {
+		p.HighestBlock = max(p.HighestBlock, pm.balSync.PeersHighestBAL())
+	}
+	if pm.segmentsFilled != nil && pm.acceptTxs.Load() == 0 {
+		p.HighestBlock = max(p.HighestBlock, pm.balSync.PeersHighestBAL(), p.CurrentBlock+1)
+	}
+	return p
+}
+
+// handshakeRange returns the history range a node sends in the handshake of
+// a protocol version, nil before kaia/69.
+func (pm *ProtocolManager) handshakeRange(version int) *bal_impl.HistoryRange {
+	if version < kaia69 {
+		return nil
+	}
+	if pm.balSync != nil {
+		rng := pm.balSync.LocalRange()
+		return &rng
+	}
+	return &bal_impl.HistoryRange{BAL: bal_impl.NoHistory}
 }

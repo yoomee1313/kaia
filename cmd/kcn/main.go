@@ -31,6 +31,7 @@ import (
 	"github.com/kaiachain/kaia/cmd/utils"
 	"github.com/kaiachain/kaia/cmd/utils/nodecmd"
 	"github.com/kaiachain/kaia/console"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/log"
 	"github.com/urfave/cli/v2"
 )
@@ -83,7 +84,12 @@ func init() {
 
 	app.CommandNotFound = nodecmd.CommandNotExist
 	app.OnUsageError = nodecmd.OnUsageError
-	app.Before = nodecmd.BeforeRunNode
+	app.Before = func(ctx *cli.Context) error {
+		if err := nodecmd.BeforeRunNode(ctx); err != nil {
+			return err
+		}
+		return checkHistoryMode(ctx.String(utils.HistoryModeFlag.Name))
+	}
 	app.After = func(ctx *cli.Context) error {
 		debug.Exit()
 		console.Stdin.Close() // Resets terminal mode.
@@ -91,9 +97,22 @@ func init() {
 	}
 }
 
+// defaultHistoryMode is the history mode of a consensus node unless set.
+const defaultHistoryMode = bal_impl.HistoryModeHistory
+
+// checkHistoryMode accepts the history modes a consensus node runs in.
+func checkHistoryMode(mode string) error {
+	switch mode {
+	case "", bal_impl.HistoryModeHistory:
+		return nil
+	}
+	return fmt.Errorf("a consensus node runs in the history mode, not --%s %s", utils.HistoryModeFlag.Name, mode)
+}
+
 func main() {
 	// Set NodeTypeFlag to cn
 	utils.NodeTypeFlag.Value = "cn"
+	utils.HistoryModeFlag.Value = defaultHistoryMode
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

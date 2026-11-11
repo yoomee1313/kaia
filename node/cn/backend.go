@@ -47,6 +47,7 @@ import (
 	"github.com/kaiachain/kaia/kaiax"
 	"github.com/kaiachain/kaia/kaiax/auction"
 	auction_impl "github.com/kaiachain/kaia/kaiax/auction/impl"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	gasless_impl "github.com/kaiachain/kaia/kaiax/gasless/impl"
 	"github.com/kaiachain/kaia/kaiax/gov"
 	gov_impl "github.com/kaiachain/kaia/kaiax/gov/impl"
@@ -158,6 +159,7 @@ type CN struct {
 
 	govModule    gov.GovModule
 	valsetModule valset.ValsetModule
+	balModule    *bal_impl.BALModule
 
 	cnPeerHeadSub event.Subscription
 	cnPeerSyncWg  sync.WaitGroup
@@ -273,6 +275,21 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			return nil, err
 		}
 	}
+	// A history node keeps its state with live pruning, set on its new
+	// database.
+	keepsHistory := config.HistoryMode == bal_impl.HistoryModeHistory
+	if err := bal_impl.CheckHistoryMode(chainDB, config.HistoryMode); err != nil {
+		if keepsHistory && ctx.NodeType() == common.CONSENSUSNODE && bal_impl.ReadHistoryMode(chainDB) != config.HistoryMode {
+			return nil, fmt.Errorf("%w: a consensus node runs in the history mode, and a database keeps its mode; start the node on a new data directory, which it syncs from genesis, or on the chaindata of a %s node", err, config.HistoryMode)
+		}
+		return nil, err
+	}
+	if keepsHistory {
+		if config.NoPruning {
+			return nil, fmt.Errorf("a %s node keeps its state with live pruning, not as an archive", config.HistoryMode)
+		}
+		config.LivePruning = true
+	}
 	var (
 		sealer      = engine.NewSealer(chainConfig, ctx.NodeKey())
 		vmConfig    = config.getVMConfig()
@@ -287,11 +304,30 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			SnapshotCacheSize:    config.SnapshotCacheSize,
 			SnapshotAsyncGen:     config.SnapshotAsyncGen,
 		}
+		balConfig = &bal_impl.Config{Record: config.BALRecord, SkipReads: config.BALSkipReads}
 	)
 
+	// A node without live pruning keeps its history as block access lists.
+	if config.HistoryConvert && !config.LivePruning && !chainDB.ReadPruningEnabled() {
+		balConfig.Record = true
+	}
+	if keepsHistory {
+		balConfig.Record = true
+		balConfig.HeaderSegmentRoots = true
+	}
 	bc, err := blockchain.NewBlockChain(chainDB, cacheConfig, cn.chainConfig, sealer, vmConfig)
 	if err != nil {
 		return nil, err
+	}
+	// The BAL module joins the chain before the chain rewinds or inserts a block.
+	mBAL := bal_impl.NewBALModule()
+	if err := mBAL.Init(&bal_impl.InitOpts{Chain: bc, ChainDB: chainDB, Config: balConfig, VMConfig: vmConfig}); err != nil {
+		return nil, err
+	}
+	mBAL.RegisterTo()
+	cn.balModule = mBAL
+	if config.Genesis != nil {
+		bal_impl.SetGenesis(bc, config.Genesis)
 	}
 	bc.SetCanonicalBlock(config.StartBlockNumber)
 
@@ -365,6 +401,9 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	}
 	if cn.protocolManager, err = NewProtocolManager(cn.chainConfig, config.SyncMode, config.NetworkId, cn.eventMux, cn.txPool, handler, cn.blockchain, chainDB, cacheLimit, ctx.NodeType(), config, cn.stakingModule); err != nil {
 		return nil, err
+	}
+	if pm, ok := cn.protocolManager.(*ProtocolManager); ok && pm.balSync != nil {
+		cn.balModule.SetSync(pm.balSync)
 	}
 
 	if err := cn.setAcceptTxs(); err != nil {
@@ -601,6 +640,10 @@ func (s *CN) SetupKaiaxModules(ctx *node.ServiceContext, mValset valset.ValsetMo
 	mRewindable := []kaiax.RewindableModule{s.stakingModule, mSupply, s.govModule, mValset, mRandao, mVRank}
 	mHeader := []kaiax.HeaderModule{mReward, s.govModule, mRandao, mValset, mVRank}
 	mBlockState := []kaiax.BlockStateModule{mReward, mSystem, mValset}
+	if s.balModule != nil { // nil in tests making a CN without New
+		mBase = append(mBase, s.balModule)
+		mJsonRpc = append(mJsonRpc, s.balModule)
+	}
 
 	if !mGasless.IsDisabled() {
 		mExecution = append(mExecution, mGasless)
@@ -889,8 +932,14 @@ func (s *CN) ChainDB() database.DBManager             { return s.chainDB }
 func (s *CN) IsListening() bool                       { return true } // Always listening
 func (s *CN) ProtocolVersion() int                    { return s.protocolManager.ProtocolVersion() }
 func (s *CN) NetVersion() uint64                      { return s.networkId }
-func (s *CN) Progress() kaia.SyncProgress             { return s.protocolManager.Downloader().Progress() }
 func (s *CN) GovModule() gov.GovModule                { return s.govModule }
+
+func (s *CN) Progress() kaia.SyncProgress {
+	if pm, ok := s.protocolManager.(*ProtocolManager); ok {
+		return pm.SyncProgress()
+	}
+	return s.protocolManager.Downloader().Progress()
+}
 
 func (s *CN) ReBroadcastTxs(transactions types.Transactions) {
 	s.protocolManager.ReBroadcastTxs(transactions)
@@ -917,6 +966,15 @@ func (s *CN) Start(srvr p2p.Server) error {
 
 	// Start the bloom bits servicing goroutines
 	s.startBloomHandlers()
+
+	// The modules are registered, so blocks can be executed again.
+	if s.config.HistoryConvert {
+		if bc, ok := s.blockchain.(*blockchain.BlockChain); ok {
+			if err := bal_impl.StartHistoryConversion(bc, s.config.HistoryConvertMemory, s.config.HistoryConvertWorkers); err != nil {
+				logger.Warn("BAL history conversion not started", "err", err)
+			}
+		}
+	}
 
 	// Start the RPC service
 	s.p2pServer = srvr
@@ -953,6 +1011,9 @@ func (s *CN) Stop() error {
 	s.txPool.Stop()
 	s.miner.Stop()
 	s.blockchain.Stop()
+	if s.balModule != nil {
+		s.balModule.Close()
+	}
 	s.chainDB.Close()
 	s.eventMux.Stop()
 
