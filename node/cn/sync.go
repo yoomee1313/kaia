@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/kaiachain/kaia"
+	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/datasync/downloader"
@@ -214,6 +215,14 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 		return
 	}
 	currentBlock = pm.blockchain.CurrentBlock()
+	if from := currentBlock.NumberU64() - min(currentBlock.NumberU64(), uint64(downloader.MaxHeaderFetch)); !pm.holdsBlocksFrom(peer, from) {
+		if peer = pm.bestPeerHoldingBlocks(from); peer == nil {
+			return
+		}
+		if pHead, pTd = peer.Head(); pTd.Cmp(td) <= 0 {
+			return
+		}
+	}
 
 	// Otherwise try to sync with the downloader
 	mode := pm.getSyncMode(currentBlock)
@@ -248,16 +257,45 @@ func (pm *ProtocolManager) synchronise(peer Peer) {
 	}
 }
 
-// historyFilled reports whether a history node stored the root of the block
-// hashes of every finished segment, without which it is not synced.
+// holdsBlocksFrom reports whether a peer holds the headers, bodies and
+// receipts from block from on, by its announced history range. A peer before
+// kaia/69 holds them all.
+func (pm *ProtocolManager) holdsBlocksFrom(p Peer, from uint64) bool {
+	rng := p.HistoryRange()
+	if r, ok := pm.balSync.PeerRange(p.GetID()); ok {
+		rng = &r
+	}
+	return rng == nil || rng.HoldsBlocksFrom(from)
+}
+
+// bestPeerHoldingBlocks returns the peer with the highest total blockscore
+// that holds the blocks from block from on, or nil.
+func (pm *ProtocolManager) bestPeerHoldingBlocks(from uint64) Peer {
+	var (
+		best   Peer
+		bestTd *big.Int
+	)
+	for _, p := range pm.peers.Peers() {
+		if !pm.holdsBlocksFrom(p, from) {
+			continue
+		}
+		if _, td := p.Head(); bestTd == nil || td.Cmp(bestTd) > 0 {
+			best, bestTd = p, td
+		}
+	}
+	return best
+}
+
+// historyFilled reports whether a history or light node stored the root of
+// the block hashes of every finished segment, without which it is not synced.
 func (pm *ProtocolManager) historyFilled() bool {
 	return pm.segmentsFilled == nil || pm.segmentsFilled()
 }
 
 var historyFilledPoll = time.Second
 
-// markSynced marks the initial sync done, once a history node stored the
-// roots of its finished segments.
+// markSynced marks the initial sync done, once a history or light node
+// stored the roots of its finished segments.
 func (pm *ProtocolManager) markSynced() {
 	if pm.acceptTxs.Load() == 1 {
 		return
@@ -286,8 +324,8 @@ func (pm *ProtocolManager) markSynced() {
 }
 
 // SyncProgress returns the progress of the downloader, with the blocks peers
-// serve by BALs as the highest while syncing by them, and a history node
-// syncing until it marked its initial sync done.
+// serve by BALs as the highest while syncing by them, and a history or light
+// node syncing until it marked its initial sync done.
 func (pm *ProtocolManager) SyncProgress() kaia.SyncProgress {
 	p := pm.downloader.Progress()
 	if pm.balSync != nil && pm.balSync.RangeRunning() {
@@ -309,5 +347,9 @@ func (pm *ProtocolManager) handshakeRange(version int) *bal_impl.HistoryRange {
 		rng := pm.balSync.LocalRange()
 		return &rng
 	}
-	return &bal_impl.HistoryRange{BAL: bal_impl.NoHistory}
+	first := uint64(0)
+	if bc, ok := pm.blockchain.(*blockchain.BlockChain); ok {
+		first = bal_impl.HistoryFirst(bc)
+	}
+	return &bal_impl.HistoryRange{Header: first, Body: first, Receipt: first, BAL: bal_impl.NoHistory}
 }

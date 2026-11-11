@@ -28,8 +28,9 @@ var (
 	balReadsPrefix = []byte("J")               // balReadsPrefix + num (uint64 big endian) + hash -> reads of the block access list
 	balRangeKey    = []byte("AccessListRange") // first and next block of the stored block access lists
 
-	historyModeKey          = []byte("HistoryMode") // full or history
-	headerSegmentRootPrefix = []byte("hseg")        // headerSegmentRootPrefix + segment (uint64 big endian) -> root of its block hashes
+	historyModeKey          = []byte("HistoryMode")  // full, history or light
+	historyFirstKey         = []byte("HistoryFirst") // first block whose header, body and receipts are held
+	headerSegmentRootPrefix = []byte("hseg")         // headerSegmentRootPrefix + segment (uint64 big endian) -> root of its block hashes
 )
 
 func balKey(prefix []byte, number uint64, hash common.Hash) []byte {
@@ -112,6 +113,21 @@ func ReadHistoryMode(db database.DBManager) string {
 // WriteHistoryMode stores the history mode of the database.
 func WriteHistoryMode(db database.DBManager, mode string) error {
 	return db.GetMiscDB().Put(historyModeKey, []byte(mode))
+}
+
+// ReadHistoryFirst returns the first block whose header, body and receipts
+// are held; the data of earlier blocks but the genesis block was deleted.
+func ReadHistoryFirst(db database.DBManager) uint64 {
+	enc, err := db.GetMiscDB().Get(historyFirstKey)
+	if err != nil || len(enc) != 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(enc)
+}
+
+// WriteHistoryFirst stores the first block whose data is held.
+func WriteHistoryFirst(db database.DBManager, number uint64) error {
+	return db.GetMiscDB().Put(historyFirstKey, binary.BigEndian.AppendUint64(nil, number))
 }
 
 // ReadHeaderSegmentRoot returns the root of the block hashes of a segment

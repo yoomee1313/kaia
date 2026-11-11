@@ -60,8 +60,12 @@ func TestSchemaHistory(t *testing.T) {
 	db := database.NewMemoryDBManager()
 
 	assert.Equal(t, "", ReadHistoryMode(db))
-	assert.NoError(t, WriteHistoryMode(db, HistoryModeHistory))
-	assert.Equal(t, HistoryModeHistory, ReadHistoryMode(db))
+	assert.NoError(t, WriteHistoryMode(db, HistoryModeLight))
+	assert.Equal(t, HistoryModeLight, ReadHistoryMode(db))
+
+	assert.Equal(t, uint64(0), ReadHistoryFirst(db))
+	assert.NoError(t, WriteHistoryFirst(db, 42))
+	assert.Equal(t, uint64(42), ReadHistoryFirst(db))
 
 	_, ok := ReadHeaderSegmentRoot(db, 3)
 	assert.False(t, ok)

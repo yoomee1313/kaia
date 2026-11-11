@@ -20,6 +20,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -53,7 +54,8 @@ var (
 )
 
 // BALModule keeps the block access lists of a chain: it records them, serves
-// past states from them, regenerates lists and builds past state tries.
+// past states from them, prunes the blocks of a light node, regenerates lists
+// and builds past state tries.
 type BALModule struct {
 	bc       *blockchain.BlockChain
 	db       database.DBManager
@@ -80,10 +82,11 @@ type BALModule struct {
 
 // Config are the settings of a BAL module.
 type Config struct {
-	Record             bool // Records the block access lists of inserted blocks in the database (experimental)
-	SkipReads          bool // Records the writes of the lists only, without their reads
-	NoIndex            bool // Does not index the recorded lists, so past states are not read from them
-	HeaderSegmentRoots bool // Stores the root of the block hashes of every finished segment
+	Record             bool          // Records the block access lists of inserted blocks in the database (experimental)
+	SkipReads          bool          // Records the writes of the lists only, without their reads
+	NoIndex            bool          // Does not index the recorded lists, so past states are not read from them
+	HistoryRetention   time.Duration // A light node deletes the blocks older than this; 0 keeps them
+	HeaderSegmentRoots bool          // Stores the root of the block hashes of every finished segment
 }
 
 // InitOpts are the chain and the settings of a BAL module.
@@ -128,8 +131,9 @@ func (c *BALModule) RegisterTo() {
 	c.bc.RegisterRewindableModule(c)
 }
 
-// Start starts the loops that index the lists and store the header segment
-// roots. A rewind stops the module and starts it again.
+// Start starts the loops that index the lists, prune the history of a light
+// node and store the header segment roots. A rewind stops the module and
+// starts it again.
 func (c *BALModule) Start() error {
 	c.lifeMu.Lock()
 	defer c.lifeMu.Unlock()
@@ -141,6 +145,10 @@ func (c *BALModule) Start() error {
 	if c.archive != nil {
 		c.wg.Add(1)
 		go c.indexLoop()
+	}
+	if c.cfg.HistoryRetention > 0 {
+		c.wg.Add(1)
+		go c.historyPruneLoop()
 	}
 	if c.cfg.HeaderSegmentRoots {
 		c.wg.Add(1)

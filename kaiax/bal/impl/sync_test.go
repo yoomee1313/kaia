@@ -405,6 +405,11 @@ func TestHistoryRangeAnnounce(t *testing.T) {
 	waitRanges(t, client, 1)
 	require.Equal(t, HistoryRange{BAL: 1, BALNext: 11}, client.PeerRanges()["server"])
 
+	require.NoError(t, WriteHistoryFirst(src.db, 4))
+	server.announce(server.LocalRange())
+	require.Eventually(t, func() bool { return client.PeerRanges()["server"].Receipt == 4 }, time.Second, time.Millisecond)
+	require.Equal(t, HistoryRange{Header: 4, Body: 4, Receipt: 4, BAL: 1, BALNext: 11}, client.PeerRanges()["server"])
+
 	require.NoError(t, WriteBALRange(src.db, 1, 12))
 	server.announce(server.LocalRange())
 	time.Sleep(20 * time.Millisecond)

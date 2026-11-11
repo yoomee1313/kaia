@@ -212,7 +212,7 @@ type ProtocolManager struct {
 
 	balSync *bal_impl.Sync // kaia/69 block access lists and slim receipts
 
-	segmentsFilled func() bool // nil unless a history node, which is synced once it is true
+	segmentsFilled func() bool // nil unless a history or light node, which is synced once it is true
 	waitingFilled  atomic.Bool
 }
 
@@ -247,7 +247,7 @@ func NewProtocolManager(config *params.ChainConfig, mode downloader.SyncMode, ne
 		},
 	}
 
-	if cnconfig.HistoryMode == bal_impl.HistoryModeHistory {
+	if cnconfig.HistoryMode == bal_impl.HistoryModeHistory || cnconfig.HistoryMode == bal_impl.HistoryModeLight {
 		manager.segmentsFilled = func() bool {
 			bc, ok := blockchain.(*kaia_blockchain.BlockChain)
 			return !ok || bal_impl.HeaderSegmentRootsFilled(bc)

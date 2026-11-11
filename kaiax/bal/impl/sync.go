@@ -95,6 +95,12 @@ func (r *HistoryRange) holdsBALs(from, to uint64) bool {
 	return r.BAL != NoHistory && r.BAL <= from && to < r.BALNext
 }
 
+// HoldsBlocksFrom reports whether the headers, bodies and receipts from block
+// from on are held, which a light node deletes.
+func (r *HistoryRange) HoldsBlocksFrom(from uint64) bool {
+	return r.Header <= from && r.Body <= from && r.Receipt <= from
+}
+
 // announces reports whether a node holding r announces it to a peer it last
 // announced sent to.
 func (r HistoryRange) announces(sent HistoryRange) bool {
@@ -250,10 +256,11 @@ func NewSync(db database.DBManager, chain SyncChain, drop func(id string)) *Sync
 	return &Sync{db: db, chain: chain, drop: drop, peers: make(map[string]*balPeer), received: received, segHashes: segHashes}
 }
 
-// LocalRange returns the data this node holds: every header, body and
-// receipt, and the stored BALs.
+// LocalRange returns the data this node holds: a light node deletes the
+// headers, bodies and receipts of old blocks.
 func (s *Sync) LocalRange() HistoryRange {
-	r := HistoryRange{BAL: NoHistory}
+	first := ReadHistoryFirst(s.db)
+	r := HistoryRange{Header: first, Body: first, Receipt: first, BAL: NoHistory}
 	if first, next := ReadBALRange(s.db); first < next {
 		r.BAL, r.BALNext = first, next
 	}

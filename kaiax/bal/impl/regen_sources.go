@@ -389,6 +389,9 @@ func HistoryError(bc *blockchain.BlockChain, number uint64, err error) error {
 }
 
 func (c *BALModule) historyError(number uint64, err error) error {
+	if c.cfg.HistoryRetention > 0 {
+		return fmt.Errorf("%w: a light node keeps the recent states only: %v", ErrNoHistory, err)
+	}
 	first, ok := c.recordedFirst()
 	if !ok {
 		return err

@@ -123,6 +123,10 @@ func (dbm *databaseManager) StartDBMigration(dstdbm DBManager) error {
 		}
 	}()
 
+	if err := dbm.checkFreezerMigration(dstdbm); err != nil {
+		return err
+	}
+
 	// from non single DB
 	if !dbm.config.SingleDB {
 		errChan := make(chan error, databaseEntryTypeSize)
@@ -163,6 +167,11 @@ func (dbm *databaseManager) StartDBMigration(dstdbm DBManager) error {
 		// Reset state trie DB path if migrated state trie path ("statetrie_migrated_XXXXXX") is set
 		dstdbm.setDBDir(DBEntryType(StateTrieDB), "")
 
+		if len(errs) == 0 {
+			if err := dbm.migrateFreezer(dstdbm, quit); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		return errors.Join(errs...)
 	}
 

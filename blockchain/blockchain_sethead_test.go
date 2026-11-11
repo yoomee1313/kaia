@@ -19,12 +19,18 @@
 package blockchain
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/vm"
+	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus/faker"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Tests a sethead for a short canonical chain where a recent block was already
@@ -310,4 +316,84 @@ func testSetHeadEarlyExit(t *testing.T, tt *rewindTest) {
 
 	db.WriteLastPrunedBlockNumber(tt.setheadBlock - 1)
 	assert.Nil(t, chain.SetHead(tt.setheadBlock))
+}
+
+// frozenTestDB reports a fixed number of frozen blocks and records the
+// truncation of the freezer.
+type frozenTestDB struct {
+	database.DBManager
+	frozen      uint64
+	truncatedTo uint64
+}
+
+func (db *frozenTestDB) FrozenBlocks() uint64 { return db.frozen }
+
+func (db *frozenTestDB) PauseFreezer() (uint64, func()) { return db.frozen, func() {} }
+
+func (db *frozenTestDB) TruncateFrozen(items uint64) error {
+	if items < db.frozen {
+		db.frozen, db.truncatedTo = items, items
+	}
+	return nil
+}
+
+// TestSetHeadBelowFreezerToFindState checks that a rewind that has to go below
+// the frozen blocks to find a block with state truncates the freezer down to
+// the block with state.
+func TestSetHeadBelowFreezerToFindState(t *testing.T) {
+	var (
+		key, _  = crypto.HexToECDSA("b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291")
+		address = crypto.PubkeyToAddress(key.PublicKey)
+		gspec   = &Genesis{Config: params.TestChainConfig, Alloc: GenesisAlloc{address: {Balance: big.NewInt(1000000000)}}}
+		signer  = types.LatestSignerForChainID(gspec.Config.ChainID)
+		db      = &frozenTestDB{DBManager: database.NewMemoryDBManager()}
+	)
+	genesis := gspec.MustCommit(db)
+	chain, err := NewBlockChain(db, nil, gspec.Config, faker.NewFullFaker(), vm.Config{})
+	require.NoError(t, err)
+	defer chain.Stop()
+	chain.Config().Istanbul = params.GetDefaultIstanbulConfig()
+
+	// Every block changes the state, and only blocks up to 2 keep their state.
+	blocks, _ := GenerateChain(gspec.Config, genesis, faker.NewFaker(), db, 8, func(i int, b *BlockGen) {
+		tx, err := types.SignTx(types.NewTransaction(b.TxNonce(address), common.Address{byte(i + 1)}, big.NewInt(1), params.TxGas, nil, nil), signer, key)
+		require.NoError(t, err)
+		b.AddTx(tx)
+	})
+	_, err = chain.InsertChain(blocks)
+	require.NoError(t, err)
+	for _, b := range blocks[2:] {
+		chain.stateCache.TrieDB().Dereference(b.Root())
+		db.DeleteTrieNode(b.Root().ExtendZero())
+	}
+
+	db.frozen = 5 // blocks [0, 4] are frozen
+	require.NoError(t, chain.SetHead(5))
+	assert.Equal(t, uint64(2), chain.CurrentBlock().NumberU64())
+	assert.Equal(t, uint64(2), chain.CurrentHeader().Number.Uint64())
+	assert.Equal(t, uint64(3), db.truncatedTo)
+}
+
+// TestSetHeadBelowFreezer checks that SetHead truncates the freezer when it
+// rewinds below the frozen blocks, and leaves it alone otherwise.
+func TestSetHeadBelowFreezer(t *testing.T) {
+	db := &frozenTestDB{DBManager: database.NewMemoryDBManager()}
+	genesis := new(Genesis).MustCommit(db)
+	chain, err := NewBlockChain(db, nil, params.TestChainConfig, faker.NewFullFaker(), vm.Config{})
+	require.NoError(t, err)
+	defer chain.Stop()
+	chain.Config().Istanbul = params.GetDefaultIstanbulConfig()
+
+	blocks, _ := GenerateChain(params.TestChainConfig, genesis, faker.NewFaker(), db, 8, func(i int, b *BlockGen) {})
+	_, err = chain.InsertChain(blocks)
+	require.NoError(t, err)
+
+	db.frozen = 5 // blocks [0, 4] are frozen
+	require.NoError(t, chain.SetHead(6))
+	assert.Equal(t, uint64(5), db.frozen)
+	assert.Zero(t, db.truncatedTo)
+
+	require.NoError(t, chain.SetHead(3))
+	assert.Equal(t, uint64(3), chain.CurrentBlock().NumberU64())
+	assert.Equal(t, uint64(4), db.truncatedTo)
 }
