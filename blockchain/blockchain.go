@@ -539,6 +539,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 				lastPruned, head)
 		}
 	}
+	// The freezer is paused until the rewind is done, so that it does not freeze
+	// the blocks being deleted. Frozen blocks above the new head are removed at
+	// the end of the rewind.
+	_, resume := bc.db.PauseFreezer()
+	defer resume()
 	_, err := bc.setHeadBeyondRoot(head, common.Hash{}, false)
 	return err
 }
@@ -701,6 +706,13 @@ func (bc *BlockChain) setHeadBeyondRootLocked(head uint64, root common.Hash, rep
 			}
 		}
 		logger.Trace("[SetHead] Snapshot database deleted", "from", originLatestBlkNum, "to", votingEpoch)
+
+		// Frozen blocks above the new head header go last, after the head markers
+		// and the key-value data, like the deletions above. If the rewind is
+		// interrupted before this, they are removed when the database is opened.
+		if err := bc.db.TruncateFrozen(bc.hc.CurrentHeader().Number.Uint64() + 1); err != nil {
+			return 0, err
+		}
 	}
 
 	// Clear out any stale content from the caches
@@ -1357,6 +1369,10 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 	defer receiptsBatch.Release()
 	defer txLookupEntriesBatch.Release()
 
+	var (
+		newBlocks   types.Blocks
+		newReceipts []types.Receipts
+	)
 	for i, block := range blockChain {
 		receipts := receiptChain[i]
 		// Short circuit insertion if shutting down or processing failed
@@ -1376,27 +1392,52 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		if err := SetReceiptsData(bc.chainConfig, block, receipts); err != nil {
 			return i, fmt.Errorf("failed to set receipts data: %v", err)
 		}
-		// Write all the data out into the database
-		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
-		bc.db.PutReceiptsToBatch(receiptsBatch, block.Hash(), block.NumberU64(), receipts)
+		newBlocks = append(newBlocks, block)
+		newReceipts = append(newReceipts, receipts)
+	}
+
+	// The tx lookup entries go first: a block written to the freezer counts as
+	// known if the sync restarts, so its entries would not be written again.
+	for _, block := range newBlocks {
 		bc.db.PutTxLookupEntriesToBatch(txLookupEntriesBatch, block)
+		totalBytes, err := database.WriteBatchesOverThreshold(txLookupEntriesBatch)
+		if err != nil {
+			return 0, err
+		}
+		bytes += totalBytes
+	}
+	totalBytes, err := database.WriteBatches(txLookupEntriesBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
+
+	// Blocks far below the head header go straight into the freezer.
+	frozen, err := bc.db.FreezeSyncedBlocks(newBlocks, newReceipts, bc.CurrentHeader().Number.Uint64())
+	if err != nil {
+		return 0, err
+	}
+	stats.processed += int32(frozen)
+
+	// Write the rest out into the key-value store
+	for i, block := range newBlocks[frozen:] {
+		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
+		bc.db.PutBlockReceiptsToBatch(receiptsBatch, block, newReceipts[frozen+i])
 
 		stats.processed++
 
-		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch, txLookupEntriesBatch)
+		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch)
 		if err != nil {
 			return 0, err
-		} else {
-			bytes += totalBytes
 		}
-	}
-
-	totalBytes, err := database.WriteBatches(bodyBatch, receiptsBatch, txLookupEntriesBatch)
-	if err != nil {
-		return 0, err
-	} else {
 		bytes += totalBytes
 	}
+
+	totalBytes, err = database.WriteBatches(bodyBatch, receiptsBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
 
 	// Update the head fast sync block if better
 	bc.mu.Lock()
@@ -1416,7 +1457,8 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		"number", head.Number(),
 		"hash", head.Hash(),
 		"size", common.StorageSize(bytes),
-		"ignored", stats.ignored)
+		"ignored", stats.ignored,
+		"frozen", frozen)
 	return 0, nil
 }
 
@@ -1447,8 +1489,8 @@ func (bc *BlockChain) writeBlock(block *types.Block) {
 
 // writeReceipts writes receipts to persistent database.
 // If write through caching is enabled, it also writes blockReceipts to the cache.
-func (bc *BlockChain) writeReceipts(hash common.Hash, number uint64, receipts types.Receipts) {
-	bc.db.WriteReceipts(hash, number, receipts)
+func (bc *BlockChain) writeReceipts(block *types.Block, receipts types.Receipts) {
+	bc.db.WriteBlockReceipts(block, receipts)
 }
 
 // writeStateTrie writes state trie to database if possible.
@@ -1598,13 +1640,13 @@ func (bc *BlockChain) pruneTrieNodeLoop() {
 				limit := num - bc.cacheConfig.LivePruningRetention // Prune [1, latest - retention]
 
 				startTime := time.Now()
-				marks := bc.db.ReadPruningMarks(startNum, limit+1)
-				bc.pruneTrieNodes(marks, limit)
-				bc.db.DeletePruningMarks(marks)
+				count := bc.db.PruneMarkedTrieNodes(startNum, limit+1, func(marks []database.PruningMark) {
+					bc.pruneTrieNodes(marks, limit)
+				})
 				bc.db.WriteLastPrunedBlockNumber(limit)
 
 				logger.Info("Pruned trie nodes", "number", num, "start", startNum, "limit", limit,
-					"count", len(marks), "elapsed", time.Since(startTime))
+					"count", count, "elapsed", time.Since(startTime))
 
 				startNum = limit + 1
 			case <-bc.quit:
@@ -1761,7 +1803,7 @@ func (bc *BlockChain) writeBlockWithStateSerial(block *types.Block, receipts []*
 	}
 	trieWriteTime := time.Since(trieWriteStart)
 
-	bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+	bc.writeReceipts(block, receipts)
 
 	// TODO-Klaytn-Issue264 If we are using istanbul BFT, then we always have a canonical chain.
 	//         Later we may be able to refine below code.
@@ -1842,7 +1884,7 @@ func (bc *BlockChain) writeBlockWithStateParallel(block *types.Block, receipts [
 
 	go func() {
 		defer parallelDBWriteWG.Done()
-		bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+		bc.writeReceipts(block, receipts)
 	}()
 
 	// Wait until all writing goroutines are terminated.

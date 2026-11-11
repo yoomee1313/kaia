@@ -335,6 +335,21 @@ var (
 		EnvVars:  []string{"KLAYTN_DB_NUM_STATETRIE_SHARDS", "KAIA_DB_NUM_STATETRIE_SHARDS"},
 		Category: "DATABASE",
 	}
+	FreezerThresholdFlag = &cli.Uint64Flag{
+		Name:     "db.freezer.threshold",
+		Usage:    "Number of recent blocks kept in the key-value databases; older canonical blocks are moved to the append-only freezer, which every node but a light one uses. Once blocks are moved, the database can no longer be opened by versions without the freezer (at least 128 and twice the trie block interval)",
+		Value:    database.DefaultFreezerThreshold,
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_DB_FREEZER_THRESHOLD", "KAIA_DB_FREEZER_THRESHOLD"},
+		Category: "DATABASE",
+	}
+	AncientDirFlag = &cli.PathFlag{
+		Name:     "datadir.ancient",
+		Usage:    "Root directory of the block freezer (default = inside chaindata). A relative path is resolved against the chaindata directory",
+		Aliases:  []string{},
+		EnvVars:  []string{"KLAYTN_DATADIR_ANCIENT", "KAIA_DATADIR_ANCIENT"},
+		Category: "DATABASE",
+	}
 	LevelDBCacheSizeFlag = &cli.IntFlag{
 		Name:     "db.leveldb.cache-size",
 		Usage:    "Size of in-memory cache in LevelDB (MiB)",
@@ -546,14 +561,21 @@ var (
 	}
 	HistoryModeFlag = &cli.StringFlag{
 		Name:     "history.mode",
-		Usage:    `History mode ("full" or "history", experimental). A history node keeps its state with live pruning and starts from genesis by applying block access lists up to the last block of the BAL hash chain. A database keeps the mode it was made with`,
+		Usage:    `History mode ("full", "history" or "light", experimental). A history or light node keeps its state with live pruning and starts from genesis by applying block access lists up to the last block of the BAL hash chain; a light node keeps only the blocks of the last --history.light-days. A database keeps the mode it was made with`,
 		Value:    "full",
 		EnvVars:  []string{"KAIA_HISTORY_MODE"},
 		Category: "MISC",
 	}
+	HistoryLightDaysFlag = &cli.Uint64Flag{
+		Name:     "history.light-days",
+		Usage:    "Days of blocks, receipts and block access lists a light node keeps",
+		Value:    120,
+		EnvVars:  []string{"KAIA_HISTORY_LIGHT_DAYS"},
+		Category: "MISC",
+	}
 	SyncApplyBALsFlag = &cli.BoolFlag{
 		Name:     "sync.apply-bals",
-		Usage:    "Sync by applying the block access lists and receipts of blocks received from peers, up to the last block of the signed BAL hash chain (--bal.hash-chain), instead of executing the blocks (experimental). On by default for EN and in the history mode; consensus nodes always execute",
+		Usage:    "Sync by applying the block access lists and receipts of blocks received from peers, up to the last block of the signed BAL hash chain (--bal.hash-chain), instead of executing the blocks (experimental). On by default for EN and in the history and light modes; consensus nodes always execute",
 		EnvVars:  []string{"KAIA_SYNC_APPLY_BALS"},
 		Category: "MISC",
 	}

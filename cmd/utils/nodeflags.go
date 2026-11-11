@@ -169,6 +169,8 @@ var CommonNodeFlags = []cli.Flag{
 	altsrc.NewBoolFlag(LightKDFFlag),
 	altsrc.NewBoolFlag(SingleDBFlag),
 	altsrc.NewUintFlag(NumStateTrieShardsFlag),
+	altsrc.NewUint64Flag(FreezerThresholdFlag),
+	altsrc.NewPathFlag(AncientDirFlag),
 	altsrc.NewIntFlag(LevelDBCompressionTypeFlag),
 	altsrc.NewBoolFlag(LevelDBNoBufferPoolFlag),
 	altsrc.NewBoolFlag(DBNoPerformanceMetricsFlag),
@@ -255,6 +257,7 @@ var CommonNodeFlags = []cli.Flag{
 	altsrc.NewUint64Flag(HistoryConvertMemoryFlag),
 	altsrc.NewIntFlag(HistoryConvertWorkersFlag),
 	altsrc.NewStringFlag(HistoryModeFlag),
+	altsrc.NewUint64Flag(HistoryLightDaysFlag),
 	altsrc.NewBoolFlag(SyncApplyBALsFlag),
 	altsrc.NewStringFlag(BALHashChainFlag),
 	altsrc.NewIntFlag(GpoBlocksFlag),
@@ -467,6 +470,7 @@ var SnapshotFlags = []cli.Flag{
 	altsrc.NewBoolFlag(RocksDBDisableMetricsFlag),
 	altsrc.NewIntFlag(RocksDBMaxOpenFilesFlag),
 	altsrc.NewBoolFlag(RocksDBCacheIndexAndFilterFlag),
+	altsrc.NewPathFlag(AncientDirFlag),
 }
 
 var DBMigrationSrcFlags = []cli.Flag{
@@ -492,6 +496,7 @@ var DBMigrationSrcFlags = []cli.Flag{
 	altsrc.NewBoolFlag(RocksDBDisableMetricsFlag),
 	altsrc.NewIntFlag(RocksDBMaxOpenFilesFlag),
 	altsrc.NewBoolFlag(RocksDBCacheIndexAndFilterFlag),
+	altsrc.NewPathFlag(AncientDirFlag),
 }
 
 var DBMigrationDstFlags = []cli.Flag{

@@ -103,10 +103,10 @@ const defaultHistoryMode = bal_impl.HistoryModeHistory
 // checkHistoryMode accepts the history modes a consensus node runs in.
 func checkHistoryMode(mode string) error {
 	switch mode {
-	case "", bal_impl.HistoryModeHistory:
+	case "", bal_impl.HistoryModeHistory, bal_impl.HistoryModeLight:
 		return nil
 	}
-	return fmt.Errorf("a consensus node runs in the history mode, not --%s %s", utils.HistoryModeFlag.Name, mode)
+	return fmt.Errorf("a consensus node runs in the history or light mode, not --%s %s", utils.HistoryModeFlag.Name, mode)
 }
 
 func main() {

@@ -192,3 +192,48 @@ func storageReceipts(receipts types.Receipts) []*types.ReceiptForStorage {
 	}
 	return out
 }
+
+// TestLightSyncFromGenesis starts a light node from genesis: it applies the
+// block access lists of a sealed chain with live pruning, verifying every
+// committed seal and state root, deletes the blocks older than its retention,
+// and keeps inserting blocks after that.
+func TestLightSyncFromGenesis(t *testing.T) {
+	defer func(n uint64) { bal_impl.MinHistoryBlocks = n }(bal_impl.MinHistoryBlocks)
+	bal_impl.MinHistoryBlocks = 4
+	cacheConfig := balCacheConfig()
+	cacheConfig.LivePruningRetention = 4
+	balConfig := &bal_impl.Config{Record: true, NoIndex: true, HistoryRetention: 10 * time.Second} // blocks are one second apart
+	src, dst, blocks := balSyncContexts(t, 40, cacheConfig, balConfig, true)
+	require.True(t, dst.chain.IsLivePruningRequired())
+
+	_, err := bal_impl.InsertChain(dst.chain, blocks[:30])
+	require.NoError(t, err)
+	require.NoError(t, bal_impl.PruneHistory(dst.chain))
+	first := bal_impl.HistoryFirst(dst.chain)
+	require.Equal(t, uint64(20), first, "blocks 20-30 are within 10 seconds of the head")
+	for _, b := range blocks[:30] {
+		n := b.Block.NumberU64()
+		require.Equal(t, b.Block.Hash(), dst.chain.StateCache().TrieDB().DiskDB().ReadCanonicalHash(n), "block %d", n)
+		if n < first {
+			require.Nil(t, dst.chain.GetHeaderByNumber(n), "block %d", n)
+			require.Nil(t, dst.chain.GetReceiptsByBlockHash(b.Block.Hash()), "block %d", n)
+			require.Nil(t, bal_impl.ByHash(dst.chain, b.Block.Hash(), n), "block %d", n)
+			require.ErrorIs(t, bal_impl.PrunedError(dst.chain, n), bal_impl.ErrPrunedHistory)
+		} else {
+			require.NotNil(t, dst.chain.GetBlockByNumber(n), "block %d", n)
+		}
+	}
+	balFirst, _ := bal_impl.Range(dst.chain)
+	require.Equal(t, first, balFirst)
+
+	// The seals of later blocks still verify, and a wrong one still fails.
+	unsealed := makeSealedBlock(t, src, blocks[29].Block, nil, false)
+	_, err = bal_impl.InsertChain(dst.chain, []*bal_impl.Block{{Block: unsealed, BAL: blocks[30].BAL}})
+	require.Error(t, err)
+	_, err = bal_impl.InsertChain(dst.chain, blocks[30:])
+	require.NoError(t, err)
+	head := dst.chain.CurrentBlock()
+	require.Equal(t, blocks[39].Block.Hash(), head.Hash())
+	require.Equal(t, src.chain.CurrentBlock().Root(), head.Root())
+	require.True(t, dst.chain.HasState(head.Root()))
+}

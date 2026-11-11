@@ -26,5 +26,6 @@ import (
 func TestCheckHistoryMode(t *testing.T) {
 	require.NoError(t, checkHistoryMode(defaultHistoryMode))
 	require.NoError(t, checkHistoryMode(bal_impl.HistoryModeHistory))
-	require.ErrorContains(t, checkHistoryMode(bal_impl.HistoryModeFull), "a consensus node runs in the history mode, not --history.mode full")
+	require.NoError(t, checkHistoryMode(bal_impl.HistoryModeLight))
+	require.ErrorContains(t, checkHistoryMode(bal_impl.HistoryModeFull), "a consensus node runs in the history or light mode, not --history.mode full")
 }
