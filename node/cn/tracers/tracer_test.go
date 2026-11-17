@@ -249,7 +249,7 @@ func TestEnterExit(t *testing.T) {
 
 // TestTracerHostileCode checks that tracer code that throws from places the Go side
 // touches, or replaces builtins the Go side uses, fails or runs but never crashes
-// the process. Each of these used to abort it.
+// the process. Most of these used to abort it; the rest guard paths that were already safe.
 func TestTracerHostileCode(t *testing.T) {
 	const rest = `fault: function() {}, result: function() { return 1 }`
 	for _, code := range []string{

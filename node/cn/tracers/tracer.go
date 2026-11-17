@@ -33,6 +33,7 @@ import (
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/log"
+	"github.com/rcrowley/go-metrics"
 	"gopkg.in/olebedev/go-duktape.v3"
 )
 
@@ -441,8 +442,8 @@ type Context struct {
 	TxHash    common.Hash // Hash of the transaction being traced (zero if dangling call)
 }
 
-// liveVMs counts the JavaScript VMs that have not been destroyed yet.
-var liveVMs atomic.Int64
+// liveVMsCounter counts the JavaScript VMs that have not been destroyed yet.
+var liveVMsCounter = metrics.NewRegisteredCounter("tracers/js/vms/live", nil)
 
 // New instantiates a new tracer instance. code specifies either a predefined
 // tracer name or a Javascript snippet, which must evaluate to an expression
@@ -473,7 +474,7 @@ func New(code string, ctx *Context, unsafeTrace bool) (_ *Tracer, err error) {
 		frame:           newFrame(),
 		frameResult:     newFrameResult(),
 	}
-	liveVMs.Add(1)
+	liveVMsCounter.Inc(1)
 	defer func() {
 		if err != nil {
 			tracer.destroy()
@@ -909,7 +910,7 @@ func (jst *Tracer) destroy() {
 	jst.vm.DestroyHeap()
 	jst.vm.Destroy()
 	jst.vm = nil
-	liveVMs.Add(-1)
+	liveVMsCounter.Dec(1)
 }
 
 // addToObj pushes a field to a JS object.

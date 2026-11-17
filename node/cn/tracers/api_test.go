@@ -412,7 +412,7 @@ func TestTraceCallJSTracerReleasesVM(t *testing.T) {
 	}}
 	api := NewUnsafeAPI(newTestBackend(t, 1, genesis, func(i int, b *blockchain.BlockGen) {}))
 
-	before := liveVMs.Load()
+	before := liveVMsCounter.Count()
 	for _, code := range []string{
 		"4byteTracer",
 		`{step: function() {}, fault: function() {}, result: function() { return 1 }}`,
@@ -427,7 +427,7 @@ func TestTraceCallJSTracerReleasesVM(t *testing.T) {
 		}, rpc.NewBlockNumberOrHashWithNumber(rpc.LatestBlockNumber), &TraceConfig{Tracer: &code})
 		assert.Error(t, err, code)
 	}
-	assert.Equal(t, before, liveVMs.Load())
+	assert.Equal(t, before, liveVMsCounter.Count())
 }
 
 func TestTraceCallPrestateTracerKeepsLogicalPrestate(t *testing.T) {
