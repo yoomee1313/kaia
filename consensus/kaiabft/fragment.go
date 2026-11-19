@@ -286,25 +286,22 @@ func (m *machine) handleFragment(pp *bft.Preprepare, data []byte, src common.Add
 }
 
 // assembleProposal returns the proposal of a final PRE-PREPARE with its txs
-// from the fragments of its view, and the bytes and the entries of the hints of
-// the fragments. It returns errFragmentsMissing, keeping the message to be
-// handled again, if some fragment has not come yet.
-func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMessage, src common.Address) (*types.Block, int, uint64, error) {
+// from the fragments of its view. It returns errFragmentsMissing, keeping the
+// message to be handled again, if some fragment has not come yet.
+func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMessage, src common.Address) (*types.Block, error) {
 	var final bft.Final
 	if err := rlp.DecodeBytes(data, &final); err != nil {
-		return nil, 0, 0, bft.ErrInvalidMessage
+		return nil, bft.ErrInvalidMessage
 	}
 	key := fragmentKey{pp.View.Sequence.Uint64(), pp.View.Round.Uint64()}
 	set := m.fragments[key]
 	var (
 		txs          types.Transactions
-		hintBytes    int
-		hintEntries  uint64
 		missing      bool
 		header, isOK = pp.Proposal.(*types.Block)
 	)
 	if !isOK {
-		return nil, 0, 0, errors.New("kaiabft: invalid proposal type")
+		return nil, errors.New("kaiabft: invalid proposal type")
 	}
 	for _, hash := range final.Fragments {
 		var frag *bft.Fragment
@@ -316,13 +313,9 @@ func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMes
 			continue
 		}
 		if frag.Start != uint64(len(txs)) {
-			return nil, 0, 0, fmt.Errorf("%w: fragment starts at %d, not %d", errFragmentsInvalid, frag.Start, len(txs))
+			return nil, fmt.Errorf("%w: fragment starts at %d, not %d", errFragmentsInvalid, frag.Start, len(txs))
 		}
 		txs = append(txs, frag.Txs...)
-		hintBytes += len(frag.Hint)
-		if hint, err := bal.Decode(frag.Hint); err == nil {
-			hintEntries += hint.EntryCount()
-		}
 	}
 	if missing {
 		if set == nil {
@@ -330,12 +323,12 @@ func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMes
 			m.fragments[key] = set
 		}
 		set.pending = &backlogEvent{src: src, msg: msg, Hash: msg.Hash}
-		return nil, 0, 0, errFragmentsMissing
+		return nil, errFragmentsMissing
 	}
 	if uint64(len(txs)) != final.TxCount {
-		return nil, 0, 0, fmt.Errorf("%w: %d txs, the final message says %d", errFragmentsInvalid, len(txs), final.TxCount)
+		return nil, fmt.Errorf("%w: %d txs, the final message says %d", errFragmentsInvalid, len(txs), final.TxCount)
 	}
-	return types.NewBlockWithHeader(header.Header()).WithBody(txs), hintBytes, hintEntries, nil
+	return types.NewBlockWithHeader(header.Header()).WithBody(txs), nil
 }
 
 // clearFragments drops the fragments of the sequences before the current one.

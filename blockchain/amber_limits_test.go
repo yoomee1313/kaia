@@ -51,3 +51,19 @@ func TestAmberLimitChecks(t *testing.T) {
 	config.AmberCompatibleBlock = nil
 	require.NoError(t, CheckBlockComputationCost(config, at, 1001), "no Amber")
 }
+
+// The computation cost limit is a rule of the block: a node that imports a
+// block over it refuses the block.
+func TestImportRefusesBlockOverComputationCost(t *testing.T) {
+	env := newAmberTestEnv(t)
+	blocks, _ := GenerateChain(env.config, env.genesis, env.sealer, env.db, 3, amberTestTxs(env))
+
+	limited := *env.config
+	limited.AmberBlockComputationCostLimit = 1
+	env.config = &limited
+	chain := newImportChain(t, env)
+	_, err := chain.InsertChain(blocks[:1])
+	require.NoError(t, err, "block 1 is before Amber")
+	_, err = chain.InsertChain(blocks[1:])
+	require.ErrorIs(t, err, ErrBlockComputationCostLimit)
+}

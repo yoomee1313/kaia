@@ -391,10 +391,8 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 
 	// A final message of a proposal sent in fragments: the block is
 	// assembled from them, waiting for the missing ones.
-	var fragmentHintBytes int
-	var fragmentHintEntries uint64
 	if data := pp.Part(bft.PartFinal); data != nil && m.b.isAmberAt(pp.View.Sequence.Uint64()) {
-		block, hintBytes, hintEntries, err := m.assembleProposal(pp, data, msg, src)
+		block, err := m.assembleProposal(pp, data, msg, src)
 		if err == errFragmentsMissing {
 			return err
 		}
@@ -406,7 +404,6 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		assembled.Proposal = block
 		assembled.Parts = bft.WithAccessList(nil, pp.AccessList())
 		pp = &assembled
-		fragmentHintBytes, fragmentHintEntries = hintBytes, hintEntries
 	}
 
 	// Amber: this node found the block invalid by executing it in this
@@ -449,7 +446,7 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		}
 	}
 
-	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp, fragmentHintBytes, fragmentHintEntries)
+	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp)
 	if err != nil {
 		m.sendNextRoundChange("handlePreprepare: invalid block access list")
 		return err

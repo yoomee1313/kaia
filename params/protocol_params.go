@@ -221,10 +221,11 @@ const (
 	// MaxBlockSize (10 MiB) = ProtocolMaxMsgSize (12 MiB) - margin (2 MiB)
 	MaxBlockSize = 10_485_760 // maximum size of an RLP-encoded block, not counting committed seals
 
-	// A KaiaBFT proposal carries the block and, from the Amber hardfork, its
-	// block access list, in one p2p message. A block producer keeps the RLP
-	// sizes of both under MaxProposalSize, which leaves a margin of 1 MiB
-	// under ProtocolMaxMsgSize (12 MiB) for the rest of the message.
+	// From the Amber hardfork the txs of a KaiaBFT proposal and its block
+	// access list hint must fit in MaxProposalSize together, whether the
+	// proposal is sent whole or in fragments. Sent whole it is one p2p
+	// message, with a margin of 1 MiB under ProtocolMaxMsgSize (12 MiB) for
+	// the header and the rest of the message.
 	MaxProposalSize = 11_534_336
 
 	// HeaderSegmentSize is the number of blocks of a header segment, whose

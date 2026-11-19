@@ -78,17 +78,17 @@ func (b *backend) isAmberAt(num uint64) bool {
 // checkProposalAccessList checks the block access list hint of a PRE-PREPARE
 // without executing the proposal: present from Amber and absent before, well
 // formed, within the consensus entry limit of a hint, and within the size limit
-// together with the block. The hint is not checked against the header: it
-// leaves out what validators predict from the txs (see
+// together with the txs of the block. The hint is not checked against the
+// header: it leaves out what validators predict from the txs (see
 // blockchain.AccessListHint), and each validator checks the list of its own
 // execution against the header. A failure is not a property of the block, so
 // the proposal is not voted for in its round only. It returns the hint, nil
 // before Amber.
 //
-// For a proposal sent in fragments, fragmentHintBytes and fragmentHintEntries
-// are the bytes and the entries of the hints of its fragments, which count
-// against the same limits.
-func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare, fragmentHintBytes int, fragmentHintEntries uint64) (*bal.BlockAccessList, error) {
+// For a proposal sent in fragments the hint is the one of the whole block in
+// the final message; the hints of the fragments hold the same entries and are
+// bounded by maxFragmentBytes.
+func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare) (*bal.BlockAccessList, error) {
 	number := pp.Proposal.Number()
 	if !config.IsAmberForkEnabled(number) {
 		if len(pp.AccessList()) != 0 {
@@ -103,21 +103,24 @@ func checkProposalAccessList(config *params.ChainConfig, pp *bft.Preprepare, fra
 	if err != nil {
 		return nil, fmt.Errorf("block access list: %w", err)
 	}
-	if entries := hint.EntryCount() + fragmentHintEntries; entries > accessListHintEntryLimit {
+	if entries := hint.EntryCount(); entries > accessListHintEntryLimit {
 		return nil, fmt.Errorf("%w: %d > %d", errAccessListHintEntryLimit, entries, accessListHintEntryLimit)
 	}
 	block, ok := pp.Proposal.(*types.Block)
 	if !ok {
 		return nil, errors.New("kaiabft: invalid proposal type")
 	}
-	if err := blockchain.CheckProposalSize(config, number, uint64(block.Size()), uint64(len(pp.AccessList())+fragmentHintBytes)); err != nil {
+	if err := blockchain.CheckProposalSize(config, number, blockchain.TxsSize(block.Transactions()), uint64(len(pp.AccessList()))); err != nil {
 		return nil, err
 	}
 	return hint, nil
 }
 
-// verifyExecution checks the speculative result of an Amber proposal and
-// returns the RLP of the BAL of the execution. local reports that the check
+// verifyExecution checks the speculative result of an Amber proposal against
+// the header and the limits of the block, which the state processors and the
+// block validator also check, and returns the RLP of the BAL of the execution.
+// The size limit counts the hint the proposal carries, which
+// checkProposalAccessList checks on receipt. local reports that the check
 // failed for a reason of this node, a state access failure, which says nothing
 // about the proposal.
 func verifyExecution(config *params.ChainConfig, validator blockchain.Validator, block *types.Block, res *blockchain.SpeculativeResult) (accessList []byte, local bool, err error) {
@@ -144,9 +147,6 @@ func verifyExecution(config *params.ChainConfig, validator blockchain.Validator,
 		return nil, true, err
 	}
 	if err := blockchain.CheckBlockAccessListEntries(config, block.Number(), list.WriteEntryCount()); err != nil {
-		return nil, false, err
-	}
-	if err := blockchain.CheckProposalSize(config, block.Number(), uint64(block.Size()), uint64(len(enc))); err != nil {
 		return nil, false, err
 	}
 	return enc, false, nil

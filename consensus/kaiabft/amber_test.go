@@ -93,16 +93,16 @@ func TestCheckProposalAccessList(t *testing.T) {
 		return &bft.Preprepare{View: view, Proposal: b, Parts: bft.WithAccessList(nil, list)}
 	}
 	check := func(cfg *params.ChainConfig, pp *bft.Preprepare) error {
-		_, err := checkProposalAccessList(cfg, pp, 0, 0)
+		_, err := checkProposalAccessList(cfg, pp)
 		return err
 	}
 
-	list, err := checkProposalAccessList(amberConfig(), pp(block, enc), 0, 0)
+	list, err := checkProposalAccessList(amberConfig(), pp(block, enc))
 	require.NoError(t, err)
 	got, err := list.Encode()
 	require.NoError(t, err)
 	require.Equal(t, enc, got)
-	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil), 0, 0)
+	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil))
 	require.NoError(t, err)
 	require.Nil(t, list)
 
@@ -128,27 +128,31 @@ func TestCheckProposalAccessList(t *testing.T) {
 	require.ErrorIs(t, check(amberConfig(), pp(block, enc)), errAccessListHintEntryLimit)
 	accessListHintEntryLimit = uint64(params.DefaultAmberAccessListHintEntryLimit)
 
-	// The size limit of the block and the list together.
+	// The size limit of the txs and the hint together; the header is not
+	// counted.
 	limit := uint64(params.MaxProposalSize - len(enc))
-	require.NoError(t, check(amberConfig(), pp(withSize(t, block.Header(), limit), enc)))
-	require.ErrorIs(t, check(amberConfig(), pp(withSize(t, block.Header(), limit+1), enc)), blockchain.ErrProposalSizeLimit)
+	require.NoError(t, check(amberConfig(), pp(withTxsSize(t, block.Header(), limit), enc)))
+	require.ErrorIs(t, check(amberConfig(), pp(withTxsSize(t, block.Header(), limit+1), enc)), blockchain.ErrProposalSizeLimit)
+	bigHeader := types.CopyHeader(block.Header())
+	bigHeader.Extra = make([]byte, params.MaxProposalSize)
+	require.NoError(t, check(amberConfig(), pp(types.NewBlockWithHeader(bigHeader), enc)))
 }
 
 // withSize returns a block with header whose RLP is size bytes, padded with
 // extra data.
-func withSize(t *testing.T, header *types.Header, size uint64) *types.Block {
-	header = types.CopyHeader(header)
+// withTxsSize returns a block with header and one tx of size bytes.
+func withTxsSize(t *testing.T, header *types.Header, size uint64) *types.Block {
+	n := int64(size)
 	for range 5 {
-		block := types.NewBlockWithHeader(header)
-		diff := int64(size) - int64(block.Size())
+		tx := types.NewTransaction(0, common.Address{1}, common.Big0, 21000, common.Big1, make([]byte, n))
+		diff := int64(size) - int64(tx.Size())
 		if diff == 0 {
-			return block
+			return types.NewBlockWithHeader(header).WithBody(types.Transactions{tx})
 		}
-		n := int64(len(header.Extra)) + diff
+		n += diff
 		require.GreaterOrEqual(t, n, int64(0))
-		header.Extra = make([]byte, n)
 	}
-	t.Fatalf("no block of %d bytes", size)
+	t.Fatalf("no tx of %d bytes", size)
 	return nil
 }
 
@@ -319,13 +323,5 @@ func TestVerifyExecution(t *testing.T) {
 	cfg.AmberBlockAccessListEntryLimit = bal.Recorded(statedb).WriteEntryCount() - 1
 	_, local, err = verifyExecution(cfg, nil, block, res)
 	require.ErrorIs(t, err, blockchain.ErrBlockAccessListEntryLimit)
-	require.False(t, local)
-
-	cfg.AmberBlockAccessListEntryLimit = 0
-	limit := uint64(params.MaxProposalSize - len(want))
-	_, _, err = verifyExecution(cfg, nil, withSize(t, block.Header(), limit), res)
-	require.NoError(t, err)
-	_, local, err = verifyExecution(cfg, nil, withSize(t, block.Header(), limit+1), res)
-	require.ErrorIs(t, err, blockchain.ErrProposalSizeLimit)
 	require.False(t, local)
 }

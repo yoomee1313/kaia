@@ -120,6 +120,9 @@ func (p *StateProcessor) Process(ctx context.Context, block *types.Block, stated
 		internalTxTraces = append(internalTxTraces, internalTxTrace)
 	}
 	processStats.AfterApplyTxs = time.Now()
+	if err := CheckBlockComputationCost(p.config, header.Number, processStats.ComputationCost); err != nil {
+		return nil, nil, 0, nil, processStats, err
+	}
 
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards).
 	// Block assembly is skipped: insertion/speculative paths never use the assembled block.

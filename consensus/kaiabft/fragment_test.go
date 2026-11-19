@@ -181,22 +181,23 @@ func TestFinalWithWrongFragments(t *testing.T) {
 	require.Equal(t, stateAcceptRequest, e2.m.state)
 }
 
-// The hints of the fragments count against the consensus limit of the hint.
-func TestFragmentHintsCountAgainstLimit(t *testing.T) {
+// The hint entry limit counts the hint of the whole block in the final
+// message once: the hints of the fragments hold the same entries.
+func TestFragmentHintsNotCountedTwice(t *testing.T) {
 	defer func(limit uint64) { accessListHintEntryLimit = limit }(accessListHintEntryLimit)
 	e := newFragmentEnv(t)
 	hint, err := bal.Decode(e.hint)
 	require.NoError(t, err)
-	b := bal.NewBuilder()
-	b.ReadAccount(common.HexToAddress("0xf1"))
-	fragHint, err := b.Build().Encode()
-	require.NoError(t, err)
-	data, err := rlp.EncodeToBytes(&bft.Fragment{Start: 0, Txs: e.block.Transactions(), Hint: fragHint})
-	require.NoError(t, err)
-	part := bft.Part{Kind: bft.PartFragment, Data: data}
+	part := e.fragment(t, 0, 5)
 	require.NoError(t, e.m.handlePreprepare(e.fragmentMsg(t, 10, part), e.proposer))
 
-	accessListHintEntryLimit = hint.EntryCount() // the fragment adds one
+	accessListHintEntryLimit = hint.EntryCount()
+	require.NotErrorIs(t, e.m.handlePreprepare(e.finalMsg(t, 5, part), e.proposer), errAccessListHintEntryLimit)
+
+	e = newFragmentEnv(t)
+	part = e.fragment(t, 0, 5)
+	require.NoError(t, e.m.handlePreprepare(e.fragmentMsg(t, 10, part), e.proposer))
+	accessListHintEntryLimit = hint.EntryCount() - 1
 	require.ErrorIs(t, e.m.handlePreprepare(e.finalMsg(t, 5, part), e.proposer), errAccessListHintEntryLimit)
 	require.Equal(t, stateAcceptRequest, e.m.state)
 }

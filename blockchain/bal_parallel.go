@@ -283,6 +283,9 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 			logs = append(logs, l)
 		}
 	}
+	if err := CheckBlockComputationCost(p.config, header.Number, stats.ComputationCost); err != nil {
+		return nil, nil, nil, 0, stats, err
+	}
 
 	// FinalizeState needs the receipts of all txs.
 	finalStart := time.Now()

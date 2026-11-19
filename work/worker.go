@@ -1079,8 +1079,9 @@ const amberFinalizeEntryReserve = 64
 // checkAmberLimits is the BeforeTxFinalise hook of a block producer from the
 // Amber hardfork. It leaves out the tx that would make the block cross the
 // computation cost limit, the entry limit of its block access list, or the
-// size limit of the block and its list together. The tx is counted only if it
-// is kept.
+// size limit of the txs and the hint of the proposal together. For the size it
+// counts the header and the whole list, reads included, which bound the hint
+// from above. The tx is counted only if it is kept.
 func (env *Task) checkAmberLimits(computationCost uint64) error {
 	if err := blockchain.CheckBlockComputationCost(env.config, env.header.Number, env.computationCost+computationCost); err != nil {
 		return err
