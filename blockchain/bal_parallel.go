@@ -53,8 +53,8 @@ func parallelSupported(cfg vm.Config) bool {
 
 // ExecuteWithAccessList executes a block from the Amber hardfork in parallel
 // with its block access list, reads included, which it first rebuilds from the
-// hint of a proposal (see AccessListHint; a whole list is its own hint), after
-// prefetching the keys of the list, and returns the result as the speculative cache holds it: the
+// hint of a proposal (see AccessListHint; a whole list is its own hint), and
+// returns the result as the speculative cache holds it: the
 // state to commit, whose BlockAccessList is the list of the whole block, and
 // the receipts, the bloom and the receipt root, which the caller checks with
 // ValidateStateWithCache.
@@ -74,7 +74,6 @@ func (bc *BlockChain) ExecuteWithAccessList(ctx context.Context, block *types.Bl
 	if err != nil {
 		return nil, err
 	}
-	bc.PrefetchAccessList(ctx, parent.Root, list, ParallelExecutionWorkers)
 	final, receipts, logs, usedGas, stats, err := sp.ProcessWithAccessList(ctx, block, parent, list, bc.vmConfig, ParallelExecutionWorkers, true)
 	if err != nil {
 		return nil, err
@@ -151,6 +150,7 @@ func (p *StateProcessor) ProcessWithAccessList(ctx context.Context, block *types
 // Execute are summed over the phases before FinalizeState, which run on
 // several goroutines; the others are elapsed times.
 type ParallelTiming struct {
+	Prestate time.Duration // read the keys of the list from the parent state
 	Prepare  time.Duration // open the state of each phase and apply the list before it
 	Execute  time.Duration // run InitializeState or the tx of each phase
 	Phases   time.Duration // elapsed time of the phases before FinalizeState
@@ -172,6 +172,14 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 	}
 	author, _ := p.bc.sealer.Author(header) // Ignore error, as Process does
 
+	// Every key of the list is read once from the parent state, and the
+	// phases share the values instead of each walking the tries.
+	prestateStart := time.Now()
+	pre := state.NewPrestate(ctx, p.bc.StateCache(), parent.Root, prestateKeys(list), workers)
+	if timing != nil {
+		timing.Prestate = time.Since(prestateStart)
+	}
+
 	// The phases before FinalizeState see the earlier phases of the list as
 	// they load accounts. The last one gets the list applied, as its state is
 	// committed, and it marks obsolete nodes for live pruning as the state of
@@ -183,6 +191,7 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 			if err != nil {
 				return nil, err
 			}
+			sdb.SetPrestate(pre)
 			if err := bal.ApplyBefore(sdb, list, phase); err != nil {
 				return nil, fmt.Errorf("phase %d: %w", phase, err)
 			}
@@ -193,6 +202,8 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 		if err != nil {
 			return nil, err
 		}
+		sdb.SetPrestate(pre)
+		sdb.SkipTrieWrites()
 		if phase > 0 {
 			bal.UseBefore(sdb, index, phase)
 		}
@@ -325,6 +336,22 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 	}
 	bal.SetMerged(final, merged)
 	return final, receipts, logs, usedGas, stats, nil
+}
+
+// prestateKeys returns the keys of list for a state.Prestate: every account,
+// with the slots it writes or reads.
+func prestateKeys(list *bal.BlockAccessList) state.PrestateKeys {
+	keys := make(state.PrestateKeys, len(list.Accounts))
+	for i := range list.Accounts {
+		a := &list.Accounts[i]
+		slots := make([]common.Hash, 0, len(a.StorageWrites)+len(a.StorageReads))
+		for j := range a.StorageWrites {
+			slots = append(slots, a.StorageWrites[j].Slot)
+		}
+		slots = append(slots, a.StorageReads...)
+		keys[a.Address] = slots
+	}
+	return keys
 }
 
 // firstDifference describes the first account whose entries differ.

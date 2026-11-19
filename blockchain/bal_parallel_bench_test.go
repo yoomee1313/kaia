@@ -262,8 +262,6 @@ func benchParallel(b *testing.B, bb *benchBlock, workers int) {
 		runtime.GC()
 		stop := peakHeap()
 		start := time.Now()
-		bb.chain.PrefetchAccessList(context.Background(), bb.parent.Root, bb.list, workers)
-		prefetched := time.Now()
 		var t ParallelTiming
 		final, _, _, _, _, err := sp.processWithAccessList(context.Background(), bb.block, bb.parent, bb.list, vm.Config{}, workers, true, &t)
 		require.NoError(b, err)
@@ -272,7 +270,7 @@ func benchParallel(b *testing.B, bb *benchBlock, workers int) {
 		end := time.Now()
 		peak = max(peak, stop())
 
-		prefetch += prefetched.Sub(start)
+		prefetch += t.Prestate
 		root += end.Sub(processed)
 		total += end.Sub(start)
 		sum.Prepare += t.Prepare
@@ -283,7 +281,7 @@ func benchParallel(b *testing.B, bb *benchBlock, workers int) {
 		sum.Merge += t.Merge
 	}
 	n := float64(b.N)
-	b.ReportMetric(ms(prefetch)/n, "prefetch-ms")
+	b.ReportMetric(ms(prefetch)/n, "prestate-ms")
 	b.ReportMetric(ms(sum.Prepare)/n, "prepare-cpu-ms")
 	b.ReportMetric(ms(sum.Execute)/n, "exec-cpu-ms")
 	b.ReportMetric(ms(sum.Phases)/n, "phases-ms")

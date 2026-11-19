@@ -223,6 +223,12 @@ func (s *stateObject) GetCommittedState(db Database, key common.Hash) common.Has
 			return v
 		}
 	}
+	if p := s.db.prestate; p != nil {
+		if v, ok := p.slot(s.address, s.storageRoot(), key); ok {
+			s.originStorage[key] = v
+			return v
+		}
+	}
 	// Track the amount of time wasted on reading the storage trie
 	var (
 		enc   []byte

@@ -118,6 +118,11 @@ type StateDB struct {
 	// Optional values of the earlier phases of a block access list, given to
 	// the accounts this state loads, see SetAccessOverlay.
 	overlay AccessOverlay
+	// prestate, if set, holds decoded accounts and slots read before the tries.
+	prestate *Prestate
+	// skipTrieWrites makes Finalise keep the changes in the state objects
+	// without writing them to the tries, for a state whose root is not used.
+	skipTrieWrites bool
 
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
@@ -741,6 +746,16 @@ func (s *StateDB) getDeletedStateObject(addr common.Address) *stateObject {
 // loadStateObject loads the object for the given address from the snapshot or
 // the database and inserts it into the live set. It returns nil if not found.
 func (s *StateDB) loadStateObject(addr common.Address) *stateObject {
+	if s.prestate != nil {
+		if acc, ok := s.prestate.account(addr); ok {
+			if acc == nil {
+				return nil
+			}
+			obj := newObject(s, addr, acc)
+			s.setStateObject(obj)
+			return obj
+		}
+	}
 	// If no live objects are available, attempt to use snapshots
 	var (
 		acc account.Account
@@ -1019,6 +1034,8 @@ func copyStateDB(dst, src *StateDB) {
 	// The recorder is copied too, so that a state restored from a copy keeps
 	// the changes recorded until the copy.
 	dst.overlay = src.overlay
+	dst.prestate = src.prestate
+	dst.skipTrieWrites = src.skipTrieWrites
 	dst.access = nil
 	if src.access != nil {
 		dst.access = src.access.Copy()
@@ -1154,7 +1171,7 @@ func (stateDB *StateDB) Finalise(deleteEmptyObjects bool, setStorageRoot bool) {
 				delete(stateDB.snapAccounts, so.addrHash)       // Clear out any previously updated account data (may be recreated via a resurrect)
 				delete(stateDB.snapStorage, so.addrHash)        // Clear out any previously updated storage data (may be recreated via a resurrect)
 			}
-		} else {
+		} else if !stateDB.skipTrieWrites {
 			so.updateStorageTrie(stateDB.db)
 			so.setStorageRoot(setStorageRoot, stateDB.stateObjectsDirtyStorage)
 			stateDB.updateStateObject(so)
