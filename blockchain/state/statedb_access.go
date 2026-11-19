@@ -246,3 +246,35 @@ func (s *StateDB) HashStorages(workers int) {
 		s.updateStateObject(so)
 	}
 }
+
+// FinaliseParallel finalises the state as Finalise(deleteEmptyObjects, false)
+// does, after updating and hashing the storage tries of the objects it keeps
+// on the given number of goroutines: each object has its own storage trie.
+// The account trie is then updated in order. With snapshots, whose storage
+// maps the objects share, it is Finalise.
+func (s *StateDB) FinaliseParallel(deleteEmptyObjects bool, workers int) {
+	if s.snap == nil && workers > 1 {
+		objs := make([]*stateObject, 0, len(s.journal.dirties))
+		for addr := range s.journal.dirties {
+			so, ok := s.stateObjects[addr]
+			if !ok || so.selfDestructed || (deleteEmptyObjects && so.empty()) || len(so.dirtyStorage) == 0 {
+				continue
+			}
+			objs = append(objs, so)
+		}
+		var (
+			wg   sync.WaitGroup
+			next atomic.Int64
+		)
+		for range workers {
+			wg.Go(func() {
+				for i := int(next.Add(1) - 1); i < len(objs); i = int(next.Add(1) - 1) {
+					objs[i].updateStorageTrie(s.db)
+					objs[i].updateStorageRoot(s.db)
+				}
+			})
+		}
+		wg.Wait()
+	}
+	s.Finalise(deleteEmptyObjects, false)
+}

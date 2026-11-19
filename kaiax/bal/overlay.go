@@ -30,13 +30,19 @@ import (
 // which gives the state at the start of phase k when the state is opened at
 // the parent root, and finalises them like the end of a tx.
 func ApplyBefore(s *state.StateDB, list *BlockAccessList, k int) error {
+	return ApplyBeforeParallel(s, list, k, 1)
+}
+
+// ApplyBeforeParallel is ApplyBefore with the storage tries of the accounts
+// updated on the given number of goroutines, see state.StateDB.FinaliseParallel.
+func ApplyBeforeParallel(s *state.StateDB, list *BlockAccessList, k int, workers int) error {
 	for i := range list.Accounts {
 		a := list.Accounts[i].Before(uint32(k))
 		if err := applyAccountAccess(s, &a); err != nil {
 			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
 		}
 	}
-	s.Finalise(true, false)
+	s.FinaliseParallel(true, workers)
 	return nil
 }
 

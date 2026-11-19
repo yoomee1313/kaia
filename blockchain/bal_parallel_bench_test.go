@@ -278,6 +278,7 @@ func benchParallel(b *testing.B, bb *benchBlock, workers int) {
 		sum.Phases += t.Phases
 		sum.Final += t.Final
 		sum.FinalPre += t.FinalPre
+		sum.FinalWait += t.FinalWait
 		sum.Merge += t.Merge
 	}
 	n := float64(b.N)
@@ -287,6 +288,7 @@ func benchParallel(b *testing.B, bb *benchBlock, workers int) {
 	b.ReportMetric(ms(sum.Phases)/n, "phases-ms")
 	b.ReportMetric(ms(sum.Final)/n, "final-ms")
 	b.ReportMetric(ms(sum.FinalPre)/n, "final-prep-ms")
+	b.ReportMetric(ms(sum.FinalWait)/n, "final-wait-ms")
 	b.ReportMetric(ms(sum.Merge)/n, "merge-ms")
 	b.ReportMetric(ms(root)/n, "root-ms")
 	b.ReportMetric(ms(total)/n, "total-ms")

@@ -29,6 +29,7 @@ import (
 	"maps"
 	"math/big"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -123,6 +124,9 @@ type StateDB struct {
 	// skipTrieWrites makes Finalise keep the changes in the state objects
 	// without writing them to the tries, for a state whose root is not used.
 	skipTrieWrites bool
+	// errMu guards dbErr while objects update their storage tries in
+	// parallel, see FinaliseParallel.
+	errMu sync.Mutex
 
 	// Measurements gathered during execution for debugging purposes
 	AccountReads         time.Duration
@@ -224,6 +228,11 @@ func (s *StateDB) UnlockGCCachedNode() {
 
 // setError remembers the first non-nil error it is called with.
 func (s *StateDB) setError(err error) {
+	if err == nil {
+		return
+	}
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
 	if s.dbErr == nil {
 		s.dbErr = err
 	}

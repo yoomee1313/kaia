@@ -150,13 +150,14 @@ func (p *StateProcessor) ProcessWithAccessList(ctx context.Context, block *types
 // Execute are summed over the phases before FinalizeState, which run on
 // several goroutines; the others are elapsed times.
 type ParallelTiming struct {
-	Prestate time.Duration // read the keys of the list from the parent state
-	Prepare  time.Duration // open the state of each phase and apply the list before it
-	Execute  time.Duration // run InitializeState or the tx of each phase
-	Phases   time.Duration // elapsed time of the phases before FinalizeState
-	Final    time.Duration // open and prepare the state of FinalizeState, and run it
-	FinalPre time.Duration // the part of Final that prepares the state
-	Merge    time.Duration // merge, encode and compare the lists
+	Prestate  time.Duration // read the keys of the list from the parent state
+	Prepare   time.Duration // open the state of each phase and apply the list before it
+	Execute   time.Duration // run InitializeState or the tx of each phase
+	Phases    time.Duration // elapsed time of the phases before FinalizeState
+	Final     time.Duration // wait for the state of FinalizeState after the txs, and run it
+	FinalPre  time.Duration // prepare the state of FinalizeState, while the txs run
+	FinalWait time.Duration // the part of Final that waits for that state
+	Merge     time.Duration // merge, encode and compare the lists
 }
 
 func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types.Block, parent *types.Header, list *bal.BlockAccessList, cfg vm.Config, workers int, withReads bool, timing *ParallelTiming) (*state.StateDB, types.Receipts, []*types.Log, uint64, ProcessStats, error) {
@@ -192,7 +193,7 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 				return nil, err
 			}
 			sdb.SetPrestate(pre)
-			if err := bal.ApplyBefore(sdb, list, phase); err != nil {
+			if err := bal.ApplyBeforeParallel(sdb, list, phase, workers); err != nil {
 				return nil, fmt.Errorf("phase %d: %w", phase, err)
 			}
 			bal.EnableRecorderAt(sdb, phase)
@@ -258,6 +259,31 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 		}
 		phases[phase] = bal.Recorded(sdb)
 	}
+	// The state of FinalizeState gets the list applied while the txs run: the
+	// list gives the values at the end of the txs, and the merged changes of
+	// the phases are checked against it at the end. The encoding of the list
+	// that check compares with is made meanwhile too.
+	type finalPrep struct {
+		sdb     *state.StateDB
+		wantEnc []byte
+		took    time.Duration
+		err     error
+	}
+	finalCh := make(chan finalPrep, 1)
+	go func() {
+		start := time.Now()
+		var r finalPrep
+		if r.sdb, r.err = open(n + 1); r.err == nil {
+			want := list
+			if !withReads {
+				want = list.Writes()
+			}
+			r.wantEnc, r.err = want.Encode()
+		}
+		r.took = time.Since(start)
+		finalCh <- r
+	}()
+
 	stats.BeforeApplyTxs = time.Now()
 	for range max(1, workers) {
 		wg.Go(func() {
@@ -300,12 +326,14 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 
 	// FinalizeState needs the receipts of all txs.
 	finalStart := time.Now()
-	final, err := open(n + 1)
-	if err != nil {
-		return nil, nil, nil, 0, stats, err
+	prep := <-finalCh
+	if prep.err != nil {
+		return nil, nil, nil, 0, stats, prep.err
 	}
+	final := prep.sdb
 	if timing != nil {
-		timing.FinalPre = time.Since(finalStart)
+		timing.FinalPre = prep.took
+		timing.FinalWait = time.Since(finalStart)
 	}
 	header.GasUsed = usedGas
 	if _, err := p.FinalizeState(header, final, txs, receipts); err != nil {
@@ -327,11 +355,7 @@ func (p *StateProcessor) processWithAccessList(ctx context.Context, block *types
 	if err != nil {
 		return nil, nil, nil, 0, stats, err
 	}
-	wantEnc, err := want.Encode()
-	if err != nil {
-		return nil, nil, nil, 0, stats, err
-	}
-	if !bytes.Equal(gotEnc, wantEnc) {
+	if !bytes.Equal(gotEnc, prep.wantEnc) {
 		return nil, nil, nil, 0, stats, fmt.Errorf("%w: block %d, %s", ErrAccessListMismatch, block.NumberU64(), firstDifference(got, want))
 	}
 	bal.SetMerged(final, merged)
