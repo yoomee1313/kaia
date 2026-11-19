@@ -39,11 +39,13 @@ import (
 // While the proposer executes its block it sends the txs it keeps in
 // fragments, PRE-PREPAREs with a PartFragment, each with the block access list
 // hint of its phases. It then sends the final PRE-PREPARE: the header of the
-// block, a PartFinal that names the fragments by hash, and the hint of the
-// whole block. A fragment changes no state of the consensus: a validator keeps
-// it, prefetches the keys of its txs and of its hint, and relays it. The final
-// message is a PRE-PREPARE as before once the block is assembled from the
-// fragments; if one is missing it waits for it, until the round times out.
+// block, a PartFinal that names the fragments by hash, the hint of the phases
+// after the fragments (the last txs and FinalizeState), and the hash of the
+// whole block access list. A fragment changes no state of the consensus: a
+// validator keeps it, prefetches the keys of its txs and of its hint, and
+// relays it. The final message is a PRE-PREPARE as before once the block is
+// assembled from the fragments, with their hints merged; if one is missing it
+// waits for it, until the round times out.
 
 const (
 	// fragmentTxs is the number of txs a proposer puts in a fragment.
@@ -169,20 +171,34 @@ func (f *fragmenter) flush() {
 }
 
 // fragments returns the parts of the fragments sent, after sending the last
-// txs, if they hold the txs of block in order; nil otherwise, and the
-// proposal is then sent whole.
-func (f *fragmenter) fragments(block *types.Block) []bft.Part {
+// txs, and the hint of the phases after them for the final message, if they
+// hold the txs of block in order and their hints rebuild its list; nil
+// otherwise, and the proposal is then sent whole.
+func (f *fragmenter) fragments(block *types.Block) ([]bft.Part, []byte) {
 	f.flush()
 	txs := block.Transactions()
 	if len(f.parts) == 0 || len(f.applied) != len(txs) {
-		return nil
+		return nil, nil
 	}
 	for i, tx := range txs {
 		if f.applied[i].Hash() != tx.Hash() {
-			return nil
+			return nil, nil
 		}
 	}
-	return f.parts
+	list := bal.Recorded(f.statedb)
+	if list == nil {
+		return nil, nil
+	}
+	tail, err := f.hinter.Final(f.b.chain.Config(), block, list)
+	if err != nil {
+		logger.Debug("Proposing the block whole", "number", block.Number(), "err", err)
+		return nil, nil
+	}
+	tailEnc, err := tail.Encode()
+	if err != nil {
+		return nil, nil
+	}
+	return f.parts, tailEnc
 }
 
 // sendFragment signs and sends a fragment of the proposal of this node for the
@@ -210,11 +226,11 @@ func (m *machine) sendFragment(ev fragmentEvent) {
 }
 
 // finalParts returns the parts of the final PRE-PREPARE of a proposal sent in
-// fragments in the current view: the Final and the hint of the block. It
-// returns nil if the fragments were not all sent in this view, and the
-// proposal is then sent whole.
+// fragments in the current view: the Final, the hint of the phases after the
+// fragments and the hash of the whole list. It returns nil if the fragments
+// were not all sent in this view, and the proposal is then sent whole.
 func (m *machine) finalParts(request *bft.Request) []bft.Part {
-	if len(request.Fragments) == 0 || m.sentFragmentsView == nil || m.sentFragmentsView.Cmp(m.currentView()) != 0 {
+	if len(request.Fragments) == 0 || request.FinalHint == nil || m.sentFragmentsView == nil || m.sentFragmentsView.Cmp(m.currentView()) != 0 {
 		return nil
 	}
 	hashes := make([]common.Hash, len(request.Fragments))
@@ -234,7 +250,8 @@ func (m *machine) finalParts(request *bft.Request) []bft.Part {
 	if err != nil {
 		return nil
 	}
-	return bft.WithAccessList([]bft.Part{{Kind: bft.PartFinal, Data: final}}, request.AccessList)
+	parts := bft.WithAccessList([]bft.Part{{Kind: bft.PartFinal, Data: final}}, request.FinalHint)
+	return bft.WithAccessListHash(parts, request.AccessListHash)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,22 +303,26 @@ func (m *machine) handleFragment(pp *bft.Preprepare, data []byte, src common.Add
 }
 
 // assembleProposal returns the proposal of a final PRE-PREPARE with its txs
-// from the fragments of its view. It returns errFragmentsMissing, keeping the
-// message to be handled again, if some fragment has not come yet.
-func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMessage, src common.Address) (*types.Block, error) {
+// from the fragments of its view, the hint of the whole block, which merges the
+// hints of the fragments and of the final message, and the bytes of those
+// hints, which the size limit counts. It returns errFragmentsMissing, keeping
+// the message to be handled again, if some fragment has not come yet.
+func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMessage, src common.Address) (*types.Block, []byte, int, error) {
 	var final bft.Final
 	if err := rlp.DecodeBytes(data, &final); err != nil {
-		return nil, bft.ErrInvalidMessage
+		return nil, nil, 0, bft.ErrInvalidMessage
 	}
 	key := fragmentKey{pp.View.Sequence.Uint64(), pp.View.Round.Uint64()}
 	set := m.fragments[key]
 	var (
 		txs          types.Transactions
+		hints        []*bal.BlockAccessList
+		hintBytes    = len(pp.AccessList())
 		missing      bool
 		header, isOK = pp.Proposal.(*types.Block)
 	)
 	if !isOK {
-		return nil, errors.New("kaiabft: invalid proposal type")
+		return nil, nil, 0, errors.New("kaiabft: invalid proposal type")
 	}
 	for _, hash := range final.Fragments {
 		var frag *bft.Fragment
@@ -313,9 +334,15 @@ func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMes
 			continue
 		}
 		if frag.Start != uint64(len(txs)) {
-			return nil, fmt.Errorf("%w: fragment starts at %d, not %d", errFragmentsInvalid, frag.Start, len(txs))
+			return nil, nil, 0, fmt.Errorf("%w: fragment starts at %d, not %d", errFragmentsInvalid, frag.Start, len(txs))
+		}
+		hint, err := bal.Decode(frag.Hint)
+		if err != nil {
+			return nil, nil, 0, fmt.Errorf("%w: hint: %v", errFragmentsInvalid, err)
 		}
 		txs = append(txs, frag.Txs...)
+		hints = append(hints, hint)
+		hintBytes += len(frag.Hint)
 	}
 	if missing {
 		if set == nil {
@@ -323,12 +350,20 @@ func (m *machine) assembleProposal(pp *bft.Preprepare, data []byte, msg *wireMes
 			m.fragments[key] = set
 		}
 		set.pending = &backlogEvent{src: src, msg: msg, Hash: msg.Hash}
-		return nil, errFragmentsMissing
+		return nil, nil, 0, errFragmentsMissing
 	}
 	if uint64(len(txs)) != final.TxCount {
-		return nil, fmt.Errorf("%w: %d txs, the final message says %d", errFragmentsInvalid, len(txs), final.TxCount)
+		return nil, nil, 0, fmt.Errorf("%w: %d txs, the final message says %d", errFragmentsInvalid, len(txs), final.TxCount)
 	}
-	return types.NewBlockWithHeader(header.Header()).WithBody(txs), nil
+	tail, err := bal.Decode(pp.AccessList())
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("%w: final hint: %v", errFragmentsInvalid, err)
+	}
+	merged, err := bal.Merge(append(hints, tail)...).Encode()
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return types.NewBlockWithHeader(header.Header()).WithBody(txs), merged, hintBytes, nil
 }
 
 // clearFragments drops the fragments of the sequences before the current one.

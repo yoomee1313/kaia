@@ -115,13 +115,13 @@ type machine struct {
 	waitingForRoundChange bool
 
 	// Amber: the proposals of this sequence this node executed and found
-	// valid, with the RLP of the BAL of its execution. invalid holds the
+	// valid, with its hint and the hash of the BAL of its execution. invalid holds the
 	// proposals of this sequence this node found invalid by executing them,
 	// from any fork, with the reason: they are refused for the sequence
 	// instead of being recorded as bad blocks. commitPending is set while a COMMIT waits for the execution,
 	// and reproposal is a proposal of this node that waits for it to be
 	// proposed again in a new round.
-	verified map[common.Hash][]byte
+	verified map[common.Hash]verifiedProposal
 	invalid  map[common.Hash]error
 
 	// Amber: the fragments of proposals received for the current and the
@@ -165,7 +165,7 @@ func newMachine(b *backend) *machine {
 		backlogEvidenceBytes: make(map[common.Address]uint64),
 		backlogPreprepares:   make(map[common.Address]backlogPreprepare),
 		roundChangeSets:      make(map[uint64]*messageSet),
-		verified:             make(map[common.Hash][]byte),
+		verified:             make(map[common.Hash]verifiedProposal),
 		invalid:              make(map[common.Hash]error),
 		fragments:            make(map[fragmentKey]*fragmentSet),
 		metrics:              bft.NewCoreMetrics("consensus/istanbul/core"),
@@ -222,7 +222,7 @@ func (m *machine) runLoop() {
 			}
 			switch e := ev.Data.(type) {
 			case requestEvent:
-				request := &bft.Request{Proposal: e.Proposal, AccessList: e.AccessList, Fragments: e.Fragments}
+				request := &bft.Request{Proposal: e.Proposal, AccessList: e.AccessList, AccessListHash: e.AccessListHash, Fragments: e.Fragments, FinalHint: e.FinalHint}
 				if err := m.handleRequest(request); err == errFutureMessage {
 					m.storePendingRequest(request)
 				}
@@ -391,8 +391,9 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 
 	// A final message of a proposal sent in fragments: the block is
 	// assembled from them, waiting for the missing ones.
+	hintBytes := len(pp.AccessList())
 	if data := pp.Part(bft.PartFinal); data != nil && m.b.isAmberAt(pp.View.Sequence.Uint64()) {
-		block, err := m.assembleProposal(pp, data, msg, src)
+		block, hint, wireHintBytes, err := m.assembleProposal(pp, data, msg, src)
 		if err == errFragmentsMissing {
 			return err
 		}
@@ -402,8 +403,12 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		}
 		assembled := *pp
 		assembled.Proposal = block
-		assembled.Parts = bft.WithAccessList(nil, pp.AccessList())
+		assembled.Parts = bft.WithAccessList(nil, hint)
+		if hash, ok := pp.AccessListHash(); ok {
+			assembled.Parts = bft.WithAccessListHash(assembled.Parts, hash)
+		}
 		pp = &assembled
+		hintBytes = wireHintBytes
 	}
 
 	// Amber: this node found the block invalid by executing it in this
@@ -446,7 +451,7 @@ func (m *machine) handlePreprepare(msg *wireMessage, src common.Address) error {
 		}
 	}
 
-	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp)
+	accessList, err := checkProposalAccessList(m.b.chain.Config(), pp, hintBytes)
 	if err != nil {
 		m.sendNextRoundChange("handlePreprepare: invalid block access list")
 		return err
@@ -885,7 +890,7 @@ func (m *machine) startNewRound(round *big.Int) {
 	m.state = stateAcceptRequest
 	m.commitPending = false
 	if !roundChange {
-		m.verified = make(map[common.Hash][]byte)
+		m.verified = make(map[common.Hash]verifiedProposal)
 		m.invalid = make(map[common.Hash]error)
 		m.reproposal = nil
 		m.clearFragments()
@@ -1012,10 +1017,10 @@ func (m *machine) sendPreprepare(request *bft.Request) {
 	// This node proposes only blocks it built or verified, with the BAL of its
 	// own execution.
 	if m.b.isAmberAt(m.sequence.Uint64()) {
-		m.verified[request.Proposal.Hash()] = request.AccessList
+		m.verified[request.Proposal.Hash()] = verifiedProposal{hint: request.AccessList, listHash: request.AccessListHash}
 	}
 	curView := m.currentView()
-	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal, Parts: bft.WithAccessList(nil, request.AccessList)}
+	pp := &bft.Preprepare{View: curView, Proposal: request.Proposal, Parts: bft.WithAccessListHash(bft.WithAccessList(nil, request.AccessList), request.AccessListHash)}
 	var prepared *bft.PreparedCertificate
 	if m.b.isPermissionlessAt(curView.Sequence.Uint64()) && curView.Round.Sign() > 0 {
 		certificate, highest, err := m.roundChangeJustification(m.roundChangeCertificate, curView)
@@ -1774,7 +1779,8 @@ func (m *machine) processPendingRequests() {
 	}
 	cmp := m.sequence.Cmp(m.pendingRequest.Proposal.Number())
 	if cmp == 0 {
-		go m.b.eventMux.Post(requestEvent{Proposal: m.pendingRequest.Proposal})
+		r := m.pendingRequest
+		go m.b.eventMux.Post(requestEvent{Proposal: r.Proposal, AccessList: r.AccessList, AccessListHash: r.AccessListHash, Fragments: r.Fragments, FinalHint: r.FinalHint})
 	} else if cmp > 0 {
 		m.pendingRequest = nil
 	}

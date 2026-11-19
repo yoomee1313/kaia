@@ -52,11 +52,15 @@ type Proposal interface {
 
 // Request wraps a proposal to be processed by a BFT engine. From the Amber
 // hardfork a block producer adds the block access list hint of the proposal,
-// and the fragments of its txs it already sent, if any.
+// the hash of its whole block access list, reads included, and the fragments
+// of its txs it already sent, if any, with the hint of the phases after them,
+// which the final message carries instead of the hint of the whole block.
 type Request struct {
-	Proposal   Proposal
-	AccessList []byte
-	Fragments  []Part
+	Proposal       Proposal
+	AccessList     []byte
+	AccessListHash common.Hash
+	Fragments      []Part
+	FinalHint      []byte
 }
 
 // View includes a round number and a sequence number.
@@ -127,8 +131,10 @@ type ConsensusMsg struct {
 // From the Amber hardfork it carries Parts, typed payloads that new kinds of
 // content can be added to without a new message: the block access list hint
 // of the proposal (PartHint), a fragment of its txs sent ahead while the
-// proposer executes them (PartFragment), and the final message that names the
-// fragments of the block (PartFinal). The parts are covered by the signature
+// proposer executes them (PartFragment), the final message that names the
+// fragments of the block (PartFinal), and the hash of the whole block access
+// list of the proposal, reads included (PartAccessListHash), which validators
+// check against their own execution. The parts are covered by the signature
 // of the message, so the proposer answers for them; they are not part of the
 // block, whose header commits the hash of the writes of its block access list.
 // A node ignores the parts of a kind it does not know: kinds that a node needs
@@ -151,8 +157,12 @@ const (
 	// the block, and it changes no state of the consensus.
 	PartFragment uint64 = 2
 	// PartFinal is the RLP of a Final. A PRE-PREPARE that has one has the
-	// header of the block as its Proposal, without the txs.
+	// header of the block as its Proposal, without the txs. Its PartHint is
+	// the hint of the phases after the fragments.
 	PartFinal uint64 = 3
+	// PartAccessListHash is the keccak256 of the RLP of the block access list
+	// of the proposal, reads included. The header commits the writes only.
+	PartAccessListHash uint64 = 4
 )
 
 // Part is a typed payload of a PRE-PREPARE.
@@ -192,22 +202,47 @@ func (b *Preprepare) AccessList() []byte {
 	return b.Part(PartHint)
 }
 
-// WithAccessList returns the parts with the hint set to hint, nil if hint is
-// empty.
-func WithAccessList(parts []Part, hint []byte) []Part {
+// AccessListHash returns the hash of the whole block access list of the
+// proposal, and false if the PRE-PREPARE has none or a malformed one.
+func (b *Preprepare) AccessListHash() (common.Hash, bool) {
+	data := b.Part(PartAccessListHash)
+	if len(data) != common.HashLength {
+		return common.Hash{}, false
+	}
+	return common.BytesToHash(data), true
+}
+
+// WithPart returns the parts with the part of the given kind set to data, or
+// removed if data is empty.
+func WithPart(parts []Part, kind uint64, data []byte) []Part {
 	out := make([]Part, 0, len(parts)+1)
 	for _, p := range parts {
-		if p.Kind != PartHint {
+		if p.Kind != kind {
 			out = append(out, p)
 		}
 	}
-	if len(hint) != 0 {
-		out = append(out, Part{Kind: PartHint, Data: hint})
+	if len(data) != 0 {
+		out = append(out, Part{Kind: kind, Data: data})
 	}
 	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// WithAccessList returns the parts with the hint set to hint, nil if hint is
+// empty.
+func WithAccessList(parts []Part, hint []byte) []Part {
+	return WithPart(parts, PartHint, hint)
+}
+
+// WithAccessListHash returns the parts with the hash of the whole block access
+// list set to hash, removed if hash is zero.
+func WithAccessListHash(parts []Part, hash common.Hash) []Part {
+	if hash == (common.Hash{}) {
+		return WithPart(parts, PartAccessListHash, nil)
+	}
+	return WithPart(parts, PartAccessListHash, hash.Bytes())
 }
 
 // EncodeRLP serializes a Preprepare into the Kaia RLP format.

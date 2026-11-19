@@ -75,7 +75,7 @@ func newAmberMachine(t *testing.T, cfg *params.ChainConfig, block *types.Block, 
 	mValset.EXPECT().GetProposer(gomock.Any(), gomock.Any()).Return(other, nil).AnyTimes()
 	b.valsetModule = mValset
 	m := newTestMachine(b, 10, 0, block, []common.Address{self})
-	m.preprepare.Parts = bft.WithAccessList(nil, accessList)
+	m.preprepare.Parts = amberParts(accessList)
 	m.state = statePrepared
 	m.proposer = other
 	return m, self
@@ -90,19 +90,19 @@ func TestCheckProposalAccessList(t *testing.T) {
 	block, enc := amberBlock(t, 10)
 	view := &bft.View{Sequence: big.NewInt(10), Round: big.NewInt(0)}
 	pp := func(b *types.Block, list []byte) *bft.Preprepare {
-		return &bft.Preprepare{View: view, Proposal: b, Parts: bft.WithAccessList(nil, list)}
+		return &bft.Preprepare{View: view, Proposal: b, Parts: amberParts(list)}
 	}
 	check := func(cfg *params.ChainConfig, pp *bft.Preprepare) error {
-		_, err := checkProposalAccessList(cfg, pp)
+		_, err := checkProposalAccessList(cfg, pp, len(pp.AccessList()))
 		return err
 	}
 
-	list, err := checkProposalAccessList(amberConfig(), pp(block, enc))
+	list, err := checkProposalAccessList(amberConfig(), pp(block, enc), len(enc))
 	require.NoError(t, err)
 	got, err := list.Encode()
 	require.NoError(t, err)
 	require.Equal(t, enc, got)
-	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil))
+	list, err = checkProposalAccessList(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil), 0)
 	require.NoError(t, err)
 	require.Nil(t, list)
 
@@ -111,6 +111,12 @@ func TestCheckProposalAccessList(t *testing.T) {
 	require.ErrorIs(t, check(permissionlessConfig(), pp(block, enc)), errUnexpectedAccessList)
 	require.NoError(t, check(permissionlessConfig(), pp(newEmptyBlock(10, common.Hash{1}), nil)))
 	require.Error(t, check(amberConfig(), pp(block, []byte{0x01})), "not a list")
+
+	// The hash of the whole BAL is required from Amber and refused before.
+	noHash := &bft.Preprepare{View: view, Proposal: block, Parts: bft.WithAccessList(nil, enc)}
+	require.ErrorIs(t, check(amberConfig(), noHash), errMissingAccessListHash)
+	hashOnly := &bft.Preprepare{View: view, Proposal: newEmptyBlock(10, common.Hash{1}), Parts: bft.WithAccessListHash(nil, common.Hash{1})}
+	require.ErrorIs(t, check(permissionlessConfig(), hashOnly), errUnexpectedAccessList)
 
 	// A hint is not checked against the header: it leaves out what the
 	// validators predict, and they check their own list.
@@ -140,6 +146,15 @@ func TestCheckProposalAccessList(t *testing.T) {
 
 // withSize returns a block with header whose RLP is size bytes, padded with
 // extra data.
+// amberParts returns the parts of an Amber PRE-PREPARE with list as the hint
+// and its hash as the hash of the whole BAL, nil if list is empty.
+func amberParts(list []byte) []bft.Part {
+	if len(list) == 0 {
+		return nil
+	}
+	return bft.WithAccessListHash(bft.WithAccessList(nil, list), crypto.Keccak256Hash(list))
+}
+
 // withTxsSize returns a block with header and one tx of size bytes.
 func withTxsSize(t *testing.T, header *types.Header, size uint64) *types.Block {
 	n := int64(size)
@@ -169,10 +184,10 @@ func TestAmberCommitWaitsForExecution(t *testing.T) {
 	require.True(t, m.commitPending)
 
 	// An outcome of another height is ignored.
-	m.handleExecResult(execResultEvent{Number: 11, Hash: block.Hash(), AccessList: enc})
+	m.handleExecResult(execResultEvent{Number: 11, Hash: block.Hash(), AccessList: enc, ListHash: crypto.Keccak256Hash(enc)})
 	expectNoMessage(t, msgs)
 
-	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc})
+	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc, ListHash: crypto.Keccak256Hash(enc)})
 	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
 	require.False(t, m.commitPending)
 
@@ -191,11 +206,12 @@ func TestCommitBeforeAmberDoesNotWait(t *testing.T) {
 	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
 }
 
-// A valid block whose PRE-PREPARE carries another hint than the one of this
-// node is not committed in that round: the hint is a function of the block, so
-// a different one is the proposer's fault, which the failed round counts in its
-// PFS. The block stays valid and locked, and commits with the right hint.
-func TestAmberAccessListHintMismatchStartsNextRound(t *testing.T) {
+// A valid block whose PRE-PREPARE carries another BAL hash than the one of
+// this node's execution is not committed in that round: the BAL, reads
+// included, is a function of the block, so a different hash is the proposer's
+// fault, which the failed round counts in its PFS. The block stays valid and
+// locked, and commits with the right hash.
+func TestAmberAccessListHashMismatchStartsNextRound(t *testing.T) {
 	block, enc := amberBlock(t, 10)
 	wrong := append([]byte{}, enc...)
 	wrong[len(wrong)-1] ^= 1
@@ -205,7 +221,7 @@ func TestAmberAccessListHintMismatchStartsNextRound(t *testing.T) {
 	defer stop()
 
 	m.trySendCommit()
-	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc})
+	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc, ListHash: crypto.Keccak256Hash(enc)})
 	requireCode(t, recvMessage(t, msgs), bft.MsgRoundChange)
 	expectNoMessage(t, msgs)
 	require.False(t, m.commitPending)
@@ -213,8 +229,8 @@ func TestAmberAccessListHintMismatchStartsNextRound(t *testing.T) {
 	require.False(t, m.isInvalidProposal(block.Hash()))
 	require.False(t, m.needsExecution(block.Hash()))
 
-	// The same block with the hint of this node commits.
-	m.preprepare.Parts = bft.WithAccessList(nil, enc)
+	// The same block with the hash of this node commits.
+	m.preprepare.Parts = amberParts(enc)
 	m.trySendCommit()
 	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
 }
@@ -239,7 +255,7 @@ func TestAmberInvalidExecutionReleasesLock(t *testing.T) {
 	// The next round, whose proposer proposes it again.
 	m.state, m.waitingForRoundChange = stateAcceptRequest, false
 	m.proposer = m.b.address
-	pp := &bft.Preprepare{View: m.currentView(), Proposal: block, Parts: bft.WithAccessList(nil, enc)}
+	pp := &bft.Preprepare{View: m.currentView(), Proposal: block, Parts: amberParts(enc)}
 	require.ErrorIs(t, m.handlePreprepare(&wireMessage{Code: bft.MsgPreprepare, Msg: mustEncode(t, pp)}, m.b.address), errRejectedProposal)
 }
 
@@ -277,7 +293,7 @@ func TestAmberReproposeLockedWithOwnAccessList(t *testing.T) {
 	expectNoMessage(t, msgs)
 	require.NotNil(t, m.reproposal)
 
-	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc})
+	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc, ListHash: crypto.Keccak256Hash(enc)})
 	msg := recvMessage(t, msgs)
 	requireCode(t, msg, bft.MsgPreprepare)
 	var pp *bft.Preprepare

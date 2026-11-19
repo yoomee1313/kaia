@@ -100,7 +100,7 @@ func (e *fragmentEnv) finalMsg(t *testing.T, txCount int, parts ...bft.Part) *wi
 	pp := &bft.Preprepare{
 		View:     &bft.View{Sequence: big.NewInt(10), Round: big.NewInt(0)},
 		Proposal: types.NewBlockWithHeader(e.block.Header()),
-		Parts:    bft.WithAccessList([]bft.Part{{Kind: bft.PartFinal, Data: final}}, e.hint),
+		Parts:    bft.WithAccessListHash(bft.WithAccessList([]bft.Part{{Kind: bft.PartFinal, Data: final}}, e.hint), crypto.Keccak256Hash(e.hint)),
 	}
 	return &wireMessage{Code: bft.MsgPreprepare, Msg: mustEncode(t, pp)}
 }
@@ -181,8 +181,8 @@ func TestFinalWithWrongFragments(t *testing.T) {
 	require.Equal(t, stateAcceptRequest, e2.m.state)
 }
 
-// The hint entry limit counts the hint of the whole block in the final
-// message once: the hints of the fragments hold the same entries.
+// The hint entry limit counts the hint of the whole block once, merged from
+// the hints of the fragments and of the final message.
 func TestFragmentHintsNotCountedTwice(t *testing.T) {
 	defer func(limit uint64) { accessListHintEntryLimit = limit }(accessListHintEntryLimit)
 	e := newFragmentEnv(t)
@@ -208,7 +208,7 @@ func TestFinalPartsNeedSentFragments(t *testing.T) {
 	e := newFragmentEnv(t)
 	e.m.proposer = e.self
 	first, second := e.fragment(t, 0, 2), e.fragment(t, 2, 5)
-	request := &bft.Request{Proposal: e.block, AccessList: e.hint, Fragments: []bft.Part{first, second}}
+	request := &bft.Request{Proposal: e.block, AccessList: e.hint, AccessListHash: crypto.Keccak256Hash(e.hint), Fragments: []bft.Part{first, second}, FinalHint: e.hint}
 	require.Nil(t, e.m.finalParts(request))
 
 	e.m.sendFragment(fragmentEvent{Number: 10, Parent: e.block.ParentHash(), Part: first})

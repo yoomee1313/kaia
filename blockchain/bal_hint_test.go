@@ -137,7 +137,8 @@ func TestInsertChainWithAccessListHint(t *testing.T) {
 
 // The hints of the fragments a producer makes while it executes a block give
 // the changes of the hint of the block, phase by phase, and every key read by
-// the block that the hint of the block reads too.
+// the block that the hint of the block reads too. With the hint of the final
+// message they rebuild the list of the block.
 func TestFragmentHinter(t *testing.T) {
 	c := newBALHistoryChain(t, "prague")
 	for i, block := range c.blocks {
@@ -214,5 +215,20 @@ func TestFragmentHinter(t *testing.T) {
 				require.True(t, reads[a.Address.Hex()+slot.Hex()], "block %d: read of %s", block.NumberU64(), a.Address.Hex())
 			}
 		}
+
+		// The final message carries the phases after the fragments, and all
+		// the hints merged rebuild the list of the block.
+		tail, err := hinter.Final(c.chain.Config(), block, c.lists[i])
+		require.NoError(t, err, "block %d", block.NumberU64())
+		for k := range changes(tail) {
+			require.False(t, got[k], "block %d: %s given again in the final hint", block.NumberU64(), k)
+		}
+		rebuilt, err := c.chain.RebuildAccessList(block, parent, bal.Merge(append(frags, tail)...))
+		require.NoError(t, err)
+		want, err := c.lists[i].Encode()
+		require.NoError(t, err)
+		gotEnc, err := rebuilt.Encode()
+		require.NoError(t, err)
+		require.Equal(t, want, gotEnc, "block %d", block.NumberU64())
 	}
 }

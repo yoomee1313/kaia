@@ -559,15 +559,20 @@ func (bc *BlockChain) RebuildAccessList(block *types.Block, parent *types.Header
 // Amber proposal while the producer executes it, see bft.Fragment. The hint of
 // a fragment holds the changes of its phases and the keys first read in them,
 // without what the prediction gets right, as AccessListHint leaves them out.
-// The hints of the fragments are for validators to prefetch: the final message
-// of the proposal carries the hint of the whole block, which they execute
-// with.
+// Validators prefetch the keys of each fragment as it comes. The final message
+// of the proposal carries the hint of the phases after the fragments (see
+// Final), and validators execute the block with the hints merged.
 type FragmentHinter struct {
-	p    *hintPredictor
-	s    *state.StateDB // the parent state, read only
-	done int            // phases already given, from 0: InitializeState
-	sent map[common.Address]map[common.Hash]struct{}
+	p     *hintPredictor
+	s     *state.StateDB // the parent state, read only
+	done  int            // phases already given, from 0: InitializeState
+	sent  map[common.Address]map[common.Hash]struct{}
+	given []*bal.BlockAccessList
 }
+
+// errFragmentHints is returned by FragmentHinter.Final when the hints of the
+// fragments and of the final message do not rebuild the list of the block.
+var errFragmentHints = errors.New("fragment hints do not rebuild the block access list")
 
 // NewFragmentHinter returns a FragmentHinter for a block with header, built on
 // the state of its parent.
@@ -592,6 +597,40 @@ func (bc *BlockChain) NewFragmentHinter(header *types.Header) (*FragmentHinter, 
 // the block access list recorded so far, and txs, every tx applied so far. The
 // first call gives InitializeState too.
 func (f *FragmentHinter) Next(list *bal.BlockAccessList, txs []*types.Transaction) (*bal.BlockAccessList, error) {
+	return f.next(list, txs, uint32(len(txs)))
+}
+
+// Final returns the hint of the phases of block after the fragments: the txs
+// not sent yet and FinalizeState, given list, the block access list of the
+// whole block. The hints of the fragments and this one, merged, must rebuild
+// list (see RebuildAccessList); if they do not, it returns errFragmentHints
+// and the block is sent whole.
+func (f *FragmentHinter) Final(config *params.ChainConfig, block *types.Block, list *bal.BlockAccessList) (*bal.BlockAccessList, error) {
+	txs := block.Transactions()
+	tail, err := f.next(list, txs, uint32(len(txs))+1)
+	if err != nil {
+		return nil, err
+	}
+	rebuilt, err := rebuildAccessList(config, block, f.s, bal.Merge(f.given...))
+	if err != nil {
+		return nil, err
+	}
+	got, err := rebuilt.Encode()
+	if err != nil {
+		return nil, err
+	}
+	want, err := list.Encode()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(got, want) {
+		return nil, errFragmentHints
+	}
+	return tail, nil
+}
+
+// next returns the hint of the phases from the last call up to to.
+func (f *FragmentHinter) next(list *bal.BlockAccessList, txs []*types.Transaction, to uint32) (*bal.BlockAccessList, error) {
 	h := newHintList(list, false)
 	v := &phaseView{base: f.s, h: h}
 	from := uint32(f.done + 1)
@@ -621,8 +660,7 @@ func (f *FragmentHinter) Next(list *bal.BlockAccessList, txs []*types.Transactio
 			predictedReads[addr] = struct{}{}
 		}
 	}
-	to := uint32(len(txs))
-	f.done = len(txs)
+	f.done = int(to)
 
 	inRange := func(k uint32) bool { return k >= from && k <= to }
 	out := &bal.BlockAccessList{}
@@ -692,5 +730,6 @@ func (f *FragmentHinter) Next(list *bal.BlockAccessList, txs []*types.Transactio
 		}
 		out.Accounts = append(out.Accounts, frag)
 	}
+	f.given = append(f.given, out)
 	return out, nil
 }

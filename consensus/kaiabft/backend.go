@@ -308,15 +308,18 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 		result.Block = block
 
 		// From Amber the proposal carries the hint of its BAL, reads
-		// included, without what validators predict from the txs.
-		var accessList []byte
+		// included, without what validators predict from the txs, and the
+		// hash of the whole BAL.
+		request := bft.Request{Proposal: block}
 		if b.isAmberAt(block.NumberU64()) {
-			if accessList, err = encodeAccessList(result.State); err != nil {
+			enc, err := encodeAccessList(result.State)
+			if err != nil {
 				logger.Error("Failed to encode the block access list of the proposal", "number", block.Number(), "err", err)
 				resultCh <- nil
 				return
 			}
-			accessList = b.accessListHint(block, accessList)
+			request.AccessList = b.accessListHint(block, enc)
+			request.AccessListHash = crypto.Keccak256Hash(enc)
 		}
 
 		// Log block preparation completion (all validators log this, before seal)
@@ -329,11 +332,10 @@ func (b *backend) SubmitTransactions(txs *types.TransactionsByPriceAndNonce, sta
 			"finalizeTime", common.PrettyDuration(result.FinalizeTime))
 
 		sealStart := time.Now()
-		var fragments []bft.Part
 		if frag != nil {
-			fragments = frag.fragments(block)
+			request.Fragments, request.FinalHint = frag.fragments(block)
 		}
-		sealedBlock, err := b.seal(block, accessList, fragments)
+		sealedBlock, err := b.seal(block, request)
 		result.SealTime = time.Since(sealStart)
 
 		if err != nil {
@@ -506,7 +508,7 @@ func (b *backend) SignalPeerRegistrable() {
 // Seal — triggers BFT consensus on a proposed block
 // ---------------------------------------------------------------------------
 
-func (b *backend) seal(block *types.Block, accessList []byte, fragments []bft.Part) (*types.Block, error) {
+func (b *backend) seal(block *types.Block, request bft.Request) (*types.Block, error) {
 	header := block.Header()
 	number := header.Number.Uint64()
 
@@ -521,7 +523,7 @@ func (b *backend) seal(block *types.Block, accessList []byte, fragments []bft.Pa
 	}
 	defer b.cleanupSealState(commitCh)
 
-	go b.eventMux.Post(requestEvent{Proposal: block, AccessList: accessList, Fragments: fragments})
+	go b.eventMux.Post(requestEvent{Proposal: block, AccessList: request.AccessList, AccessListHash: request.AccessListHash, Fragments: request.Fragments, FinalHint: request.FinalHint})
 
 	for result := range commitCh {
 		if result == nil {
@@ -870,44 +872,34 @@ type accessListExecutor interface {
 
 // accessListHint returns the RLP of the block access list hint of an Amber
 // proposal from enc, the RLP of the list recorded by executing it, see
-// blockchain.AccessListHint. Without a chain to make one it is the list. A
-// proposer that cannot make the hint sends the list.
+// blockchain.AccessListHint. Without a chain to make one, or if it cannot, it
+// is the list: the hint only helps validators execute the block.
 func (b *backend) accessListHint(block *types.Block, enc []byte) []byte {
-	hint, err := b.makeAccessListHint(block, enc)
+	if b.parallel == nil {
+		return enc
+	}
+	list, err := bal.Decode(enc)
+	if err != nil {
+		return enc
+	}
+	hint, err := b.parallel.AccessListHint(block, list)
 	if err != nil {
 		logger.Debug("Failed to make the block access list hint", "number", block.NumberU64(), "err", err)
 		return enc
 	}
-	return hint
-}
-
-// makeAccessListHint returns the hint of an Amber proposal as accessListHint
-// does, or an error if this node cannot make it, which says nothing about the
-// proposal. The hint is a function of the block and the state of its parent,
-// so every node that makes it gets the hint of an honest proposer.
-func (b *backend) makeAccessListHint(block *types.Block, enc []byte) ([]byte, error) {
-	if b.parallel == nil {
-		return enc, nil
-	}
-	list, err := bal.Decode(enc)
+	hintEnc, err := hint.Encode()
 	if err != nil {
-		return nil, err
+		return enc
 	}
-	hint, err := b.parallel.AccessListHint(block, list)
-	if err != nil {
-		return nil, err
-	}
-	return hint.Encode()
+	return hintEnc
 }
 
 // verifiedEvent is the outcome of a valid Amber proposal executed by this
-// node: the hint it makes from its execution, or a local failure if it cannot.
+// node, from enc, the RLP of the BAL of its execution: the hash the
+// PRE-PREPARE must carry, and the hint this node proposes the block with if
+// it proposes it again.
 func (b *backend) verifiedEvent(block *types.Block, enc []byte) execResultEvent {
-	hint, err := b.makeAccessListHint(block, enc)
-	if err != nil {
-		return execResultEvent{Err: fmt.Errorf("block access list hint: %w", err), Local: true}
-	}
-	return execResultEvent{AccessList: hint}
+	return execResultEvent{AccessList: b.accessListHint(block, enc), ListHash: crypto.Keccak256Hash(enc)}
 }
 
 // provideAccessList gives the checked BAL of an Amber proposal to the chain,
@@ -1132,9 +1124,11 @@ func (b *backend) cancelSpeculativeExecutionExcept(keep common.Hash) {
 // ---------------------------------------------------------------------------
 
 type requestEvent struct {
-	Proposal   bft.Proposal
-	AccessList []byte     // RLP of the BAL hint of the proposal, from Amber
-	Fragments  []bft.Part // fragments of the proposal already sent, from Amber
+	Proposal       bft.Proposal
+	AccessList     []byte      // RLP of the BAL hint of the proposal, from Amber
+	AccessListHash common.Hash // hash of the RLP of its whole BAL, from Amber
+	Fragments      []bft.Part  // fragments of the proposal already sent, from Amber
+	FinalHint      []byte      // RLP of the hint of the phases after the fragments
 }
 
 type messageEvent struct {
