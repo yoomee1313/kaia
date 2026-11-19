@@ -870,25 +870,44 @@ type accessListExecutor interface {
 
 // accessListHint returns the RLP of the block access list hint of an Amber
 // proposal from enc, the RLP of the list recorded by executing it, see
-// blockchain.AccessListHint. Without a chain to make one it is the list.
+// blockchain.AccessListHint. Without a chain to make one it is the list. A
+// proposer that cannot make the hint sends the list.
 func (b *backend) accessListHint(block *types.Block, enc []byte) []byte {
-	if b.parallel == nil {
-		return enc
-	}
-	list, err := bal.Decode(enc)
-	if err != nil {
-		return enc
-	}
-	hint, err := b.parallel.AccessListHint(block, list)
+	hint, err := b.makeAccessListHint(block, enc)
 	if err != nil {
 		logger.Debug("Failed to make the block access list hint", "number", block.NumberU64(), "err", err)
 		return enc
 	}
-	hintEnc, err := hint.Encode()
-	if err != nil {
-		return enc
+	return hint
+}
+
+// makeAccessListHint returns the hint of an Amber proposal as accessListHint
+// does, or an error if this node cannot make it, which says nothing about the
+// proposal. The hint is a function of the block and the state of its parent,
+// so every node that makes it gets the hint of an honest proposer.
+func (b *backend) makeAccessListHint(block *types.Block, enc []byte) ([]byte, error) {
+	if b.parallel == nil {
+		return enc, nil
 	}
-	return hintEnc
+	list, err := bal.Decode(enc)
+	if err != nil {
+		return nil, err
+	}
+	hint, err := b.parallel.AccessListHint(block, list)
+	if err != nil {
+		return nil, err
+	}
+	return hint.Encode()
+}
+
+// verifiedEvent is the outcome of a valid Amber proposal executed by this
+// node: the hint it makes from its execution, or a local failure if it cannot.
+func (b *backend) verifiedEvent(block *types.Block, enc []byte) execResultEvent {
+	hint, err := b.makeAccessListHint(block, enc)
+	if err != nil {
+		return execResultEvent{Err: fmt.Errorf("block access list hint: %w", err), Local: true}
+	}
+	return execResultEvent{AccessList: hint}
 }
 
 // provideAccessList gives the checked BAL of an Amber proposal to the chain,
@@ -989,7 +1008,7 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal, list *bal.Blo
 			if res, err := b.parallel.ExecuteWithAccessList(ctx, block, parentHeader, list); err == nil {
 				accessList, local, verr := verifyExecution(b.chain.Config(), b.validator, block, res)
 				if verr == nil {
-					report(execResultEvent{AccessList: b.accessListHint(block, accessList)})
+					report(b.verifiedEvent(block, accessList))
 					entry.Complete(res, nil)
 					logger.Info("Speculative execution completed in parallel",
 						"number", block.NumberU64(), "hash", blockHash, "txs", len(block.Transactions()))
@@ -1078,7 +1097,7 @@ func (b *backend) startSpeculativeExecution(proposal bft.Proposal, list *bal.Blo
 			if err != nil {
 				reject(specResult.Receipts, err)
 			} else {
-				report(execResultEvent{AccessList: b.accessListHint(block, accessList)})
+				report(b.verifiedEvent(block, accessList))
 			}
 		}
 		entry.Complete(specResult, nil)

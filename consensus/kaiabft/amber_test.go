@@ -192,8 +192,10 @@ func TestCommitBeforeAmberDoesNotWait(t *testing.T) {
 }
 
 // A valid block whose PRE-PREPARE carries another hint than the one of this
-// node is committed: the hint says nothing about the block.
-func TestAmberAccessListHintMismatchCommits(t *testing.T) {
+// node is not committed in that round: the hint is a function of the block, so
+// a different one is the proposer's fault, which the failed round counts in its
+// PFS. The block stays valid and locked, and commits with the right hint.
+func TestAmberAccessListHintMismatchStartsNextRound(t *testing.T) {
 	block, enc := amberBlock(t, 10)
 	wrong := append([]byte{}, enc...)
 	wrong[len(wrong)-1] ^= 1
@@ -204,9 +206,17 @@ func TestAmberAccessListHintMismatchCommits(t *testing.T) {
 
 	m.trySendCommit()
 	m.handleExecResult(execResultEvent{Number: 10, Hash: block.Hash(), AccessList: enc})
-	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
+	requireCode(t, recvMessage(t, msgs), bft.MsgRoundChange)
+	expectNoMessage(t, msgs)
+	require.False(t, m.commitPending)
 	require.True(t, m.isHashLocked())
+	require.False(t, m.isInvalidProposal(block.Hash()))
 	require.False(t, m.needsExecution(block.Hash()))
+
+	// The same block with the hint of this node commits.
+	m.preprepare.Parts = bft.WithAccessList(nil, enc)
+	m.trySendCommit()
+	requireCode(t, recvMessage(t, msgs), bft.MsgCommit)
 }
 
 // A proposal found invalid by execution is not committed, releases the lock

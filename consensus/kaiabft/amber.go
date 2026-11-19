@@ -51,7 +51,8 @@ var (
 	// bad blocks.
 	invalidProposalCounter = metrics.NewRegisteredCounter("consensus/kaiabft/proposal/invalid", nil)
 	// accessListHintMismatchCounter counts valid proposals whose block access
-	// list hint differs from the one this node makes from its execution.
+	// list hint differs from the one this node makes from its execution, which
+	// this node does not commit in their round.
 	accessListHintMismatchCounter = metrics.NewRegisteredCounter("consensus/kaiabft/proposal/hint/mismatch", nil)
 
 	// accessListHintEntryLimit is the consensus limit of the accounts plus
@@ -188,22 +189,35 @@ func (m *machine) markInvalid(hash common.Hash, err error) {
 
 // trySendCommit sends the COMMIT of the accepted proposal. From Amber it waits
 // until this node verified the proposal by executing it; handleExecResult
-// sends it then. The block access list hint of the PRE-PREPARE need not be the
-// one of this node: each node checks the list of its own execution against
-// the header.
+// sends it then. The block access list hint of the PRE-PREPARE must be the one
+// this node makes from its execution: the hint is a function of the block, so
+// a different one is the proposer's signed fault. The block is valid, so it is
+// not refused, but this round does not commit it and starts the next one; the
+// failed round counts in the proposer's PFS (see kaiax/vrank).
 func (m *machine) trySendCommit() {
 	if m.preprepare == nil || !m.b.isAmberAt(m.sequence.Uint64()) {
 		m.sendCommit()
 		return
 	}
-	// The block must be verified by execution; its hint need not match the
-	// one of this node.
-	if _, ok := m.verified[m.preprepare.Proposal.Hash()]; ok {
-		m.commitPending = false
-		m.sendCommit()
+	hint, ok := m.verified[m.preprepare.Proposal.Hash()]
+	if !ok {
+		m.commitPending = true
 		return
 	}
-	m.commitPending = true
+	m.commitPending = false
+	if !bytes.Equal(m.preprepare.AccessList(), hint) {
+		m.refuseHint()
+		return
+	}
+	m.sendCommit()
+}
+
+// refuseHint starts the next round for a proposal whose hint differs from the
+// one of this node.
+func (m *machine) refuseHint() {
+	accessListHintMismatchCounter.Inc(1)
+	logger.Warn("Block access list hint of the proposal differs from the execution", "number", m.sequence, "hash", m.preprepare.Proposal.Hash())
+	m.sendNextRoundChange("execution: block access list hint mismatch")
 }
 
 // handleExecResult takes the outcome of the speculative execution of an Amber
@@ -241,10 +255,9 @@ func (m *machine) handleExecResult(ev execResultEvent) {
 		return
 	}
 	if !bytes.Equal(m.preprepare.AccessList(), ev.AccessList) {
-		// The block is valid; only its hint differs from the one of this
-		// node, which says nothing about the block.
-		accessListHintMismatchCounter.Inc(1)
-		logger.Debug("Block access list hint of the proposal differs from the execution", "number", ev.Number, "hash", ev.Hash)
+		m.commitPending = false
+		m.refuseHint()
+		return
 	}
 	if m.commitPending && m.state == statePrepared {
 		m.trySendCommit()
