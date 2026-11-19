@@ -320,6 +320,11 @@ func BenchmarkAccessListExecution(b *testing.B) {
 			}{fmt.Sprintf("payment-%d", n), benchBlockSpec{payments: n}},
 		)
 	}
+	// A block of 10,000 value transfers.
+	cases = append(cases, struct {
+		name string
+		spec benchBlockSpec
+	}{"payment-10000", benchBlockSpec{payments: 10000}})
 	// Token transfers add 3 entries each and payments 2, up to the limit.
 	cases = append(cases, struct {
 		name string
