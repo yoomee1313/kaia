@@ -24,7 +24,6 @@ package blockchain
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/kaiachain/kaia/blockchain/state"
@@ -67,43 +66,7 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain) *StateProcess
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
 func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, []*vm.InternalTxTrace, ProcessStats, error) {
-	var (
-		receipts         types.Receipts
-		usedGas          = new(uint64)
-		header           = block.Header()
-		allLogs          []*types.Log
-		internalTxTraces []*vm.InternalTxTrace
-		processStats     ProcessStats
-	)
-
-	if err := p.InitializeState(header, statedb); err != nil {
-		return nil, nil, 0, nil, processStats, fmt.Errorf("%w: %w", ErrInitializeState, err)
-	}
-
-	// Extract author from the header
-	author, _ := p.bc.sealer.Author(header) // Ignore error, we're past header validation
-
-	processStats.BeforeApplyTxs = time.Now()
-	// Iterate over and process the individual transactions
-	for i, tx := range block.Transactions() {
-		statedb.SetTxContext(tx.Hash(), block.Hash(), i)
-		receipt, internalTxTrace, err := p.bc.ApplyTransaction(p.config, &author, statedb, header, tx, usedGas, &cfg)
-		if err != nil {
-			return nil, nil, 0, nil, processStats, err
-		}
-		receipts = append(receipts, receipt)
-		allLogs = append(allLogs, receipt.Logs...)
-		internalTxTraces = append(internalTxTraces, internalTxTrace)
-	}
-	processStats.AfterApplyTxs = time.Now()
-
-	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	if _, err := p.FinalizeState(header, statedb, block.Transactions(), receipts); err != nil {
-		return nil, nil, 0, nil, processStats, err
-	}
-	processStats.AfterFinalize = time.Now()
-
-	return receipts, allLogs, *usedGas, internalTxTraces, processStats, nil
+	return executeBlock(p.bc, p, block, statedb, cfg, false)
 }
 
 // InitializeState runs pre-transaction state modifications.
@@ -120,6 +83,7 @@ func (p *StateProcessor) InitializeState(header *types.Header, statedb *state.St
 			return err
 		}
 	}
+	statedb.EndBlockAccessInitialization()
 	return nil
 }
 
@@ -140,6 +104,9 @@ func (p *StateProcessor) FinalizeState(header *types.Header, statedb *state.Stat
 		logger.Error("A block before Magma hardfork shouldn't have baseFee", "blockNum", header.Number.Uint64())
 		return nil, ErrInvalidBaseFee
 	}
+
+	// Changes of FinalizeState belong to the phase after the last tx.
+	statedb.SetBlockAccessIndex(len(txs) + 1)
 
 	for _, module := range p.blockStateModules {
 		if err := module.FinalizeState(header, statedb, txs, receipts); err != nil {

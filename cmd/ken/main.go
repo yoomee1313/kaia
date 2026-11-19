@@ -73,6 +73,7 @@ func init() {
 
 		// See utils/nodecmd/snapshot.go:
 		nodecmd.SnapshotCommand,
+		nodecmd.DBCommand,
 	}
 	sort.Sort(cli.CommandsByName(app.Commands))
 
@@ -91,6 +92,10 @@ func init() {
 func main() {
 	// Set NodeTypeFlag to en
 	utils.NodeTypeFlag.Value = "en"
+	// Record the block access lists of the blocks the node inserts
+	utils.BALRecordFlag.Value = true
+	// Apply the block access lists of blocks instead of executing them
+	utils.SyncApplyBALsFlag.Value = true
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

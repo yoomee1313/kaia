@@ -38,6 +38,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -305,6 +306,31 @@ func TestDBManager_Body(t *testing.T) {
 		assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLP(hash2, num2))
 		assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLPByHash(hash2))
 	}
+}
+
+// TestDBManager_BodyRLPFromBodyCache tests that the RLP readers encode a body
+// found in the body cache instead of reading the database.
+func TestDBManager_BodyRLPFromBodyCache(t *testing.T) {
+	dbm := NewMemoryDBManager().(*databaseManager)
+	defer dbm.Close()
+
+	header := &types.Header{Number: big.NewInt(1), BlockScore: big.NewInt(1), Time: big.NewInt(1)}
+	hash, number := header.Hash(), header.Number.Uint64()
+	dbm.WriteHeader(header)
+
+	body := &types.Body{Transactions: types.Transactions{}}
+	encodedBody, err := rlp.EncodeToBytes(body)
+	require.NoError(t, err)
+	dbm.WriteBody(hash, number, body)
+	require.Equal(t, body, dbm.ReadBody(hash, number))
+
+	// Leave the body only in the body cache.
+	dbm.cm.bodyRLPCache.Purge()
+	require.NoError(t, dbm.getDatabase(BodyDB).Delete(blockBodyKey(number, hash)))
+
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLP(hash, number))
+	dbm.cm.bodyRLPCache.Purge()
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLPByHash(hash))
 }
 
 // TestDBManager_Td tests read, write and delete operations of blockchain headers' total difficulty.
@@ -603,6 +629,9 @@ func TestDBManager_TxLookupEntry(t *testing.T) {
 		header := &types.Header{Number: big.NewInt(int64(num1))}
 		block := types.NewBlockWithHeader(header)
 		block = block.WithBody(body.Transactions)
+		// An entry names the block by number, so the canonical block resolves it.
+		dbm.WriteBlock(block)
+		dbm.WriteCanonicalHash(block.Hash(), block.NumberU64())
 
 		dbm.WriteTxLookupEntries(block)
 
@@ -963,6 +992,11 @@ func TestDatabaseManager_FinishStateMigration(t *testing.T) {
 			assert.Equal(t, 1, len(dirNames))                                                         // check if DB is removed
 			expectedStateDBPath := "statetrie_migrated_" + strconv.FormatUint(migrationBlockNum2, 10) // new DB format
 			assert.Equal(t, expectedStateDBPath, string(fetchedStateDBPath), "new DB should remain")
+
+			// check if the block of the finished migration is kept
+			lastMigrated, ok := dbm.ReadLastMigratedBlockNumber()
+			assert.True(t, ok)
+			assert.Equal(t, migrationBlockNum2, lastMigrated)
 
 			// check if migration DB Path is not set in MiscDB
 			migrationDBPathKey := append(databaseDirPrefix, common.Int64ToByteBigEndian(uint64(StateTrieMigrationDB))...)

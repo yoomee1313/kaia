@@ -555,9 +555,9 @@ func (bc *BlockChain) StopWarmUp() error {
 
 // StartCollectingTrieStats collects state or storage trie statistics.
 func (bc *BlockChain) StartCollectingTrieStats(contractAddr common.Address) error {
-	block := bc.GetBlockByNumber(bc.lastCommittedBlock)
+	block := bc.GetBlockByNumber(bc.states.LastCommitted())
 	if block == nil {
-		return fmt.Errorf("Block #%d not found", bc.lastCommittedBlock)
+		return fmt.Errorf("Block #%d not found", bc.states.LastCommitted())
 	}
 
 	mainTrieDB := bc.StateCache().TrieDB()
@@ -678,9 +678,9 @@ func (bc *BlockChain) prepareWarmUp() (*types.Block, state.Database, *statedb.Da
 		return nil, nil, nil, fmt.Errorf("already warming up")
 	}
 
-	block := bc.GetBlockByNumber(bc.lastCommittedBlock)
+	block := bc.GetBlockByNumber(bc.states.LastCommitted())
 	if block == nil {
-		return nil, nil, nil, fmt.Errorf("block #%d not found", bc.lastCommittedBlock)
+		return nil, nil, nil, fmt.Errorf("block #%d not found", bc.states.LastCommitted())
 	}
 
 	mainTrieDB := bc.StateCache().TrieDB()

@@ -44,7 +44,6 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/common/mclock"
-	"github.com/kaiachain/kaia/common/prque"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
@@ -142,11 +141,6 @@ type CacheConfig struct {
 }
 
 // gcBlock is used for priority queue for GC.
-type gcBlock struct {
-	root     common.Hash
-	blockNum uint64
-}
-
 // BlockChain represents the canonical chain given a database with a genesis
 // block. The Blockchain manages chain imports, reverts, chain reorganisations.
 //
@@ -165,11 +159,8 @@ type BlockChain struct {
 	chainConfig *params.ChainConfig // Chain & network configuration
 	cacheConfig *CacheConfig        // stateDB caching and trie caching/pruning configuration
 
-	db      database.DBManager // Low level persistent database to store final content in
-	snaps   *snapshot.Tree     // Snapshot tree for fast trie leaf access
-	triegc  *prque.Prque       // Priority queue mapping block numbers to tries to gc
-	chBlock chan gcBlock       // chPushBlockGCPrque is a channel for delivering the gc item to gc loop.
-	chPrune chan uint64        // chPrune is a channel for delivering the current block number for pruning loop.
+	db    database.DBManager // Low level persistent database to store final content in
+	snaps *snapshot.Tree     // Snapshot tree for fast trie leaf access
 
 	hc            *HeaderChain
 	rmLogsFeed    event.Feed
@@ -189,6 +180,7 @@ type BlockChain struct {
 	currentFastBlock atomic.Value // Current head of the fast-sync chain (may be above the block chain!)
 
 	stateCache state.Database // State database to reuse between imports (contains state cache)
+	states     *state.State   // Keeps the states of the written blocks in stateCache
 
 	// future blocks are blocks added for later processing
 	futureBlocks *lru.Cache
@@ -218,15 +210,21 @@ type BlockChain struct {
 	testMigrationHook     func()
 
 	// Warm up
-	lastCommittedBlock uint64
-	quitWarmUp         chan struct{}
+	quitWarmUp chan struct{}
 
 	prefetchTxCh chan prefetchTx
+
+	applyBatch atomic.Pointer[applyBatch]
 
 	// kaiax modules
 	headerModules     []kaiax.HeaderModule
 	executionModules  []kaiax.ExecutionModule
 	rewindableModules []kaiax.RewindableModule
+
+	executionStateModules  []kaiax.ExecutionStateModule
+	blockApplyModules      []kaiax.BlockApplyModule
+	historicalStateModules []kaiax.HistoricalStateModule
+	triePruningModules     []kaiax.TriePruningModule
 }
 
 // prefetchTx is used to prefetch transactions, when fetcher works.
@@ -269,9 +267,6 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 		chainConfig:        chainConfig,
 		cacheConfig:        cacheConfig,
 		db:                 db,
-		triegc:             prque.New(),
-		chBlock:            make(chan gcBlock, 2048), // downloader.maxResultsProcess
-		chPrune:            make(chan uint64, 2048),  // downloader.maxResultsProcess
 		stateCache:         state.NewDatabaseWithNewCache(db, cacheConfig.TrieNodeCacheConfig),
 		quit:               make(chan struct{}),
 		futureBlocks:       futureBlocks,
@@ -286,6 +281,16 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 	if err := fork.SetHardForkBlockNumberConfig(bc.chainConfig); err != nil {
 		return nil, err
 	}
+
+	bc.states = state.NewState(bc.stateCache, db, state.Config{
+		Archive:              cacheConfig.ArchiveMode,
+		CacheSize:            cacheConfig.CacheSize,
+		TriesInMemory:        cacheConfig.TriesInMemory,
+		LivePruningRetention: cacheConfig.LivePruningRetention,
+		CommitRequired:       func(number uint64) bool { return isCommitTrieRequired(bc, number) },
+		Flushed:              bc.checkStartStateMigration,
+		Prune:                bc.pruneTrieNodes,
+	}, 0)
 
 	bc.validator = NewBlockValidator(chainConfig, bc)
 	bc.prefetcher = newStatePrefetcher(bc)
@@ -376,8 +381,7 @@ func NewBlockChain(db database.DBManager, cacheConfig *CacheConfig, chainConfig 
 
 	// Take ownership of this particular state
 	go bc.update()
-	bc.gcCachedNodeLoop()
-	bc.pruneTrieNodeLoop()
+	bc.states.Start()
 	bc.restartStateMigration()
 
 	if cacheConfig.TrieNodeCacheConfig.DumpPeriodically() {
@@ -482,7 +486,7 @@ func (bc *BlockChain) loadLastState() error {
 	}
 	// Everything seems to be fine, set as the head block
 	bc.currentBlock.Store(currentBlock)
-	bc.lastCommittedBlock = currentBlock.NumberU64()
+	bc.states.SetLastCommitted(currentBlock.NumberU64())
 
 	// Restore the last known head header
 	currentHeader := currentBlock.Header()
@@ -532,6 +536,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 				lastPruned, head)
 		}
 	}
+	// The freezer is paused until the rewind is done, so that it does not freeze
+	// the blocks being deleted. Frozen blocks above the new head are removed at
+	// the end of the rewind.
+	_, resume := bc.db.PauseFreezer()
+	defer resume()
 	_, err := bc.setHeadBeyondRoot(head, common.Hash{}, false)
 	return err
 }
@@ -547,7 +556,11 @@ func (bc *BlockChain) SetHead(head uint64) error {
 func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bool) (uint64, error) {
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
+	return bc.setHeadBeyondRootLocked(head, root, repair)
+}
 
+// setHeadBeyondRootLocked is setHeadBeyondRoot with the chain mutex held.
+func (bc *BlockChain) setHeadBeyondRootLocked(head uint64, root common.Hash, repair bool) (uint64, error) {
 	// Track the block number of the requested root hash
 	var rootNumber uint64 // (no root == always 0)
 
@@ -690,6 +703,13 @@ func (bc *BlockChain) setHeadBeyondRoot(head uint64, root common.Hash, repair bo
 			}
 		}
 		logger.Trace("[SetHead] Snapshot database deleted", "from", originLatestBlkNum, "to", votingEpoch)
+
+		// Frozen blocks above the new head header go last, after the head markers
+		// and the key-value data, like the deletions above. If the rewind is
+		// interrupted before this, they are removed when the database is opened.
+		if err := bc.db.TruncateFrozen(bc.hc.CurrentHeader().Number.Uint64() + 1); err != nil {
+			return 0, err
+		}
 	}
 
 	// Clear out any stale content from the caches
@@ -713,7 +733,7 @@ func (bc *BlockChain) FastSyncCommitHead(hash common.Hash) error {
 	// If all checks out, manually set the head block
 	bc.mu.Lock()
 	bc.currentBlock.Store(block)
-	bc.lastCommittedBlock = block.NumberU64()
+	bc.states.SetLastCommitted(block.NumberU64())
 	bc.mu.Unlock()
 
 	// Destroy any existing state snapshot and regenerate it in the background,
@@ -805,7 +825,18 @@ func (bc *BlockChain) State() (*state.StateDB, error) {
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
+// The state of the head block is read from the state trie with snapshots, and
+// that of another block from a historical state module if one serves it.
 func (bc *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
+	if sdb, ok, err := bc.historicalStateAt(root); ok {
+		return sdb, err
+	}
+	return bc.trieStateAt(root)
+}
+
+// trieStateAt returns a new mutable state read from the state trie only, to
+// execute and commit blocks on.
+func (bc *BlockChain) trieStateAt(root common.Hash) (*state.StateDB, error) {
 	return state.New(root, bc.stateCache, bc.snaps, nil)
 }
 
@@ -817,7 +848,7 @@ func (bc *BlockChain) PrunableStateAt(root common.Hash, num uint64) (*state.Stat
 			PruningBlockNumber: num,
 		})
 	} else {
-		return bc.StateAt(root)
+		return bc.trieStateAt(root)
 	}
 }
 
@@ -827,7 +858,7 @@ func (bc *BlockChain) StateAtWithPersistent(root common.Hash) (*state.StateDB, e
 	if !exist {
 		return nil, ErrNotExistNode
 	}
-	return state.New(root, bc.stateCache, bc.snaps, nil)
+	return bc.StateAt(root)
 }
 
 // StateAtWithGCLock returns a new mutable state based on a particular point in time with read lock of the state nodes.
@@ -840,7 +871,7 @@ func (bc *BlockChain) StateAtWithGCLock(root common.Hash) (*state.StateDB, error
 		return nil, ErrNotExistNode
 	}
 
-	stateDB, err := state.New(root, bc.stateCache, bc.snaps, nil)
+	stateDB, err := bc.StateAt(root)
 	if err != nil {
 		bc.RUnlockGCCachedNode()
 		return nil, err
@@ -988,6 +1019,9 @@ func (bc *BlockChain) HasBlock(hash common.Hash, number uint64) bool {
 
 // HasState checks if state trie is fully present in the database or not.
 func (bc *BlockChain) HasState(hash common.Hash) bool {
+	if b := bc.applyBatch.Load(); b != nil && b.has(hash) {
+		return true
+	}
 	_, err := bc.stateCache.OpenTrie(hash, nil)
 	return err == nil
 }
@@ -1151,6 +1185,7 @@ func (bc *BlockChain) Stop() {
 	atomic.StoreInt32(&bc.procInterrupt, 1)
 
 	bc.wg.Wait()
+	bc.states.Stop()
 
 	// Ensure that the entirety of the state snapshot is journalled to disk.
 	var snapBase common.Hash
@@ -1161,7 +1196,6 @@ func (bc *BlockChain) Stop() {
 		}
 		bc.snaps.Release()
 	}
-	triedb := bc.stateCache.TrieDB()
 	if !bc.isArchiveMode() {
 		number := bc.CurrentBlock().NumberU64()
 		recent := bc.GetBlockByNumber(number)
@@ -1169,27 +1203,9 @@ func (bc *BlockChain) Stop() {
 			logger.Error("Failed to find recent block from persistent", "blockNumber", number)
 			return
 		}
-
-		logger.Info("Writing cached state to disk", "block", recent.Number(), "hash", recent.Hash(), "root", recent.Root())
-		if err := triedb.Commit(recent.Root(), true, number); err != nil {
-			logger.Error("Failed to commit recent state trie", "err", err)
-		}
-		if snapBase != (common.Hash{}) {
-			logger.Info("Writing snapshot state to disk", "root", snapBase)
-			if err := triedb.Commit(snapBase, true, number); err != nil {
-				logger.Error("Failed to commit recent state trie", "err", err)
-			}
-		}
-		for !bc.triegc.Empty() {
-			triedb.Dereference(bc.triegc.PopItem().(common.Hash))
-		}
-		if size, _, _ := triedb.Size(); size != 0 {
-			logger.Error("Dangling trie nodes after full cleanup")
-		}
+		bc.states.FlushOnStop(recent, snapBase)
 	}
-	if triedb.TrieNodeCache() != nil {
-		_ = triedb.TrieNodeCache().Close()
-	}
+	bc.states.Close()
 
 	if bc.vmConfig.EnableOpDebug {
 		vm.PrintOpCodeExecTime()
@@ -1332,6 +1348,10 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 	defer receiptsBatch.Release()
 	defer txLookupEntriesBatch.Release()
 
+	var (
+		newBlocks   types.Blocks
+		newReceipts []types.Receipts
+	)
 	for i, block := range blockChain {
 		receipts := receiptChain[i]
 		// Short circuit insertion if shutting down or processing failed
@@ -1351,27 +1371,52 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		if err := SetReceiptsData(bc.chainConfig, block, receipts); err != nil {
 			return i, fmt.Errorf("failed to set receipts data: %v", err)
 		}
-		// Write all the data out into the database
-		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
-		bc.db.PutReceiptsToBatch(receiptsBatch, block.Hash(), block.NumberU64(), receipts)
+		newBlocks = append(newBlocks, block)
+		newReceipts = append(newReceipts, receipts)
+	}
+
+	// The tx lookup entries go first: a block written to the freezer counts as
+	// known if the sync restarts, so its entries would not be written again.
+	for _, block := range newBlocks {
 		bc.db.PutTxLookupEntriesToBatch(txLookupEntriesBatch, block)
+		totalBytes, err := database.WriteBatchesOverThreshold(txLookupEntriesBatch)
+		if err != nil {
+			return 0, err
+		}
+		bytes += totalBytes
+	}
+	totalBytes, err := database.WriteBatches(txLookupEntriesBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
+
+	// Blocks far below the head header go straight into the freezer.
+	frozen, err := bc.db.FreezeSyncedBlocks(newBlocks, newReceipts, bc.CurrentHeader().Number.Uint64())
+	if err != nil {
+		return 0, err
+	}
+	stats.processed += int32(frozen)
+
+	// Write the rest out into the key-value store
+	for i, block := range newBlocks[frozen:] {
+		bc.db.PutBodyToBatch(bodyBatch, block.Hash(), block.NumberU64(), block.Body())
+		bc.db.PutBlockReceiptsToBatch(receiptsBatch, block, newReceipts[frozen+i])
 
 		stats.processed++
 
-		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch, txLookupEntriesBatch)
+		totalBytes, err := database.WriteBatchesOverThreshold(bodyBatch, receiptsBatch)
 		if err != nil {
 			return 0, err
-		} else {
-			bytes += totalBytes
 		}
-	}
-
-	totalBytes, err := database.WriteBatches(bodyBatch, receiptsBatch, txLookupEntriesBatch)
-	if err != nil {
-		return 0, err
-	} else {
 		bytes += totalBytes
 	}
+
+	totalBytes, err = database.WriteBatches(bodyBatch, receiptsBatch)
+	if err != nil {
+		return 0, err
+	}
+	bytes += totalBytes
 
 	// Update the head fast sync block if better
 	bc.mu.Lock()
@@ -1391,7 +1436,8 @@ func (bc *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain [
 		"number", head.Number(),
 		"hash", head.Hash(),
 		"size", common.StorageSize(bytes),
-		"ignored", stats.ignored)
+		"ignored", stats.ignored,
+		"frozen", frozen)
 	return 0, nil
 }
 
@@ -1422,86 +1468,18 @@ func (bc *BlockChain) writeBlock(block *types.Block) {
 
 // writeReceipts writes receipts to persistent database.
 // If write through caching is enabled, it also writes blockReceipts to the cache.
-func (bc *BlockChain) writeReceipts(hash common.Hash, number uint64, receipts types.Receipts) {
-	bc.db.WriteReceipts(hash, number, receipts)
+func (bc *BlockChain) writeReceipts(block *types.Block, receipts types.Receipts) {
+	bc.db.WriteBlockReceipts(block, receipts)
 }
 
 // writeStateTrie writes state trie to database if possible.
 // If an archiving node is running, it always flushes state trie to DB.
 // If not, it flushes state trie to DB periodically. (period = bc.cacheConfig.BlockInterval)
 func (bc *BlockChain) writeStateTrie(block *types.Block, state *state.StateDB) error {
-	state.LockGCCachedNode()
-	defer state.UnlockGCCachedNode()
-
-	root, err := state.Commit(true)
-	if err != nil {
-		return err
+	if b := bc.applyBatch.Load(); b != nil && b.defers(state) {
+		return nil
 	}
-	trieDB := bc.stateCache.TrieDB()
-	trieDB.UpdateMetricNodes()
-
-	// If we're running an archive node, always flush
-	if bc.isArchiveMode() {
-		if err := trieDB.Commit(root, false, block.NumberU64()); err != nil {
-			return err
-		}
-
-		bc.checkStartStateMigration(block.NumberU64(), root)
-		bc.lastCommittedBlock = block.NumberU64()
-
-		if bc.IsLivePruningRequired() {
-			bc.chPrune <- block.NumberU64()
-		}
-	} else {
-		// Full but not archive node, do proper garbage collection
-		trieDB.ReferenceRoot(root) // metadata reference to keep trie alive
-
-		// If we exceeded our memory allowance, flush matured singleton nodes to disk
-		var (
-			nodesSize, _, preimagesSize = trieDB.Size()
-			nodesSizeLimit              = common.StorageSize(bc.cacheConfig.CacheSize) * 1024 * 1024
-		)
-
-		trieDBNodesSizeBytesGauge.Update(int64(nodesSize))
-		trieDBPreimagesSizeGauge.Update(int64(preimagesSize))
-
-		if nodesSize > nodesSizeLimit || preimagesSize > 4*1024*1024 {
-			// NOTE-Kaia Not to change the original behavior, error is not returned.
-			// Error should be returned if it is thought to be safe in the future.
-			if err := trieDB.Cap(nodesSizeLimit - database.IdealBatchSize); err != nil {
-				logger.Error("Error from trieDB.Cap", "err", err, "limit", nodesSizeLimit-database.IdealBatchSize)
-			}
-		}
-
-		if isCommitTrieRequired(bc, block.NumberU64()) {
-			if err := trieDB.Commit(block.Header().Root, true, block.NumberU64()); err != nil {
-				return err
-			}
-			logger.Trace("Committed the state trie into the disk", "blocknum", block.NumberU64())
-
-			if bc.checkStartStateMigration(block.NumberU64(), root) {
-				// flush referenced trie nodes out to new stateTrieDB
-				if err := trieDB.Cap(0); err != nil {
-					logger.Error("Error from trieDB.Cap by state migration", "err", err)
-				}
-			}
-			bc.lastCommittedBlock = block.NumberU64()
-
-			if bc.IsLivePruningRequired() {
-				bc.chPrune <- block.NumberU64()
-			}
-
-			if dm := trieDB.DiskDB().GetDomainsManager(); dm != nil {
-				if err := dm.CommitWrites(); err != nil {
-					return err
-				}
-				logger.Info("Committed domains manager changes into the disk", "blocknum", block.NumberU64())
-			}
-		}
-
-		bc.chBlock <- gcBlock{root, block.NumberU64()}
-	}
-	return nil
+	return bc.states.Commit(block, state)
 }
 
 // RLockGCCachedNode locks the GC lock of CachedNode.
@@ -1514,80 +1492,8 @@ func (bc *BlockChain) RUnlockGCCachedNode() {
 	bc.stateCache.RUnlockGCCachedNode()
 }
 
-// DefaultTriesInMemory returns the number of tries residing in the memory.
-func (bc *BlockChain) triesInMemory() uint64 {
-	return bc.cacheConfig.TriesInMemory
-}
-
-// gcCachedNodeLoop runs a loop to gc.
-func (bc *BlockChain) gcCachedNodeLoop() {
-	trieDB := bc.stateCache.TrieDB()
-
-	bc.wg.Go(func() {
-		for {
-			select {
-			case block := <-bc.chBlock:
-				bc.triegc.Push(block.root, -int64(block.blockNum))
-				logger.Trace("Push GC block", "blkNum", block.blockNum, "hash", block.root.String())
-
-				blkNum := block.blockNum
-				if blkNum <= bc.triesInMemory() {
-					continue
-				}
-
-				// Garbage collect anything below our required write retention
-				chosen := blkNum - bc.triesInMemory()
-				cnt := 0
-				for !bc.triegc.Empty() {
-					root, number := bc.triegc.Pop()
-					if uint64(-number) > chosen {
-						bc.triegc.Push(root, number)
-						break
-					}
-					trieDB.Dereference(root.(common.Hash))
-					cnt++
-				}
-				logger.Debug("GC cached node", "currentBlk", blkNum, "chosenBlk", chosen, "deferenceCnt", cnt)
-			case <-bc.quit:
-				return
-			}
-		}
-	})
-}
-
-func (bc *BlockChain) pruneTrieNodeLoop() {
-	// ReadPruningMarks(1, limit) is very slow because it iterates over the most of MiscDB.
-	// ReadPruningMarks(start, limit) is much faster because it only iterates a small range.
-	startNum := uint64(1)
-
-	bc.wg.Go(func() {
-		for {
-			select {
-			case num := <-bc.chPrune:
-				if num <= bc.cacheConfig.LivePruningRetention {
-					continue
-				}
-				limit := num - bc.cacheConfig.LivePruningRetention // Prune [1, latest - retention]
-
-				startTime := time.Now()
-				marks := bc.db.ReadPruningMarks(startNum, limit+1)
-				bc.db.PruneTrieNodes(marks)
-				bc.db.DeletePruningMarks(marks)
-				bc.db.WriteLastPrunedBlockNumber(limit)
-
-				logger.Info("Pruned trie nodes", "number", num, "start", startNum, "limit", limit,
-					"count", len(marks), "elapsed", time.Since(startTime))
-
-				startNum = limit + 1
-			case <-bc.quit:
-				return
-			}
-		}
-	})
-}
-
 func (bc *BlockChain) IsLivePruningRequired() bool {
-	return bc.db.ReadPruningEnabled() && bc.cacheConfig.LivePruningRetention != 0
+	return bc.states.LivePruning()
 }
 
 func isCommitTrieRequired(bc *BlockChain, blockNum uint64) bool {
@@ -1630,6 +1536,12 @@ func (bc *BlockChain) WriteBlockWithState(block *types.Block, receipts []*types.
 // If BlockChain.parallelDBWrite is true, it calls writeBlockWithStateParallel.
 // If not, it calls writeBlockWithStateSerial.
 func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.Receipt, stateDB *state.StateDB) (WriteResult, error) {
+	// Both inserted blocks and the blocks this node builds come here, so the
+	// execution state modules see every written block.
+	if parent := bc.GetHeaderByHash(block.ParentHash()); parent != nil {
+		bc.postExecuteBlock(block, parent.Root, stateDB)
+	}
+
 	var status WriteResult
 	var err error
 	if bc.parallelDBWrite {
@@ -1727,7 +1639,7 @@ func (bc *BlockChain) writeBlockWithStateSerial(block *types.Block, receipts []*
 	}
 	trieWriteTime := time.Since(trieWriteStart)
 
-	bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+	bc.writeReceipts(block, receipts)
 
 	// TODO-Klaytn-Issue264 If we are using istanbul BFT, then we always have a canonical chain.
 	//         Later we may be able to refine below code.
@@ -1808,7 +1720,7 @@ func (bc *BlockChain) writeBlockWithStateParallel(block *types.Block, receipts [
 
 	go func() {
 		defer parallelDBWriteWG.Done()
-		bc.writeReceipts(block.Hash(), block.NumberU64(), receipts)
+		bc.writeReceipts(block, receipts)
 	}()
 
 	// Wait until all writing goroutines are terminated.
@@ -1938,6 +1850,19 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 	bc.mu.Lock()
 	defer bc.mu.Unlock()
 
+	batch := bc.newApplyBatch(chain)
+	if batch == nil {
+		return bc.insertBlocks(chain, nil)
+	}
+	bc.applyBatch.Store(batch)
+	defer bc.applyBatch.Store(nil)
+	n, events, logs, err := bc.insertBlocks(chain, batch)
+	return batch.finish(chain, n, events, logs, err)
+}
+
+// insertBlocks inserts the blocks of insertChain with the chain mutex held.
+// The blocks of a non-nil batch are applied to its state.
+func (bc *BlockChain) insertBlocks(chain types.Blocks, batch *applyBatch) (int, []interface{}, []*types.Log, error) {
 	// A queued approach to delivering events. This is generally
 	// faster than direct delivery and requires much less mutex
 	// acquiring.
@@ -1986,7 +1911,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		// transactions and probabilistically some of the account/storage trie nodes.
 		var followupInterrupt uint32
 
-		if bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
+		if batch == nil && bc.cacheConfig.TrieNodeCacheConfig.NumFetcherPrefetchWorker > 0 && parent != nil {
 			var snaps *snapshot.Tree
 			if bc.cacheConfig.TrieNodeCacheConfig.UseSnapshotForPrefetch {
 				snaps = bc.snaps
@@ -2070,6 +1995,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			stats.queued++
 			continue
 
+		case err == consensus.ErrPrunedAncestor && batch != nil:
+			return i, events, coalescedLogs, err
+
 		case err == consensus.ErrPrunedAncestor:
 			// Block competing with the canonical chain, store in the db, but don't process
 			// until the competitor TD goes above the canonical TD
@@ -2107,13 +2035,18 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 
-		stateDB, err := bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+		var stateDB *state.StateDB
+		if batch != nil {
+			stateDB, err = batch.stateFor(parent)
+		} else {
+			stateDB, err = bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+		}
 		if err != nil {
 			return i, events, coalescedLogs, err
 		}
 
 		// Process block using the parent state as reference point.
-		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processor.Process(block, stateDB, bc.vmConfig)
+		receipts, logs, usedGas, internalTxTraces, procStats, err := bc.processBlock(block, stateDB, batch)
 		if err != nil {
 			bc.reportExecutionFailure(block, receipts, stateDB, err)
 			atomic.StoreUint32(&followupInterrupt, 1)
@@ -2121,10 +2054,14 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 		}
 
 		// Validate the state using the default validator
-		err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
-		if err != nil {
-			bc.reportExecutionFailure(block, receipts, stateDB, err)
-			atomic.StoreUint32(&followupInterrupt, 1)
+		if batch == nil {
+			err = bc.validator.ValidateState(block, parent, stateDB, receipts, usedGas)
+			if err != nil {
+				bc.reportExecutionFailure(block, receipts, stateDB, err)
+				atomic.StoreUint32(&followupInterrupt, 1)
+				return i, events, coalescedLogs, err
+			}
+		} else if err = batch.validate(block, parent, receipts, usedGas, i == len(chain)-1); err != nil {
 			return i, events, coalescedLogs, err
 		}
 		afterValidate := time.Now()
@@ -2140,6 +2077,9 @@ func (bc *BlockChain) insertChain(chain types.Blocks) (int, []interface{}, []*ty
 			return i, events, coalescedLogs, err
 		}
 		atomic.StoreUint32(&followupInterrupt, 1)
+		if batch != nil {
+			batch.written(block)
+		}
 
 		// Update to-address based spam throttler when spamThrottler is enabled and a single block is fetched.
 		spamThrottler := GetSpamThrottler()
@@ -2789,6 +2729,9 @@ func (bc *BlockChain) GetHeaderByNumber(number uint64) *types.Header {
 
 // Config retrieves the blockchain's chain configuration.
 func (bc *BlockChain) Config() *params.ChainConfig { return bc.chainConfig }
+
+// CacheConfig returns the cache configuration of the chain.
+func (bc *BlockChain) CacheConfig() *CacheConfig { return bc.cacheConfig }
 
 // Sealer retrieves the blockchain's sealer.
 func (bc *BlockChain) Sealer() consensus.Sealer { return bc.sealer }

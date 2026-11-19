@@ -51,6 +51,7 @@ func GetDefaultConfig() *Config {
 		SyncMode:             downloader.FullSync,
 		NetworkId:            params.MainnetNetworkId,
 		LevelDBCacheSize:     768,
+		FreezerThreshold:     database.DefaultFreezerThreshold,
 		PebbleDBCacheSize:    768,
 		TrieCacheSize:        512,
 		TrieTimeout:          5 * time.Minute,
@@ -120,6 +121,8 @@ type Config struct {
 	SkipBcVersionCheck   bool `toml:"-"`
 	SingleDB             bool
 	NumStateTrieShards   uint
+	FreezerThreshold     uint64
+	AncientDir           string
 	EnableDBPerfMetrics  bool
 	LevelDBCompression   database.LevelDBCompressionType
 	LevelDBBufferPool    bool
@@ -138,6 +141,26 @@ type Config struct {
 	TrieNodeCacheConfig  statedb.TrieNodeCacheConfig
 	SnapshotCacheSize    int
 	SnapshotAsyncGen     bool
+	BALRecord            bool
+	BALSkipReads         bool
+
+	// History conversion: record and regenerate block access lists on a node
+	// without live pruning (experimental).
+	HistoryConvert        bool
+	HistoryConvertMemory  uint64
+	HistoryConvertWorkers int
+
+	// History modes (experimental): full, history or light. History and light
+	// nodes keep their state with live pruning and start from genesis by
+	// applying block access lists; a light node keeps LightDays of blocks.
+	HistoryMode string
+	LightDays   uint64
+
+	// Sync by applying the block access lists of the blocks up to the last
+	// block of the signed BAL hash chain, a chain file or the directory of
+	// its npm package, instead of executing them.
+	SyncApplyBALs bool
+	BALHashChain  string
 
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`

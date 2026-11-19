@@ -51,6 +51,7 @@ import (
 	"github.com/kaiachain/kaia/datasync/dbsyncer"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/kaiax/auction"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/kaiax/gasless"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/networks/p2p"
@@ -588,6 +589,13 @@ func setNodeUserIdent(ctx *cli.Context, cfg *node.Config) {
 	}
 }
 
+// setFreezer applies the freezer flags. Every node but a light one uses the
+// freezer.
+func setFreezer(ctx *cli.Context, cfg *cn.Config) {
+	cfg.FreezerThreshold = ctx.Uint64(FreezerThresholdFlag.Name)
+	cfg.AncientDir = ctx.String(AncientDirFlag.Name)
+}
+
 // SetKaiaConfig applies klay-related command line flags to the config.
 func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	// TODO-Kaia-Bootnode: better have to check conflicts about network flags when we add Kaia's `mainnet` parameter
@@ -641,6 +649,7 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	}
 	cfg.SingleDB = ctx.Bool(SingleDBFlag.Name)
 	cfg.NumStateTrieShards = ctx.Uint(NumStateTrieShardsFlag.Name)
+	setFreezer(ctx, cfg)
 	if !database.IsPow2(cfg.NumStateTrieShards) {
 		log.Fatalf("%v should be power of 2 but %v is not!", NumStateTrieShardsFlag.Name, cfg.NumStateTrieShards)
 	}
@@ -804,6 +813,18 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	} else {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
+	cfg.BALRecord = ctx.Bool(BALRecordFlag.Name)
+	cfg.BALSkipReads = ctx.Bool(BALSkipReadsFlag.Name)
+	cfg.HistoryConvert = ctx.Bool(HistoryConvertFlag.Name)
+	cfg.HistoryConvertMemory = ctx.Uint64(HistoryConvertMemoryFlag.Name) << 20
+	cfg.HistoryConvertWorkers = ctx.Int(HistoryConvertWorkersFlag.Name)
+	cfg.HistoryMode = ctx.String(HistoryModeFlag.Name)
+	cfg.LightDays = ctx.Uint64(HistoryLightDaysFlag.Name)
+	cfg.SyncApplyBALs = ctx.Bool(SyncApplyBALsFlag.Name)
+	if !ctx.IsSet(SyncApplyBALsFlag.Name) && (cfg.HistoryMode == bal_impl.HistoryModeHistory || cfg.HistoryMode == bal_impl.HistoryModeLight) {
+		cfg.SyncApplyBALs = true
+	}
+	cfg.BALHashChain = ctx.String(BALHashChainFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

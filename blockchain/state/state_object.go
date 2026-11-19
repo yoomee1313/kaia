@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/common"
@@ -178,6 +179,18 @@ func (s *stateObject) openStorageTrie(addr common.Address, hash common.ExtHash, 
 	return db.OpenStorageTrie(addr, hash, s.db.trieOpts)
 }
 
+// storageEmpty reports whether the account has no storage: it is not a
+// contract, or its storage root is empty, like that of a contract created in
+// this state.
+func (s *stateObject) storageEmpty() bool {
+	acc := account.GetProgramAccount(s.account)
+	if acc == nil {
+		return true
+	}
+	root := acc.GetStorageRoot()
+	return common.EmptyExtHash(root) || root.Unextend() == types.EmptyRootHash
+}
+
 func (s *stateObject) getStorageTrie(db Database) Trie {
 	if s.storageTrie == nil {
 		if acc := account.GetProgramAccount(s.account); acc != nil {
@@ -211,6 +224,18 @@ func (s *stateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	// If we have the original value cached, return that
 	value, cached := s.originStorage[key]
 	if cached {
+		return value
+	}
+	if r := s.db.reader; r != nil {
+		if !s.storageEmpty() {
+			v, err := r.Storage(s.address, key)
+			if err != nil {
+				s.setError(err)
+				return common.Hash{}
+			}
+			value = v
+		}
+		s.originStorage[key] = value
 		return value
 	}
 	// Track the amount of time wasted on reading the storage trie
@@ -504,7 +529,15 @@ func (s *stateObject) Code(db Database) []byte {
 	if bytes.Equal(s.CodeHash(), emptyCodeHash) {
 		return nil
 	}
-	code, err := db.ContractCode(common.BytesToHash(s.CodeHash()))
+	var (
+		code []byte
+		err  error
+	)
+	if r := s.db.reader; r != nil {
+		code, err = r.Code(s.address, common.BytesToHash(s.CodeHash()))
+	} else {
+		code, err = db.ContractCode(common.BytesToHash(s.CodeHash()))
+	}
 	if err != nil {
 		s.setError(fmt.Errorf("can't load code hash %x: %v", s.CodeHash(), err))
 	}
@@ -521,6 +554,9 @@ func (s *stateObject) CodeSize(db Database) int {
 	}
 	if bytes.Equal(s.CodeHash(), emptyCodeHash) {
 		return 0
+	}
+	if s.db.reader != nil {
+		return len(s.Code(db))
 	}
 	size, err := db.ContractCodeSize(common.BytesToHash(s.CodeHash()))
 	if err != nil {

@@ -39,6 +39,7 @@ import (
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/event"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/kaiax/valset"
 	"github.com/kaiachain/kaia/networks/rpc"
 	"github.com/kaiachain/kaia/node/cn/gasprice"
@@ -120,6 +121,9 @@ func (b *CNAPIBackend) HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumb
 	}
 	header := b.cn.blockchain.GetHeaderByNumber(uint64(blockNr))
 	if header == nil {
+		if err := b.prunedError(uint64(blockNr)); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("the header does not exist (block number: %d)", blockNr)
 	}
 	return header, nil
@@ -162,6 +166,9 @@ func (b *CNAPIBackend) BlockByNumber(ctx context.Context, blockNr rpc.BlockNumbe
 	}
 	block := b.cn.blockchain.GetBlockByNumber(uint64(blockNr))
 	if block == nil {
+		if err := b.prunedError(uint64(blockNr)); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("the block does not exist (block number: %d)", blockNr)
 	}
 	return block, nil
@@ -202,8 +209,28 @@ func (b *CNAPIBackend) StateAndHeaderByNumber(ctx context.Context, blockNr rpc.B
 	if header == nil || err != nil {
 		return nil, nil, err
 	}
+	return b.stateAndHeader(header)
+}
+
+// prunedError reports a block whose data a light node deleted.
+func (b *CNAPIBackend) prunedError(number uint64) error {
+	if bc, ok := b.cn.BlockChain().(*blockchain.BlockChain); ok {
+		return bal_impl.PrunedError(bc, number)
+	}
+	return nil
+}
+
+// stateAndHeader returns the state of a block; a missing state before the BAL
+// history of the node is reported as such.
+func (b *CNAPIBackend) stateAndHeader(header *types.Header) (*state.StateDB, *types.Header, error) {
 	stateDb, err := b.cn.BlockChain().StateAt(header.Root)
-	return stateDb, header, err
+	if err != nil {
+		if bc, ok := b.cn.BlockChain().(*blockchain.BlockChain); ok {
+			err = bal_impl.HistoryError(bc, header.Number.Uint64(), err)
+		}
+		return nil, header, err
+	}
+	return stateDb, header, nil
 }
 
 func (b *CNAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash) (*state.StateDB, *types.Header, error) {
@@ -215,8 +242,7 @@ func (b *CNAPIBackend) StateAndHeaderByNumberOrHash(ctx context.Context, blockNr
 		if header == nil {
 			return nil, nil, fmt.Errorf("header for hash not found")
 		}
-		stateDb, err := b.cn.BlockChain().StateAt(header.Root)
-		return stateDb, header, err
+		return b.stateAndHeader(header)
 	}
 	return nil, nil, fmt.Errorf("invalid arguments; neither block nor hash specified")
 }

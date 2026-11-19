@@ -293,6 +293,9 @@ func decodeHash(s string) (h common.Hash, inputLength int, err error) {
 	return common.BytesToHash(b), len(b), nil
 }
 
+// errNoProof is returned for a proof of a state without a state trie.
+var errNoProof = state.ErrNoProof
+
 func doGetProof(ctx context.Context, b Backend, address common.Address, storageKeys []string, blockNrOrHash rpc.BlockNumberOrHash) (*EthAccountResult, error) {
 	var (
 		keys         = make([]common.Hash, len(storageKeys))
@@ -310,6 +313,9 @@ func doGetProof(ctx context.Context, b Backend, address common.Address, storageK
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return nil, err
+	}
+	if state.ReadOnly() {
+		return nil, errNoProof
 	}
 	codeHash := state.GetCodeHash(address)
 

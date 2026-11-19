@@ -51,6 +51,10 @@ var (
 	// fastTrieProgressKey tracks the number of trie entries imported during fast sync.
 	fastTrieProgressKey = []byte("TrieSync")
 
+	// ancientDirKey tracks the freezer directory once blocks have been moved out
+	// of the key-value store.
+	ancientDirKey = []byte("AncientDir")
+
 	validSectionKey = []byte("count")
 
 	sectionHeadKeyPrefix = []byte("shead")
@@ -132,6 +136,10 @@ var (
 
 	migrationOldDBPathKey = []byte("migrationOldDBPath")
 
+	// lastMigratedBlockKey is the block of the last finished state migration:
+	// the states of earlier blocks were dropped with the old database.
+	lastMigratedBlockKey = []byte("lastMigratedBlockNumber")
+
 	stakingInfoPrefix = []byte("stakingInfo")
 
 	supplyCheckpointPrefix        = []byte("supplyCheckpoint")
@@ -144,6 +152,13 @@ var (
 // a transaction or receipt given only its hash.
 type TxLookupEntry struct {
 	BlockHash  common.Hash
+	BlockIndex uint64
+	Index      uint64
+}
+
+// slimTxLookupEntry is a TxLookupEntry without the block hash, which is the
+// canonical hash of the block number.
+type slimTxLookupEntry struct {
 	BlockIndex uint64
 	Index      uint64
 }

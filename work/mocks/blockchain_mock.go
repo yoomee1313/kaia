@@ -666,6 +666,18 @@ func (mr *MockBlockChainMockRecorder) PostChainEvents(arg0, arg1 interface{}) *g
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PostChainEvents", reflect.TypeOf((*MockBlockChain)(nil).PostChainEvents), arg0, arg1)
 }
 
+// PreExecuteBlock mocks base method.
+func (m *MockBlockChain) PreExecuteBlock(arg0 *state.StateDB) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "PreExecuteBlock", arg0)
+}
+
+// PreExecuteBlock indicates an expected call of PreExecuteBlock.
+func (mr *MockBlockChainMockRecorder) PreExecuteBlock(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "PreExecuteBlock", reflect.TypeOf((*MockBlockChain)(nil).PreExecuteBlock), arg0)
+}
+
 // PrepareHeader mocks base method.
 func (m *MockBlockChain) PrepareHeader(arg0 *types.Header) error {
 	m.ctrl.T.Helper()

@@ -34,6 +34,7 @@ import (
 	"github.com/kaiachain/kaia/common/hexutil"
 	"github.com/kaiachain/kaia/datasync/downloader"
 	"github.com/kaiachain/kaia/datasync/fetcher"
+	bal_impl "github.com/kaiachain/kaia/kaiax/bal/impl"
 	"github.com/kaiachain/kaia/kaiax/staking"
 	"github.com/kaiachain/kaia/node/cn/snap"
 	"github.com/kaiachain/kaia/rlp"
@@ -46,6 +47,7 @@ const (
 	kaia66 = 66
 	kaia67 = 67
 	kaia68 = 68
+	kaia69 = bal_impl.SyncVersion
 )
 
 // Protocol defines the P2P protocol metadata used during capability negotiation.
@@ -61,8 +63,8 @@ type Protocol struct {
 // ConsensusProtocol is the P2P protocol used by BFT consensus nodes.
 var ConsensusProtocol = Protocol{
 	Name:     "istanbul",
-	Versions: []uint{kaia68, kaia67, kaia66, kaia65, kaia64},
-	Lengths:  []uint64{28, 26, 24, 23, 21},
+	Versions: []uint{kaia69, kaia68, kaia67, kaia66, kaia65, kaia64},
+	Lengths:  []uint64{38, 28, 26, 24, 23, 21},
 }
 
 const (
@@ -112,7 +114,11 @@ const (
 	VRankPreprepareMsg = 0x17
 	VRankCandidateMsg  = 0x18
 
-	MsgCodeEnd = 0x19
+	// Protocol messages belonging to kaia/69, see bal_impl.Sync
+	HistoryRangeMsg = bal_impl.HistoryRangeMsg
+	BlocksMsg       = bal_impl.BlocksMsg
+
+	MsgCodeEnd = 0x23
 )
 
 type errCode int
@@ -202,7 +208,8 @@ type statusData struct {
 	TD              *big.Int
 	CurrentBlock    common.Hash
 	GenesisBlock    common.Hash
-	ChainID         *big.Int // ChainID to sign a transaction.
+	ChainID         *big.Int               // ChainID to sign a transaction.
+	History         *bal_impl.HistoryRange `rlp:"optional"`
 }
 
 // newBlockHashesData is the network packet for the block announcements.

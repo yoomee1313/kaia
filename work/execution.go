@@ -18,12 +18,11 @@ package work
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 
+	"github.com/kaiachain/kaia/blockchain"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
-	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/consensus"
 	"github.com/kaiachain/kaia/event"
@@ -56,6 +55,9 @@ type DefaultExecutor struct {
 	receipts []*types.Receipt
 	logs     []*types.Log
 	usedGas  uint64
+
+	// exec runs the block, from Execute or ExecuteTransactions to FinalizeState.
+	exec *blockchain.BlockExecution
 
 	// Transaction bundling modules for gasless transactions
 	txBundlingModules []builder.TxBundlingModule
@@ -107,6 +109,7 @@ func (e *DefaultExecutor) ResetWithState(statedb *state.StateDB, header *types.H
 	e.receipts = nil
 	e.logs = nil
 	e.usedGas = 0
+	e.exec = nil
 	e.signer = types.MakeSigner(e.config, header.Number)
 	e.initialized = true
 
@@ -125,6 +128,10 @@ func (e *DefaultExecutor) Execute(txs *types.TransactionsByPriceAndNonce, mux *e
 
 	// Create Task for transaction execution with bundle handling and time limits
 	task := NewTask(e.config, e.signer, e.state, e.header)
+	if err := task.Begin(e.chain, e.nodeAddr); err != nil {
+		return nil, err
+	}
+	e.exec = task.exec
 
 	// Execute transactions using CommitTransactions (includes posting pending events)
 	task.CommitTransactions(mux, txs, e.chain, e.nodeAddr, e.txBundlingModules)
@@ -141,9 +148,9 @@ func (e *DefaultExecutor) Execute(txs *types.TransactionsByPriceAndNonce, mux *e
 // without re-sorting. This is the validator-path primitive used during
 // speculative execution of a received pre-prepare block.
 //
-// Mirrors the per-transaction loop of StateProcessor.Process (InitializeState +
-// ApplyTransaction per tx), but deliberately excludes FinalizeState — the caller
-// must invoke FinalizeState separately after this returns.
+// It runs the block like StateProcessor.Process, through a
+// blockchain.BlockExecution, but excludes FinalizeState — the caller must
+// invoke FinalizeState separately after this returns.
 func (e *DefaultExecutor) ExecuteTransactions(txs []*types.Transaction) (*consensus.ExecutionResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -152,40 +159,30 @@ func (e *DefaultExecutor) ExecuteTransactions(txs []*types.Transaction) (*consen
 		return nil, ErrExecutorNotInitialized
 	}
 
-	// Pre-tx hooks (EIP-2935, kaiax module pre-hooks, etc.)
-	if err := e.chain.Processor().InitializeState(e.header, e.state); err != nil {
-		return nil, err
-	}
-
 	// Extract the block proposer from the header seal — must match
 	// StateProcessor.Process so COINBASE and reward distribution are identical.
 	// Using e.nodeAddr here would be wrong: the local validator is not
 	// necessarily the proposer of this block.
 	author, _ := e.chain.Sealer().Author(e.header)
 
-	var (
-		receipts types.Receipts
-		allLogs  []*types.Log
-		usedGas  = new(uint64)
-	)
-
-	for i, tx := range txs {
-		e.state.SetTxContext(tx.Hash(), common.Hash{}, i)
-		receipt, _, err := e.chain.ApplyTransaction(
-			e.config, &author, e.state, e.header, tx, usedGas, &vm.Config{},
-		)
-		if err != nil {
-			return nil, fmt.Errorf("tx %d (%s): %w", i, tx.Hash().Hex(), err)
-		}
-		receipts = append(receipts, receipt)
-		allLogs = append(allLogs, receipt.Logs...)
+	exec, err := blockchain.BeginBlockExecution(e.chain, e.config, e.header, e.state, blockchain.BlockExecutionConfig{
+		Author:   author,
+		ForWrite: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	receipts, allLogs, _, err := exec.ApplyTxs(txs)
+	if err != nil {
+		return nil, err
 	}
 
-	e.header.GasUsed = *usedGas
+	e.exec = exec
+	e.header.GasUsed = exec.UsedGas()
 	e.txs = txs
 	e.receipts = receipts
 	e.logs = allLogs
-	e.usedGas = *usedGas
+	e.usedGas = exec.UsedGas()
 
 	return e.buildResult(), nil
 }
@@ -201,7 +198,10 @@ func (e *DefaultExecutor) FinalizeState(result *consensus.ExecutionResult) (*typ
 	if result == nil {
 		return nil, errors.New("execution result is nil")
 	}
-	return e.chain.Processor().FinalizeState(e.header, result.State, result.Txs, result.Receipts)
+	if e.exec == nil {
+		return nil, ErrExecutorNotInitialized
+	}
+	return e.exec.Finish(result.Txs, result.Receipts)
 }
 
 // buildResult builds and returns the current execution result.
