@@ -386,7 +386,11 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	blobStorageConfig := blockchain.DefaultBlobStorageConfig(chainDB.GetDBConfig().Dir)
 	config.TxPool.BlobStorageConfig = &blobStorageConfig
 
-	cn.txPool = blockchain.NewTxPool(config.TxPool, cn.chainConfig, bc, mGov)
+	if config.TxPoolDisable {
+		cn.txPool = blockchain.NewFakeTxPool()
+	} else {
+		cn.txPool = blockchain.NewTxPool(config.TxPool, cn.chainConfig, bc, mGov)
+	}
 
 	// Permit the downloader to use the trie cache allowance during fast sync
 	cacheLimit := cacheConfig.TrieNodeCacheConfig.LocalCacheSizeMiB
@@ -493,11 +497,11 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	}
 
 	// Only for KES nodes
-	if config.TrieNodeCacheConfig.RedisSubscribeBlockEnable {
+	if config.TrieNodeCacheConfig.RedisSubscribeBlockEnable && !config.TxPoolDisable {
 		go cn.blockchain.BlockSubscriptionLoop(cn.txPool.(*blockchain.TxPool))
 	}
 
-	if config.DBType == database.RocksDB && config.RocksDBConfig.Secondary {
+	if config.DBType == database.RocksDB && config.RocksDBConfig.Secondary && !config.TxPoolDisable {
 		go cn.blockchain.CurrentBlockUpdateLoop(cn.txPool.(*blockchain.TxPool))
 	}
 
@@ -969,6 +973,31 @@ func (s *CN) Start(srvr p2p.Server) error {
 	}
 
 	return nil
+}
+
+// StartOffline starts the kaiax modules of a CN made by New without its
+// network and services, to run a tool on its chain database while the node is
+// stopped. StopOffline stops it.
+func (s *CN) StartOffline() error {
+	for _, module := range s.baseModules {
+		if err := module.Start(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StopOffline stops a CN started by StartOffline and closes its database.
+func (s *CN) StopOffline() {
+	for _, module := range s.baseModules {
+		module.Stop()
+	}
+	s.bloomIndexer.Close()
+	s.txPool.Stop()
+	s.miner.Stop()
+	s.blockchain.Stop()
+	s.chainDB.Close()
+	s.eventMux.Stop()
 }
 
 // Stop implements node.Service, terminating all internal goroutines used by the

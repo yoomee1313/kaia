@@ -88,6 +88,8 @@ type TxPool interface {
 	kaiax.TxPoolModuleHost
 }
 
+var _ TxPool = (*blockchain.FakeTxPool)(nil)
+
 // Backend wraps all methods required for mining.
 type Backend interface {
 	AccountManager() accounts.AccountManager

@@ -99,6 +99,7 @@ type Config struct {
 	SyncMode      downloader.SyncMode
 	NoPruning     bool
 	WorkerDisable bool // disables worker and does not start istanbul
+	TxPoolDisable bool // replaces the transaction pool with one that holds nothing, for a tool run on the chain
 
 	// KES options
 	DownloaderDisable bool
