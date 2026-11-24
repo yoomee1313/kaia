@@ -31,6 +31,7 @@ Source Files
   - badger_database.go       : implementation of badgerDB, which wraps github.com/dgraph-io/badger
   - cache_manager.go         : implementation of cacheManager, which manages cache layer over persistent layer
   - db_manager.go            : contains DBManager and databaseManager
+  - db_manager_bal.go        : block access lists, their index and the history mode of a history node
   - dynamodb.go              : implementation of dynamoDB, which wraps github.com/aws/aws-sdk-go/service/dynamodb
   - interface.go             : interfaces used outside database package
   - leveldb_database.go      : implementation of levelDB, which wraps github.com/syndtr/goleveldb

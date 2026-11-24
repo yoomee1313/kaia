@@ -88,6 +88,9 @@ func (it *NodeIterator) step() error {
 	}
 	// Initialize the iterator if we've just started
 	if it.stateIt == nil {
+		if it.state.ReadOnly() {
+			return ErrNoIteration
+		}
 		it.stateIt = it.state.trie.NodeIterator(nil)
 	}
 	// If we had data nodes previously, we surely have at least state nodes

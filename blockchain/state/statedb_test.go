@@ -43,6 +43,7 @@ import (
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/check.v1"
 )
 
@@ -999,4 +1000,96 @@ func TestSetCodeToEOARevertMatchesRoot(t *testing.T) {
 		return root
 	}
 	assert.Equal(t, commitRoot(false), commitRoot(true))
+}
+
+// TestBlockAccessRecorderProducer checks that a block producer records the same
+// list as a validator, reads included, although it reads state between txs,
+// runs a tx it drops, and rolls back a bundle.
+func TestBlockAccessRecorderProducer(t *testing.T) {
+	var (
+		a, b, c, d, e = common.HexToAddress("0xa"), common.HexToAddress("0xb"), common.HexToAddress("0xc"), common.HexToAddress("0xd"), common.HexToAddress("0xe")
+		slot          = common.HexToHash("0x1")
+	)
+	db := NewDatabase(database.NewMemoryDBManager())
+	base, err := New(common.Hash{}, db, nil, nil)
+	require.NoError(t, err)
+	for _, addr := range []common.Address{a, b, c, d, e} {
+		base.AddBalance(addr, big.NewInt(100))
+	}
+	base.SetState(c, slot, common.HexToHash("0x2"))
+	root, err := base.Commit(true)
+	require.NoError(t, err)
+
+	open := func(preload ...common.Address) *StateDB {
+		s, err := New(root, db, nil, nil)
+		require.NoError(t, err)
+		for _, addr := range preload {
+			s.GetBalance(addr)
+		}
+		s.StartBAL(0)
+		return s
+	}
+	finish := func(s *StateDB) (common.Hash, []byte) {
+		s.SetBlockAccessIndex(3)
+		root := s.IntermediateRoot(true)
+		enc, err := s.BAL().Encode()
+		require.NoError(t, err)
+		return root, enc
+	}
+
+	// The producer has e loaded already. It runs tx 0, reads d between txs, runs
+	// a tx that reads c and is dropped, a bundle that is rolled back, and then
+	// tx 1, which reads c and e. The dropped tx loaded c first, so tx 1 finds it
+	// cached.
+	producer := open(e)
+	producer.SetTxContext(common.Hash{1}, common.Hash{}, 0)
+	producer.AddBalance(a, big.NewInt(1))
+	producer.Finalise(true, true)
+
+	producer.GetNonce(d)
+	producer.SetTxContext(common.Hash{2}, common.Hash{}, 1)
+	snap := producer.Snapshot()
+	producer.GetState(c, slot)
+	producer.GetBalance(d)
+	producer.AddBalance(c, big.NewInt(5))
+	producer.RevertToSnapshot(snap)
+
+	producer.GetNonce(d)
+	saved := producer.Copy()
+	producer.SetTxContext(common.Hash{3}, common.Hash{}, 1)
+	producer.GetBalance(d)
+	producer.AddBalance(b, big.NewInt(2))
+	producer.Finalise(true, true)
+	producer.Set(saved)
+
+	producer.SetTxContext(common.Hash{4}, common.Hash{}, 1)
+	producer.GetState(c, slot)
+	producer.GetBalance(e)
+	producer.SetState(b, slot, common.HexToHash("0x3"))
+	producer.Finalise(true, true)
+	producer.GetNonce(d)
+	producerRoot, producerList := finish(producer)
+
+	// A validator runs the two included txs only.
+	validator := open()
+	validator.SetTxContext(common.Hash{1}, common.Hash{}, 0)
+	validator.AddBalance(a, big.NewInt(1))
+	validator.Finalise(true, true)
+	validator.SetTxContext(common.Hash{4}, common.Hash{}, 1)
+	validator.GetState(c, slot)
+	validator.GetBalance(e)
+	validator.SetState(b, slot, common.HexToHash("0x3"))
+	validator.Finalise(true, true)
+	validatorRoot, validatorList := finish(validator)
+
+	require.Equal(t, validatorRoot, producerRoot)
+	require.Equal(t, validatorList, producerList)
+
+	list := validator.BAL()
+	addrs := make([]common.Address, len(list.Accounts))
+	for i, acc := range list.Accounts {
+		addrs[i] = acc.Address
+	}
+	require.Equal(t, []common.Address{a, b, c, e}, addrs, "c and e are read, d only outside of the included txs")
+	require.Equal(t, []common.Hash{slot}, list.Accounts[2].StorageReads)
 }

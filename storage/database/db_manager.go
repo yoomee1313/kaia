@@ -76,6 +76,7 @@ type DBManager interface {
 	GetHeaderDB() Database
 	GetBodyDB() Database
 	GetReceiptsDB() Database
+	GetBALDB() Database
 	GetStateTrieDB() Database
 	GetStateTrieMigrationDB() Database
 	GetTxLookupEntryDB() Database
@@ -128,6 +129,8 @@ type DBManager interface {
 	WriteReceipts(hash common.Hash, number uint64, receipts types.Receipts)
 	PutReceiptsToBatch(batch Batch, hash common.Hash, number uint64, receipts types.Receipts)
 	DeleteReceipts(hash common.Hash, number uint64)
+
+	// History mode operations (experimental)
 
 	ReadBlock(hash common.Hash, number uint64) *types.Block
 	ReadBlockByHash(hash common.Hash) *types.Block
@@ -298,6 +301,26 @@ type DBManager interface {
 
 	Stat(string) (string, error)
 	Compact([]byte, []byte) error
+
+	// Block access lists and the history of a history node, see
+	// db_manager_bal.go.
+	ReadBAL(hash common.Hash, number uint64) []byte
+	HasBAL(hash common.Hash, number uint64) bool
+	WriteBAL(hash common.Hash, number uint64, enc []byte) error
+	DeleteBAL(hash common.Hash, number uint64)
+	ReadBALReads(hash common.Hash, number uint64) []byte
+	WriteBALReads(hash common.Hash, number uint64, enc []byte) error
+	DeleteBALReads(hash common.Hash, number uint64)
+	ReadCanonicalBAL(number uint64) ([]byte, error)
+	ReadCanonicalBALList(number uint64) (*types.BlockAccessList, error)
+	ReadBALRange() (first, next uint64)
+	WriteBALRange(first, next uint64) error
+	readBALIndexMeta() (*BALIndexMeta, error)
+	writeBALIndex(chunks map[string][]uint64, meta *BALIndexMeta) error
+	DeleteBALIndex() error
+	truncateBALIndex(number uint64, meta *BALIndexMeta) error
+	readBALIndexLast(key []byte, number uint64) (block uint64, ok bool, err error)
+	readBALIndexSlots(addr common.Address, number uint64) ([]common.Hash, error)
 }
 
 type DBEntryType uint8
@@ -312,6 +335,7 @@ const (
 	TxLookUpEntryDB
 	bridgeServiceDB
 	SnapshotDB
+	BALDB
 	// databaseEntryTypeSize should be the last item in this list!!
 	databaseEntryTypeSize
 )
@@ -353,6 +377,7 @@ var dbBaseDirs = [databaseEntryTypeSize]string{
 	"txlookup",
 	"bridgeservice",
 	"snapshot",
+	"bal",
 }
 
 // Sum of dbConfigRatio should be 100.
@@ -363,10 +388,11 @@ var dbConfigRatio = [databaseEntryTypeSize]int{
 	5,  // BodyDB
 	5,  // ReceiptsDB
 	40, // StateTrieDB
-	37, // StateTrieMigrationDB
+	35, // StateTrieMigrationDB
 	2,  // TXLookUpEntryDB
 	1,  // bridgeServiceDB
 	3,  // SnapshotDB
+	2,  // BALDB
 }
 
 // checkDBEntryConfigRatio checks if sum of dbConfigRatio is 100.
@@ -427,6 +453,10 @@ type databaseManager struct {
 	// lockClose guards closed against the background RemoveOldDB writing to a closed MiscDB.
 	lockClose sync.RWMutex
 	closed    bool
+
+	// BAL index, opened on first use. See db_manager_bal.go.
+	balIndex   Database
+	balIndexMu sync.Mutex
 }
 
 func NewMemoryDBManager() DBManager {
@@ -934,6 +964,10 @@ func (dbm *databaseManager) GetReceiptsDB() Database {
 	return dbm.dbs[ReceiptsDB]
 }
 
+func (dbm *databaseManager) GetBALDB() Database {
+	return dbm.getDatabase(BALDB)
+}
+
 func (dbm *databaseManager) GetStateTrieDB() Database {
 	return dbm.dbs[StateTrieDB]
 }
@@ -1030,6 +1064,8 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 }
 
 func (dbm *databaseManager) Close() {
+	dbm.closeBALIndex()
+
 	dbm.lockClose.Lock()
 	defer dbm.lockClose.Unlock()
 	dbm.closed = true
@@ -2059,6 +2095,30 @@ func (dbm *databaseManager) DeletePruningEnabled() {
 	if err := dbm.getDatabase(MiscDB).Delete(pruningEnabledKey); err != nil {
 		logger.Crit("Failed to remove pruning enabled flag", "err", err)
 	}
+}
+
+// HistoryMode is how much of the chain a node keeps. A full node keeps every
+// block and receipt and no block access list, and a history node also keeps
+// the block access list of every block, from which it serves past states. It
+// is set by the configuration only, so a node may switch modes on the same
+// database. How much of the state trie is kept, as an archive or not, is
+// apart from it.
+type HistoryMode string
+
+const (
+	HistoryModeFull HistoryMode = "full"
+	HistoryModeBAL  HistoryMode = "history"
+)
+
+// ParseHistoryMode returns the mode named s, full if s is empty.
+func ParseHistoryMode(s string) (HistoryMode, error) {
+	switch m := HistoryMode(s); m {
+	case "":
+		return HistoryModeFull, nil
+	case HistoryModeFull, HistoryModeBAL:
+		return m, nil
+	}
+	return "", fmt.Errorf("unknown history mode %q, want full or history", s)
 }
 
 // WritePruningMarks writes the provided set of pruning marks to the database.

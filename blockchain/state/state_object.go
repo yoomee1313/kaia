@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/common"
@@ -178,8 +179,20 @@ func (s *stateObject) openStorageTrie(addr common.Address, hash common.ExtHash, 
 	return db.OpenStorageTrie(addr, hash, s.db.trieOpts)
 }
 
+// storageEmpty reports whether the account has no storage: it is not a
+// contract, or its storage root is empty, like that of a contract created in
+// this state.
+func (s *stateObject) storageEmpty() bool {
+	acc := account.GetProgramAccount(s.account)
+	if acc == nil {
+		return true
+	}
+	root := acc.GetStorageRoot()
+	return common.EmptyExtHash(root) || root.Unextend() == types.EmptyRootHash
+}
+
 func (s *stateObject) getStorageTrie(db Database) Trie {
-	if s.storageTrie == nil {
+	if s.storageTrie == nil && !s.db.ReadOnly() {
 		if acc := account.GetProgramAccount(s.account); acc != nil {
 			var err error
 			s.storageTrie, err = s.openStorageTrie(s.address, acc.GetStorageRoot(), db)
@@ -213,55 +226,48 @@ func (s *stateObject) GetCommittedState(db Database, key common.Hash) common.Has
 	if cached {
 		return value
 	}
-	// Track the amount of time wasted on reading the storage trie
-	var (
-		enc   []byte
-		err   error
-		meter *time.Duration
-	)
-	readStart := time.Now()
-	if EnabledExpensive {
-		// If the snap is 'under construction', the first lookup may fail. If that
-		// happens, we don't want to double-count the time elapsed. Thus this
-		// dance with the metering.
-		defer func(start time.Time) {
-			if meter != nil {
-				*meter += time.Since(readStart)
-			}
-		}(time.Now())
-	}
-	if s.db.snap != nil {
-		if EnabledExpensive {
-			meter = &s.db.SnapshotStorageReads
-		}
+	if r := s.db.reader; r != nil {
 		// If the object was destructed in *this* block (and potentially resurrected),
 		// the storage has been cleared out, and we should *not* consult the previous
 		// snapshot about any storage values. The only possible alternatives are:
 		//   1) resurrect happened, and new slot values were set -- those should
 		//      have been handles via pendingStorage above.
 		//   2) we don't have new values, and can deliver empty response back
-		if _, destructed := s.db.snapDestructs[s.addrHash]; destructed {
+		if s.db.snap.destructed(s.addrHash) {
 			return common.Hash{}
 		}
-		enc, err = s.db.snap.Storage(s.addrHash, crypto.Keccak256Hash(key.Bytes()))
-	}
-	// If the snapshot is unavailable or reading from it fails, load from the database.
-	if s.db.snap == nil || err != nil {
-		if EnabledExpensive {
-			if meter != nil {
-				// If we already spent time checking the snapshot, account for it
-				// and reset the readStart
-				*meter += time.Since(readStart)
-				readStart = time.Now()
+		var err error
+		if !s.storageEmpty() {
+			start := time.Now()
+			value, err = r.Storage(s.address, key)
+			if EnabledExpensive && s.db.readsSnapshot() {
+				s.db.SnapshotStorageReads += time.Since(start)
 			}
-			meter = &s.db.StorageReads
 		}
-		// Load from DB in case it is missing.
-		if enc, err = s.getStorageTrie(db).TryGet(key[:]); err != nil {
-			s.setError(err)
-			return common.Hash{}
+		if err != errNotServed {
+			if err != nil {
+				s.setError(err)
+				return common.Hash{}
+			}
+			s.originStorage[key] = value
+			return value
 		}
 	}
+	// Track the amount of time wasted on reading the storage trie
+	if EnabledExpensive {
+		defer func(start time.Time) { s.db.StorageReads += time.Since(start) }(time.Now())
+	}
+	// If the reader did not serve it, load from the database.
+	if s.db.ReadOnly() {
+		s.originStorage[key] = common.Hash{}
+		return common.Hash{}
+	}
+	enc, err := s.getStorageTrie(db).TryGet(key[:])
+	if err != nil {
+		s.setError(err)
+		return common.Hash{}
+	}
+	value = common.Hash{}
 	if len(enc) > 0 {
 		_, content, _, err := rlp.Split(enc)
 		if err != nil {
@@ -364,20 +370,20 @@ func (s *stateObject) updateStorageTrie(db Database) Trie {
 
 		var v []byte
 		if (value == common.Hash{}) {
-			s.setError(tr.TryDelete(key[:]))
+			if tr != nil {
+				s.setError(tr.TryDelete(key[:]))
+			}
 		} else {
 			// Encoding []byte cannot fail, ok to ignore the error.
 			v, _ = rlp.EncodeToBytes(bytes.TrimLeft(value[:], "\x00"))
-			s.setError(tr.TryUpdate(key[:], v))
+			if tr != nil {
+				s.setError(tr.TryUpdate(key[:], v))
+			}
 		}
 		// If state snapshotting is active, cache the data til commit
 		if s.db.snap != nil {
 			if storage == nil {
-				// Retrieve the old storage map, if available, create a new one otherwise
-				if storage = s.db.snapStorage[s.addrHash]; storage == nil {
-					storage = make(map[common.Hash][]byte)
-					s.db.snapStorage[s.addrHash] = storage
-				}
+				storage = s.db.snap.storageOf(s.addrHash)
 			}
 			storage[crypto.Keccak256Hash(key[:])] = v // v will be nil if it's deleted
 		}
@@ -387,7 +393,7 @@ func (s *stateObject) updateStorageTrie(db Database) Trie {
 
 // updateStorageRoot sets the storage trie root to the newly updated one.
 func (s *stateObject) updateStorageRoot(db Database) {
-	if acc := account.GetProgramAccount(s.account); acc != nil {
+	if acc := account.GetProgramAccount(s.account); acc != nil && s.storageTrie != nil {
 		// Track the amount of time wasted on hashing the storage trie
 		if EnabledExpensive {
 			defer func(start time.Time) { s.db.StorageHashes += time.Since(start) }(time.Now())
@@ -401,6 +407,9 @@ func (s *stateObject) updateStorageRoot(db Database) {
 func (s *stateObject) setStorageRoot(updateStorageRoot bool, objectsToUpdate map[common.Address]struct{}) {
 	if acc := account.GetProgramAccount(s.account); acc != nil {
 		if updateStorageRoot {
+			if s.storageTrie == nil {
+				return // a read-only state has no storage tries
+			}
 			// Track the amount of time wasted on hashing the storage trie
 			if EnabledExpensive {
 				defer func(start time.Time) { s.db.StorageHashes += time.Since(start) }(time.Now())
@@ -470,9 +479,6 @@ func (s *stateObject) setBalance(amount *big.Int) {
 	s.account.SetBalance(amount)
 }
 
-// Return the gas back to the origin. Used by the Virtual machine or Closures
-func (s *stateObject) ReturnGas(gas *big.Int) {}
-
 func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 	stateObject := newObject(db, s.address, s.account.DeepCopy())
 	if s.storageTrie != nil {
@@ -504,7 +510,17 @@ func (s *stateObject) Code(db Database) []byte {
 	if bytes.Equal(s.CodeHash(), emptyCodeHash) {
 		return nil
 	}
-	code, err := db.ContractCode(common.BytesToHash(s.CodeHash()))
+	var (
+		code []byte
+		err  error
+	)
+	err = errNotServed
+	if r := s.db.reader; r != nil {
+		code, err = r.Code(s.address, common.BytesToHash(s.CodeHash()))
+	}
+	if err == errNotServed {
+		code, err = db.ContractCode(common.BytesToHash(s.CodeHash()))
+	}
 	if err != nil {
 		s.setError(fmt.Errorf("can't load code hash %x: %v", s.CodeHash(), err))
 	}
@@ -522,7 +538,16 @@ func (s *stateObject) CodeSize(db Database) int {
 	if bytes.Equal(s.CodeHash(), emptyCodeHash) {
 		return 0
 	}
-	size, err := db.ContractCodeSize(common.BytesToHash(s.CodeHash()))
+	var (
+		size int
+		err  = errNotServed
+	)
+	if r := s.db.reader; r != nil {
+		size, err = r.CodeSize(s.address, common.BytesToHash(s.CodeHash()))
+	}
+	if err == errNotServed {
+		size, err = db.ContractCodeSize(common.BytesToHash(s.CodeHash()))
+	}
 	if err != nil {
 		s.setError(fmt.Errorf("can't load code size %x: %v", s.CodeHash(), err))
 	}

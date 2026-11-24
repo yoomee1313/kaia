@@ -48,6 +48,10 @@ type Dump struct {
 }
 
 func (self *StateDB) RawDump() Dump {
+	if self.ReadOnly() {
+		self.setError(ErrNoIteration)
+		return Dump{Root: fmt.Sprintf("%x", self.root), Accounts: make(map[string]DumpAccount)}
+	}
 	dump := Dump{
 		Root:     fmt.Sprintf("%x", self.trie.Hash()),
 		Accounts: make(map[string]DumpAccount),

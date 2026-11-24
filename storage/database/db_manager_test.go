@@ -37,6 +37,7 @@ import (
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var (
@@ -1206,4 +1207,158 @@ func genRandomData() (common.Hash, []byte) {
 	hash := common.BytesToHash(rb)
 	data := common.MakeRandomBytes(100)
 	return hash, data
+}
+
+func TestParseHistoryMode(t *testing.T) {
+	mode, err := ParseHistoryMode("")
+	require.NoError(t, err)
+	require.Equal(t, HistoryModeFull, mode)
+	mode, err = ParseHistoryMode("history")
+	require.NoError(t, err)
+	require.Equal(t, HistoryModeBAL, mode)
+	_, err = ParseHistoryMode("light")
+	require.ErrorContains(t, err, "unknown history mode")
+}
+
+// TestSchemaBAL reads, writes and deletes the writes and the reads of a list,
+// and the range of stored lists.
+func TestSchemaBAL(t *testing.T) {
+	db := NewMemoryDBManager()
+	hash := common.HexToHash("0x1234")
+	enc := []byte{0xc1, 0xc0}
+
+	assert.Nil(t, db.ReadBAL(hash, 1))
+	assert.False(t, db.HasBAL(hash, 1))
+
+	assert.NoError(t, db.WriteBAL(hash, 1, enc))
+	assert.Equal(t, enc, db.ReadBAL(hash, 1))
+	assert.True(t, db.HasBAL(hash, 1))
+	assert.Nil(t, db.ReadBAL(hash, 2))
+
+	reads := []byte{0xc1, 0xc1}
+	assert.Nil(t, db.ReadBALReads(hash, 1))
+	assert.NoError(t, db.WriteBALReads(hash, 1, reads))
+	assert.Equal(t, reads, db.ReadBALReads(hash, 1))
+	assert.Equal(t, enc, db.ReadBAL(hash, 1), "the writes are kept apart")
+
+	db.DeleteBAL(hash, 1)
+	assert.Nil(t, db.ReadBAL(hash, 1))
+	assert.Equal(t, reads, db.ReadBALReads(hash, 1))
+	db.DeleteBALReads(hash, 1)
+	assert.Nil(t, db.ReadBALReads(hash, 1))
+
+	first, next := db.ReadBALRange()
+	assert.Equal(t, [2]uint64{0, 0}, [2]uint64{first, next})
+	assert.NoError(t, db.WriteBALRange(3, 9))
+	first, next = db.ReadBALRange()
+	assert.Equal(t, [2]uint64{3, 9}, [2]uint64{first, next})
+}
+
+// TestBALIndex adds lists to the BAL index with flushes and a reopen, reads the
+// last block that changed each key and the written slots at every block, from
+// the tail and from the database, and truncates the index in the database
+// and in the tail.
+func TestBALIndex(t *testing.T) {
+	var (
+		a      = common.Address{0xa}
+		s1, s2 = common.Hash{1}, common.Hash{2}
+		root   = common.Hash{0xb}
+	)
+	list := func(n uint64) *types.BlockAccessList {
+		acc := types.AccountChanges{
+			Address:        a,
+			BalanceChanges: []types.BalanceChange{{BlockAccessIndex: 1, PostBalance: big.NewInt(int64(n))}},
+		}
+		switch n {
+		case 2, 5:
+			acc.StorageChanges = []types.SlotChanges{{Slot: s1, Changes: []types.StorageChange{{BlockAccessIndex: 1, NewValue: common.Hash{byte(n)}}}}}
+		case 3:
+			acc.StorageChanges = []types.SlotChanges{{Slot: s2, Changes: []types.StorageChange{{BlockAccessIndex: 1, NewValue: common.Hash{3}}}}}
+		case 4:
+			acc.CodeChanges = []types.CodeChange{{BlockAccessIndex: 1, NewCode: []byte{1}}}
+		case 6:
+			acc.AccountRecords = []types.AccountRecord{{BlockAccessIndex: 1, Account: []byte{1}}}
+		case 7:
+			acc.Deleted = []uint32{1}
+		}
+		return &types.BlockAccessList{Accounts: []types.AccountChanges{acc}}
+	}
+	changed := map[string][]uint64{
+		string(BALIndexKey(BALIndexBalance, a)): {1, 2, 3, 4, 5, 6, 7, 8},
+		string(BALIndexKey(BALIndexNonce, a)):   nil,
+		string(BALIndexKey(BALIndexCode, a)):    {4},
+		string(BALIndexKey(BALIndexAccount, a)): {6},
+		string(BALIndexKey(BALIndexReset, a)):   {7},
+		string(BALIndexSlotKey(a, s1)):          {2, 5},
+		string(BALIndexSlotKey(a, s2)):          {3},
+	}
+	check := func(ix *BALIndex, upTo uint64) {
+		t.Helper()
+		for n := uint64(0); n <= 8; n++ {
+			for key, blocks := range changed {
+				var want uint64
+				found := false
+				for _, b := range blocks {
+					if b <= n && b <= upTo {
+						want, found = b, true
+					}
+				}
+				got, ok, err := ix.Last([]byte(key), n)
+				require.NoError(t, err)
+				require.Equal(t, found, ok, "key %x block %d", key, n)
+				require.Equal(t, want, got, "key %x block %d", key, n)
+			}
+			var slots []common.Hash
+			if n >= 2 {
+				slots = append(slots, s1)
+			}
+			if n >= 3 && upTo >= 3 {
+				slots = append(slots, s2)
+			}
+			got, err := ix.SlotsBefore(a, n)
+			require.NoError(t, err)
+			require.Equal(t, slots, got, "block %d", n)
+		}
+	}
+
+	db := NewMemoryDBManager()
+	b, err := NewBALIndexBuilder(db, 0, root)
+	require.NoError(t, err)
+	for n := uint64(1); n <= 8; n++ {
+		if n == 4 {
+			// A reopened builder goes on from the flushed blocks.
+			b, err = NewBALIndexBuilder(db, 0, root)
+			require.NoError(t, err)
+			require.Equal(t, uint64(4), b.Next())
+		}
+		require.NoError(t, b.Add(n, list(n)))
+		if n%2 == 1 {
+			require.NoError(t, b.Flush())
+		}
+	}
+	require.ErrorIs(t, b.Add(10, list(10)), errBALIndexGap)
+	_, err = NewBALIndexBuilder(db, 1, root)
+	require.ErrorIs(t, err, errBALIndexBase)
+	check(b.Index(), 8) // block 8 in the tail
+
+	require.NoError(t, b.Flush())
+	ix, err := OpenBALIndex(db)
+	require.NoError(t, err)
+	require.Equal(t, BALIndexMeta{Base: 0, BaseRoot: root, Next: 9}, ix.Meta())
+	require.NoError(t, ix.Check(0))
+	require.ErrorIs(t, ix.Check(9), ErrBALNotIndexed)
+	check(ix, 8)
+
+	// Truncating flushed blocks rewrites the database, and the tail after it
+	// is cut in memory.
+	require.NoError(t, b.Truncate(4))
+	require.Equal(t, uint64(5), b.Next())
+	check(b.Index(), 4)
+	require.NoError(t, b.Add(5, list(5)))
+	require.NoError(t, b.Truncate(4))
+	check(b.Index(), 4)
+	ix, err = OpenBALIndex(db)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), ix.Meta().Next)
+	check(ix, 4)
 }

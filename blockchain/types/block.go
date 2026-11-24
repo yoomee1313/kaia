@@ -203,6 +203,11 @@ type Block struct {
 	// These fields are used to track inter-peer block relay.
 	ReceivedAt   time.Time
 	ReceivedFrom interface{}
+
+	// bal is the RLP encoding of the writes of the block access list the
+	// block is inserted with instead of being executed, nil if none. It is
+	// neither hashed nor encoded with the block.
+	bal []byte
 }
 
 type Result struct {
@@ -410,6 +415,23 @@ func (b *Block) WithBody(transactions []*Transaction) *Block {
 	}
 	copy(block.transactions, transactions)
 	return block
+}
+
+// BAL returns the encoded writes of the block access list the block is
+// inserted with, nil if none.
+func (b *Block) BAL() []byte { return b.bal }
+
+// WithBAL returns the block with enc, the encoded writes of its block access
+// list, to insert it by applying the list instead of executing it.
+func (b *Block) WithBAL(enc []byte) *Block {
+	return &Block{
+		header:       b.header,
+		transactions: b.transactions,
+		td:           b.td,
+		ReceivedAt:   b.ReceivedAt,
+		ReceivedFrom: b.ReceivedFrom,
+		bal:          enc,
+	}
 }
 
 // WithoutBlobSidecars returns a new block with the blob sidecar removed from the transactions.

@@ -41,6 +41,7 @@ This package implements Kaia Block, Transaction and related functions and variab
 # Source Files
 
 Functions and variables related to Block and Transaction are defined in the files listed below.
+  - bal.go : defines the block access list (BAL) of a block, in the types of EIP-7928
   - block.go : defines block and block header
   - bloom.go : defines bloom and its functions for bloom filter which helps user to filter transaction receipts efficiently
   - contract_ref.go : interfaces ContractRef to deliver a fee payer address to the contract execution environment

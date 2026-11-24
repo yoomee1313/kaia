@@ -25,6 +25,7 @@ package state
 import (
 	"math/big"
 
+	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/params"
 )
@@ -127,6 +128,12 @@ type (
 		account      *common.Address
 		prevCodeInfo params.CodeInfo
 	}
+	accountChange struct {
+		account       *common.Address
+		prev          account.Account
+		prevcode      Code
+		prevDirtyCode bool
+	}
 
 	// Changes to other state values.
 	refundChange struct {
@@ -139,9 +146,7 @@ type (
 		hash common.Hash
 	}
 	touchChange struct {
-		account   *common.Address
-		prev      bool
-		prevDirty bool
+		account *common.Address
 	}
 	// Changes to the access list
 	accessListAddAccountChange struct {
@@ -169,8 +174,8 @@ func (ch createObjectChange) dirtied() *common.Address {
 
 func (ch resetObjectChange) revert(s *StateDB) {
 	s.setStateObject(ch.prev)
-	if !ch.prevdestruct && s.snap != nil {
-		delete(s.snapDestructs, ch.prev.addrHash)
+	if !ch.prevdestruct {
+		s.snap.unmarkDestructed(ch.prev.addrHash)
 	}
 }
 
@@ -228,6 +233,15 @@ func (ch codeInfoChange) revert(s *StateDB) {
 }
 
 func (ch codeInfoChange) dirtied() *common.Address {
+	return ch.account
+}
+
+func (ch accountChange) revert(s *StateDB) {
+	obj := s.getStateObject(*ch.account)
+	obj.account, obj.code, obj.dirtyCode = ch.prev, ch.prevcode, ch.prevDirtyCode
+}
+
+func (ch accountChange) dirtied() *common.Address {
 	return ch.account
 }
 
