@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dgraph-io/badger"
 	"github.com/erigontech/erigon-lib/kaiatrie"
@@ -38,6 +39,7 @@ import (
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/kaiachain/kaia/storage/database/ancient"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -120,7 +122,6 @@ type DBManager interface {
 	DeleteBody(hash common.Hash, number uint64)
 
 	ReadTd(hash common.Hash, number uint64) *big.Int
-	WriteTd(hash common.Hash, number uint64, td *big.Int)
 	DeleteTd(hash common.Hash, number uint64)
 
 	ReadReceipt(txHash common.Hash) (*types.Receipt, common.Hash, uint64, uint64)
@@ -128,6 +129,8 @@ type DBManager interface {
 	ReadReceiptsByBlockHash(hash common.Hash) types.Receipts
 	WriteReceipts(hash common.Hash, number uint64, receipts types.Receipts)
 	PutReceiptsToBatch(batch Batch, hash common.Hash, number uint64, receipts types.Receipts)
+	WriteBlockReceipts(block *types.Block, receipts types.Receipts)
+	PutBlockReceiptsToBatch(batch Batch, block *types.Block, receipts types.Receipts)
 	DeleteReceipts(hash common.Hash, number uint64)
 
 	// History mode operations (experimental)
@@ -184,11 +187,17 @@ type DBManager interface {
 	ReadPruningEnabled() bool
 	WritePruningEnabled()
 	DeletePruningEnabled()
-
 	WritePruningMarks(marks []PruningMark)
 	ReadPruningMarks(startNumber, endNumber uint64) []PruningMark
 	DeletePruningMarks(marks []PruningMark)
+	// DeletePruningMarksFrom deletes the pruning marks of block number and
+	// the blocks after it, which a rewind deleted.
+	DeletePruningMarksFrom(number uint64)
 	PruneTrieNodes(marks []PruningMark)
+	// PruneMarkedTrieNodes hands the marks of the blocks [startNumber,
+	// endNumber) to prune, nil for PruneTrieNodes, deletes them and returns
+	// how many there were.
+	PruneMarkedTrieNodes(startNumber, endNumber uint64, prune func([]PruningMark)) int
 	WriteLastPrunedBlockNumber(blockNumber uint64)
 	ReadLastPrunedBlockNumber() (uint64, error)
 
@@ -301,6 +310,24 @@ type DBManager interface {
 
 	Stat(string) (string, error)
 	Compact([]byte, []byte) error
+
+	// FrozenBlocks returns the number of blocks moved to the freezer.
+	FrozenBlocks() uint64
+	// PauseFreezer stops moving blocks to the freezer until resume is called.
+	PauseFreezer() (frozen uint64, resume func())
+	// TruncateFrozen removes the frozen blocks from number items on. The caller
+	// must hold PauseFreezer.
+	TruncateFrozen(items uint64) error
+	// Unfreeze moves the frozen blocks back into the key-value store and
+	// empties the freezer. The database is to be closed after it.
+	Unfreeze(progress func(next, frozen uint64)) error
+	// RestoreFreezerFormats writes what this version stores its own way as a
+	// version without the freezer does, after Unfreeze.
+	RestoreFreezerFormats(progress func(stage string, n uint64)) error
+	// FreezeSyncedBlocks writes the leading synced blocks that are far enough
+	// below the head header straight into the freezer, and returns how many it
+	// took. The caller writes the rest to the key-value store.
+	FreezeSyncedBlocks(blocks types.Blocks, receipts []types.Receipts, headHeader uint64) (int, error)
 
 	// Block access lists and the history of a history node, see
 	// db_manager_bal.go.
@@ -454,6 +481,20 @@ type databaseManager struct {
 	lockClose sync.RWMutex
 	closed    bool
 
+	// Block freezer (ancient store). nil if disabled.
+	freezer          *ancient.Freezer
+	freezerQuit      chan struct{}
+	freezerTrigger   chan chan struct{} // Manual blocking freeze trigger, test determinism
+	freezerWg        sync.WaitGroup
+	freezerCloseOnce sync.Once
+	freezeLock       sync.Mutex  // Held by a freeze round and by PauseFreezer
+	unfrozen         atomic.Bool // Set by Unfreeze, which stops freezing
+	firstFreezeWarn  sync.Once   // Warns that the first freeze ends the compatibility with earlier versions
+
+	// Pruning mark freezer. nil if the block freezer is disabled or read-only.
+	pruningMarks       *ancient.Freezer
+	pruningMarkDirOnce sync.Once
+
 	// BAL index, opened on first use. See db_manager_bal.go.
 	balIndex   Database
 	balIndexMu sync.Mutex
@@ -499,6 +540,12 @@ type DBConfig struct {
 
 	// FlatTrie related configurations
 	UseFlatTrie bool
+
+	// Freezer related configurations
+	EnableFreezer    bool   // If true, old blocks are moved from the key-value store to the freezer; a setup without freezer support runs without it
+	AncientDir       string // Freezer root; relative paths are resolved against Dir. Default: <Dir>/ancient
+	FreezerThreshold uint64 // Number of recent blocks kept in the key-value store
+	FreezerReadOnly  bool   // If true and EnableFreezer is false, an existing freezer is opened for reads only
 }
 
 const dbMetricPrefix = "klay/db/chaindata/"
@@ -623,6 +670,7 @@ func newDatabaseManager(dbc *DBConfig) *databaseManager {
 func NewDBManager(dbc *DBConfig) DBManager {
 	if dbc.SingleDB {
 		logger.Info("Single database is used for persistent storage", "DBType", dbc.DBType)
+		checkFreezerSupport(dbc, false)
 		if dbm, err := singleDatabaseDBManager(dbc); err != nil {
 			logger.Crit("Failed to create a single database", "DBType", dbc.DBType, "err", err)
 		} else {
@@ -645,6 +693,12 @@ func NewDBManager(dbc *DBConfig) DBManager {
 			}
 		}
 		dbm.migrationOldDBPath = dbm.getMigrationOldDBPath()
+		if err := dbm.openFreezer(); err != nil {
+			logger.Crit("Failed to open block freezer", "err", err)
+		}
+		if err := dbm.openPruningMarkFreezer(); err != nil {
+			logger.Crit("Failed to open pruning mark freezer", "err", err)
+		}
 		return dbm
 	}
 	logger.Crit("Must not reach here!")
@@ -1064,6 +1118,8 @@ func (dbm *databaseManager) getDatabase(dbEntryType DBEntryType) Database {
 }
 
 func (dbm *databaseManager) Close() {
+	// Stop the freeze loop before the key-value stores are closed.
+	dbm.closeFreezer()
 	dbm.closeBALIndex()
 
 	dbm.lockClose.Lock()
@@ -1099,6 +1155,9 @@ func (dbm *databaseManager) ReadCanonicalHash(number uint64) common.Hash {
 
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerHashKey(number))
+	if len(data) == 0 {
+		data = dbm.readAncientHash(number)
+	}
 	if len(data) == 0 {
 		return common.Hash{}
 	}
@@ -1252,10 +1311,10 @@ func (dbm *databaseManager) HasHeader(hash common.Hash, number uint64) bool {
 	}
 
 	db := dbm.getDatabase(headerDB)
-	if has, err := db.Has(headerKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(headerKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadHeader retrieves the block header corresponding to the hash.
@@ -1283,6 +1342,9 @@ func (dbm *databaseManager) ReadHeader(hash common.Hash, number uint64) *types.H
 func (dbm *databaseManager) ReadHeaderRLP(hash common.Hash, number uint64) rlp.RawValue {
 	db := dbm.getDatabase(headerDB)
 	data, _ := db.Get(headerKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readFrozenHeader(hash, number)
+	}
 	return data
 }
 
@@ -1328,6 +1390,7 @@ func (dbm *databaseManager) DeleteHeader(hash common.Hash, number uint64) {
 	// Delete cache at the end of successful delete.
 	dbm.cm.deleteHeaderCache(hash)
 	dbm.cm.deleteBlockNumberCache(hash)
+	dbm.cm.deleteTdCache(hash)
 }
 
 // Head Number operations.
@@ -1353,10 +1416,10 @@ func (dbm *databaseManager) ReadHeaderNumber(hash common.Hash) *uint64 {
 // HasBody verifies the existence of a block body corresponding to the hash.
 func (dbm *databaseManager) HasBody(hash common.Hash, number uint64) bool {
 	db := dbm.getDatabase(BodyDB)
-	if has, err := db.Has(blockBodyKey(number, hash)); !has || err != nil {
-		return false
+	if has, err := db.Has(blockBodyKey(number, hash)); has && err == nil {
+		return true
 	}
-	return true
+	return dbm.isFrozenCanon(hash, number)
 }
 
 // ReadBody retrieves the block body corresponding to the hash.
@@ -1395,7 +1458,7 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
@@ -1404,6 +1467,9 @@ func (dbm *databaseManager) ReadBodyRLP(hash common.Hash, number uint64) rlp.Raw
 	// not found in cache, find body in database
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1419,7 +1485,7 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	// find cached body and encode it to return
 	if cachedBody := dbm.ReadBodyInCache(hash); cachedBody != nil {
-		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err != nil {
+		if bodyRLP, err := rlp.EncodeToBytes(cachedBody); err == nil {
 			dbm.cm.writeBodyRLPCache(hash, bodyRLP)
 			return bodyRLP
 		}
@@ -1433,6 +1499,9 @@ func (dbm *databaseManager) ReadBodyRLPByHash(hash common.Hash) rlp.RawValue {
 
 	db := dbm.getDatabase(BodyDB)
 	data, _ := db.Get(blockBodyKey(*number, hash))
+	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerBodiesTable, hash, *number)
+	}
 
 	// Write to cache at the end of successful read.
 	dbm.cm.writeBodyRLPCache(hash, data)
@@ -1485,44 +1554,26 @@ func (dbm *databaseManager) DeleteBody(hash common.Hash, number uint64) {
 }
 
 // TotalDifficulty operations.
-// ReadTd retrieves a block's total blockscore corresponding to the hash.
+// ReadTd returns the total blockscore of a known block, nil for an unknown
+// one. It is not stored: every block after the genesis has blockscore 1, so it
+// is the blockscore of the genesis plus the number.
 func (dbm *databaseManager) ReadTd(hash common.Hash, number uint64) *big.Int {
+	if n := dbm.ReadHeaderNumber(hash); n == nil || *n != number {
+		return nil
+	}
 	if cachedTd := dbm.cm.readTdCache(hash); cachedTd != nil {
 		return cachedTd
 	}
-
-	db := dbm.getDatabase(MiscDB)
-	data, _ := db.Get(headerTDKey(number, hash))
-	if len(data) == 0 {
+	genesis := dbm.ReadHeader(dbm.ReadCanonicalHash(0), 0)
+	if genesis == nil || genesis.BlockScore == nil {
 		return nil
 	}
-	td := new(big.Int)
-	if err := rlp.Decode(bytes.NewReader(data), td); err != nil {
-		logger.Error("Invalid block total blockscore RLP", "hash", hash, "err", err)
-		return nil
-	}
-
-	// Write to cache before returning found value.
+	td := new(big.Int).Add(genesis.BlockScore, new(big.Int).SetUint64(number))
 	dbm.cm.writeTdCache(hash, td)
 	return td
 }
 
-// WriteTd stores the total blockscore of a block into the database.
-func (dbm *databaseManager) WriteTd(hash common.Hash, number uint64, td *big.Int) {
-	db := dbm.getDatabase(MiscDB)
-	data, err := rlp.EncodeToBytes(td)
-	if err != nil {
-		logger.Crit("Failed to RLP encode block total blockscore", "err", err)
-	}
-	if err := db.Put(headerTDKey(number, hash), data); err != nil {
-		logger.Crit("Failed to store block total blockscore", "err", err)
-	}
-
-	// Write to cache at the end of successful write.
-	dbm.cm.writeTdCache(hash, td)
-}
-
-// DeleteTd removes all block total blockscore data associated with a hash.
+// DeleteTd removes the total blockscore an older version stored for a block.
 func (dbm *databaseManager) DeleteTd(hash common.Hash, number uint64) {
 	db := dbm.getDatabase(MiscDB)
 	if err := db.Delete(headerTDKey(number, hash)); err != nil {
@@ -1553,17 +1604,16 @@ func (dbm *databaseManager) ReadReceipts(blockHash common.Hash, number uint64) t
 	// Retrieve the flattened receipt slice
 	data, _ := db.Get(blockReceiptsKey(number, blockHash))
 	if len(data) == 0 {
+		data = dbm.readAncient(ancient.ChainFreezerReceiptTable, blockHash, number)
+	}
+	if len(data) == 0 {
 		return nil
 	}
 	// Convert the revceipts from their database form to their internal representation
-	storageReceipts := []*types.ReceiptForStorage{}
-	if err := rlp.DecodeBytes(data, &storageReceipts); err != nil {
+	receipts, err := decodeReceipts(data, blockHash, number, func() *types.Body { return dbm.ReadBody(blockHash, number) })
+	if err != nil {
 		logger.Error("Invalid receipt array RLP", "blockHash", blockHash, "err", err)
 		return nil
-	}
-	receipts := make(types.Receipts, len(storageReceipts))
-	for i, receipt := range storageReceipts {
-		receipts[i] = (*types.Receipt)(receipt)
 	}
 	return receipts
 }
@@ -1594,24 +1644,55 @@ func (dbm *databaseManager) PutReceiptsToBatch(batch Batch, hash common.Hash, nu
 	dbm.putReceiptsToPutter(batch, hash, number, receipts, false)
 }
 
+// WriteBlockReceipts stores the receipts of a block like WriteReceipts, in
+// the smallest format they can be restored from with the block, see
+// blockReceiptsItem.
+func (dbm *databaseManager) WriteBlockReceipts(block *types.Block, receipts types.Receipts) {
+	dbm.cm.writeBlockReceiptsCache(block.Hash(), receipts)
+	dbm.putBlockReceiptsToPutter(dbm.getDatabase(ReceiptsDB), block, receipts, true)
+}
+
+// PutBlockReceiptsToBatch is WriteBlockReceipts into a batch.
+func (dbm *databaseManager) PutBlockReceiptsToBatch(batch Batch, block *types.Block, receipts types.Receipts) {
+	dbm.putBlockReceiptsToPutter(batch, block, receipts, false)
+}
+
+func (dbm *databaseManager) putBlockReceiptsToPutter(putter KeyValueWriter, block *types.Block, receipts types.Receipts, addToCache bool) {
+	if addToCache {
+		for _, receipt := range receipts {
+			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
+		}
+	}
+	item := blockReceiptsItem(block.Hash(), block.NumberU64(), block.Transactions(), receipts)
+	if err := putter.Put(blockReceiptsKey(block.NumberU64(), block.Hash()), item); err != nil {
+		logger.Crit("Failed to store block receipts", "err", err)
+	}
+}
+
 func (dbm *databaseManager) putReceiptsToPutter(putter KeyValueWriter, hash common.Hash, number uint64, receipts types.Receipts, addToCache bool) {
-	// Convert the receipts into their database form and serialize them
+	if addToCache {
+		for _, receipt := range receipts {
+			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
+		}
+	}
+	bytes := encodeStorageReceipts(receipts)
+	// Store the flattened receipt slice
+	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
+		logger.Crit("Failed to store block receipts", "err", err)
+	}
+}
+
+// encodeStorageReceipts serializes the receipts in their database form.
+func encodeStorageReceipts(receipts types.Receipts) []byte {
 	storageReceipts := make([]*types.ReceiptForStorage, len(receipts))
 	for i, receipt := range receipts {
 		storageReceipts[i] = (*types.ReceiptForStorage)(receipt)
-
-		if addToCache {
-			dbm.cm.writeTxReceiptCache(receipt.TxHash, receipt)
-		}
 	}
 	bytes, err := rlp.EncodeToBytes(storageReceipts)
 	if err != nil {
 		logger.Crit("Failed to encode block receipts", "err", err)
 	}
-	// Store the flattened receipt slice
-	if err := putter.Put(blockReceiptsKey(number, hash), bytes); err != nil {
-		logger.Crit("Failed to store block receipts", "err", err)
-	}
+	return bytes
 }
 
 // DeleteReceipts removes all receipt data associated with a block hash.
@@ -2123,6 +2204,10 @@ func ParseHistoryMode(s string) (HistoryMode, error) {
 
 // WritePruningMarks writes the provided set of pruning marks to the database.
 func (dbm *databaseManager) WritePruningMarks(marks []PruningMark) {
+	if dbm.pruningMarks != nil {
+		dbm.appendPruningMarks(marks)
+		return
+	}
 	batch := dbm.NewBatch(MiscDB)
 	defer batch.Release()
 	for _, mark := range marks {
@@ -2219,11 +2304,35 @@ func (dbm *databaseManager) ReadTxLookupEntry(hash common.Hash) (common.Hash, ui
 		return common.Hash{}, 0, 0
 	}
 	var entry TxLookupEntry
-	if err := rlp.DecodeBytes(data, &entry); err != nil {
+	if err := rlp.DecodeBytes(data, &entry); err == nil {
+		return entry.BlockHash, entry.BlockIndex, entry.Index
+	}
+	var slim slimTxLookupEntry
+	if err := rlp.DecodeBytes(data, &slim); err != nil {
 		logger.Error("Invalid transaction lookup entry RLP", "hash", hash, "err", err)
 		return common.Hash{}, 0, 0
 	}
-	return entry.BlockHash, entry.BlockIndex, entry.Index
+	// A slim entry names the block by number only. The canonical block must hold
+	// the transaction, in case the entry outlived a reorg.
+	blockHash := dbm.ReadCanonicalHash(slim.BlockIndex)
+	if common.EmptyHash(blockHash) {
+		return common.Hash{}, 0, 0
+	}
+	body := dbm.ReadBody(blockHash, slim.BlockIndex)
+	if body == nil || uint64(len(body.Transactions)) <= slim.Index || body.Transactions[slim.Index].Hash() != hash {
+		return common.Hash{}, 0, 0
+	}
+	return blockHash, slim.BlockIndex, slim.Index
+}
+
+// encodeTxLookupEntry encodes the lookup entry of the index-th transaction of
+// the block. It leaves out the block hash, which the canonical chain gives.
+func encodeTxLookupEntry(block *types.Block, index int) []byte {
+	data, err := rlp.EncodeToBytes(slimTxLookupEntry{BlockIndex: block.NumberU64(), Index: uint64(index)})
+	if err != nil {
+		logger.Crit("Failed to encode transaction lookup entry", "err", err)
+	}
+	return data
 }
 
 // WriteTxLookupEntries stores a positional metadata for every transaction from
@@ -2242,11 +2351,7 @@ func (dbm *databaseManager) WriteAndCacheTxLookupEntries(block *types.Block) err
 			BlockIndex: block.NumberU64(),
 			Index:      uint64(i),
 		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := batch.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := batch.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 
@@ -2266,16 +2371,7 @@ func (dbm *databaseManager) PutTxLookupEntriesToBatch(batch Batch, block *types.
 
 func putTxLookupEntriesToPutter(putter KeyValueWriter, block *types.Block) {
 	for i, tx := range block.Transactions() {
-		entry := TxLookupEntry{
-			BlockHash:  block.Hash(),
-			BlockIndex: block.NumberU64(),
-			Index:      uint64(i),
-		}
-		data, err := rlp.EncodeToBytes(entry)
-		if err != nil {
-			logger.Crit("Failed to encode transaction lookup entry", "err", err)
-		}
-		if err := putter.Put(TxLookupKey(tx.Hash()), data); err != nil {
+		if err := putter.Put(TxLookupKey(tx.Hash()), encodeTxLookupEntry(block, i)); err != nil {
 			logger.Crit("Failed to store transaction lookup entry", "err", err)
 		}
 	}
@@ -2346,8 +2442,7 @@ func (dbm *databaseManager) ReadTxHashFromSenderTxHash(senderTxHash common.Hash)
 // ReadBloomBits retrieves the compressed bloom bit vector belonging to the given
 // section and bit index from the.
 func (dbm *databaseManager) ReadBloomBits(bloomBitsKey []byte) ([]byte, error) {
-	db := dbm.getDatabase(MiscDB)
-	return db.Get(bloomBitsKey)
+	return dbm.readBloomBits(bloomBitsKey)
 }
 
 // WriteBloomBits stores the compressed bloom bits vector belonging to the given

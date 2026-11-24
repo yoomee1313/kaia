@@ -212,26 +212,22 @@ func testWriteAndReadBody(t *testing.T, dbManager database.DBManager) {
 }
 
 func testWriteAndReadTd(t *testing.T, dbManager database.DBManager) {
-	hash1 := common.HexToHash("111")
 	blockNumber1 := uint64(111)
+	genesis := &types.Header{Number: big.NewInt(0), BlockScore: big.NewInt(1)}
+	header := &types.Header{Number: new(big.Int).SetUint64(blockNumber1), BlockScore: big.NewInt(1), ParentHash: common.HexToHash("111")}
 
-	td1 := new(big.Int).SetUint64(111)
-	td2 := new(big.Int).SetUint64(222)
+	// 1. Before the header is written, no td is returned.
+	assert.Equal(t, (*big.Int)(nil), dbManager.ReadTd(header.Hash(), blockNumber1))
 
-	// 1. Before write, empty td should be returned.
-	assert.Equal(t, (*big.Int)(nil), dbManager.ReadTd(hash1, blockNumber1))
+	// 2. After it is, the td is the blockscore of the genesis plus the number.
+	dbManager.WriteHeader(genesis)
+	dbManager.WriteCanonicalHash(genesis.Hash(), 0)
+	dbManager.WriteHeader(header)
+	assert.Equal(t, new(big.Int).SetUint64(1+blockNumber1), dbManager.ReadTd(header.Hash(), blockNumber1))
 
-	// 2. After write, written td should be returned.
-	dbManager.WriteTd(hash1, blockNumber1, td1)
-	assert.Equal(t, td1, dbManager.ReadTd(hash1, blockNumber1))
-
-	// 3. After overwrite, overwritten td should be returned.
-	dbManager.WriteTd(hash1, blockNumber1, td2)
-	assert.Equal(t, td2, dbManager.ReadTd(hash1, blockNumber1))
-
-	// 4. After delete, deleted td should not be returned.
-	dbManager.DeleteTd(hash1, blockNumber1)
-	assert.Equal(t, (*big.Int)(nil), dbManager.ReadTd(hash1, blockNumber1))
+	// 3. After the header is deleted, no td is returned.
+	dbManager.DeleteHeader(header.Hash(), blockNumber1)
+	assert.Equal(t, (*big.Int)(nil), dbManager.ReadTd(header.Hash(), blockNumber1))
 }
 
 func testWriteAndReadReceipts(t *testing.T, dbManager database.DBManager) {

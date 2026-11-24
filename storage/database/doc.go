@@ -32,6 +32,7 @@ Source Files
   - cache_manager.go         : implementation of cacheManager, which manages cache layer over persistent layer
   - db_manager.go            : contains DBManager and databaseManager
   - db_manager_bal.go        : block access lists, their index and the history mode of a history node
+  - db_manager_freezer.go    : the block freezer, and the smaller formats of receipts, headers, bloom bits and pruning marks
   - dynamodb.go              : implementation of dynamoDB, which wraps github.com/aws/aws-sdk-go/service/dynamodb
   - interface.go             : interfaces used outside database package
   - leveldb_database.go      : implementation of levelDB, which wraps github.com/syndtr/goleveldb

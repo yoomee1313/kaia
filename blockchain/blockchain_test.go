@@ -332,7 +332,6 @@ func testBlockChainImport(chain types.Blocks, blockchain *BlockChain) error {
 			return err
 		}
 		blockchain.mu.Lock()
-		blockchain.db.WriteTd(block.Hash(), block.NumberU64(), new(big.Int).Add(block.BlockScore(), blockchain.GetTdByHash(block.ParentHash())))
 		blockchain.db.WriteBlock(block)
 		statedb.Commit(false)
 		blockchain.mu.Unlock()
@@ -351,7 +350,6 @@ func testHeaderChainImport(chain []*types.Header, blockchain *BlockChain) error 
 		}
 		// Manually insert the header into the database, but don't reorganise (allows subsequent testing)
 		blockchain.mu.Lock()
-		blockchain.db.WriteTd(header.Hash(), header.Number.Uint64(), new(big.Int).Add(header.BlockScore, blockchain.GetTdByHash(header.ParentHash)))
 		blockchain.db.WriteHeader(header)
 		blockchain.mu.Unlock()
 	}
@@ -665,8 +663,9 @@ func testReorg(t *testing.T, first, second []int64, td int64, full bool) {
 			}
 		}
 	}
-	// Make sure the chain total blockscore is the correct one
-	want := big.NewInt(td)
+	// Make sure the chain total blockscore is the correct one: that of the
+	// genesis plus one for every later block.
+	want := new(big.Int).Add(blockchain.Genesis().BlockScore(), big.NewInt(td))
 	if full {
 		if have := blockchain.GetTdByHash(blockchain.CurrentBlock().Hash()); have.Cmp(want) != 0 {
 			t.Errorf("total blockscore mismatch: have %v, want %v", have, want)

@@ -301,7 +301,6 @@ func makeChainForBench(db database.DBManager, full bool, count uint64) {
 
 		db.WriteHeader(header)
 		db.WriteCanonicalHash(hash, n)
-		db.WriteTd(hash, n, big.NewInt(int64(n+1)))
 
 		if full || n == 0 {
 			db.WriteHeadBlockHash(hash)

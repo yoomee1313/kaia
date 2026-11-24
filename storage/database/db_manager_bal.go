@@ -28,6 +28,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/rlp"
+	"github.com/kaiachain/kaia/storage/database/ancient"
 	"github.com/pkg/errors"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
@@ -46,17 +47,21 @@ func balKey(prefix []byte, number uint64, hash common.Hash) []byte {
 }
 
 // ReadBAL returns the RLP-encoded writes of the block access list of a block,
-// or nil.
+// from the key-value store or the freezer, or nil.
 func (dbm *databaseManager) ReadBAL(hash common.Hash, number uint64) []byte {
-	enc, _ := dbm.GetBALDB().Get(balKey(balPrefix, number, hash))
-	return enc
+	if enc, _ := dbm.GetBALDB().Get(balKey(balPrefix, number, hash)); len(enc) != 0 {
+		return enc
+	}
+	return dbm.readFrozenBAL(ancient.ChainFreezerBALTable, hash, number)
 }
 
 // HasBAL reports whether the writes of the block access list of a block are
 // stored.
 func (dbm *databaseManager) HasBAL(hash common.Hash, number uint64) bool {
-	ok, _ := dbm.GetBALDB().Has(balKey(balPrefix, number, hash))
-	return ok
+	if ok, _ := dbm.GetBALDB().Has(balKey(balPrefix, number, hash)); ok {
+		return true
+	}
+	return dbm.readFrozenBAL(ancient.ChainFreezerBALTable, hash, number) != nil
 }
 
 // WriteBAL stores the RLP-encoded writes of the block access list of a block.
@@ -74,8 +79,10 @@ func (dbm *databaseManager) DeleteBAL(hash common.Hash, number uint64) {
 // ReadBALReads returns the RLP-encoded reads of the block access list of a
 // block, or nil. They are kept apart from the writes and may be missing.
 func (dbm *databaseManager) ReadBALReads(hash common.Hash, number uint64) []byte {
-	enc, _ := dbm.GetBALDB().Get(balKey(balReadsPrefix, number, hash))
-	return enc
+	if enc, _ := dbm.GetBALDB().Get(balKey(balReadsPrefix, number, hash)); len(enc) != 0 {
+		return enc
+	}
+	return dbm.readFrozenBAL(ancient.ChainFreezerBALReadsTable, hash, number)
 }
 
 // WriteBALReads stores the RLP-encoded reads of the block access list of a

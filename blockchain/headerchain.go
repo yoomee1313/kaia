@@ -134,8 +134,7 @@ func (hc *HeaderChain) WriteHeader(header *types.Header) (status WriteStatus, er
 	localTd := hc.GetTd(hc.currentHeaderHash, hc.CurrentHeader().Number.Uint64())
 	externTd := new(big.Int).Add(header.BlockScore, ptd)
 
-	// Irrelevant of the canonical status, write the td and header to the database
-	hc.WriteTd(hash, number, externTd)
+	// Irrelevant of the canonical status, write the header to the database
 	hc.chainDB.WriteHeader(header)
 
 	// TODO-Klaytn-Issue264 If we are using istanbul BFT, then we always have a canonical chain.
@@ -302,12 +301,6 @@ func (hc *HeaderChain) GetTdByHash(hash common.Hash) *big.Int {
 		return nil
 	}
 	return hc.GetTd(hash, *number)
-}
-
-// WriteTd stores a block's total blockscore into the database, also caching it
-// along the way.
-func (hc *HeaderChain) WriteTd(hash common.Hash, number uint64, td *big.Int) {
-	hc.chainDB.WriteTd(hash, number, td)
 }
 
 // GetHeader retrieves a block header from the database by hash and number,

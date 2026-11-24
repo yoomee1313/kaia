@@ -74,6 +74,7 @@ var (
 			utils.OverridePermissionless,
 			utils.LivePruningFlag,
 			utils.FlatTrieFlag,
+			utils.AncientDirFlag,
 		},
 		Category: "BLOCKCHAIN COMMANDS",
 		Description: `
@@ -188,7 +189,8 @@ func initGenesis(ctx *cli.Context) error {
 			SingleDB: singleDB, NumStateTrieShards: numStateTrieShards,
 			LevelDBCacheSize: 0, PebbleDBCacheSize: 0, OpenFilesLimit: 0,
 			DynamoDBConfig: dynamoDBConfig, RocksDBConfig: rocksDBConfig,
-			UseFlatTrie: useFlatTrie,
+			UseFlatTrie:     useFlatTrie,
+			FreezerReadOnly: true, AncientDir: ctx.String(utils.AncientDirFlag.Name),
 		}
 		chainDB := stack.OpenDatabase(dbc)
 

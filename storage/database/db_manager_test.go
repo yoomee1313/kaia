@@ -307,20 +307,51 @@ func TestDBManager_Body(t *testing.T) {
 	}
 }
 
-// TestDBManager_Td tests read, write and delete operations of blockchain headers' total difficulty.
+// TestDBManager_BodyRLPFromBodyCache tests that the RLP readers encode a body
+// found in the body cache instead of reading the database.
+func TestDBManager_BodyRLPFromBodyCache(t *testing.T) {
+	dbm := NewMemoryDBManager().(*databaseManager)
+	defer dbm.Close()
+
+	header := &types.Header{Number: big.NewInt(1), BlockScore: big.NewInt(1), Time: big.NewInt(1)}
+	hash, number := header.Hash(), header.Number.Uint64()
+	dbm.WriteHeader(header)
+
+	body := &types.Body{Transactions: types.Transactions{}}
+	encodedBody, err := rlp.EncodeToBytes(body)
+	require.NoError(t, err)
+	dbm.WriteBody(hash, number, body)
+	require.Equal(t, body, dbm.ReadBody(hash, number))
+
+	// Leave the body only in the body cache.
+	dbm.cm.bodyRLPCache.Purge()
+	require.NoError(t, dbm.getDatabase(BodyDB).Delete(blockBodyKey(number, hash)))
+
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLP(hash, number))
+	dbm.cm.bodyRLPCache.Purge()
+	assert.Equal(t, rlp.RawValue(encodedBody), dbm.ReadBodyRLPByHash(hash))
+}
+
+// TestDBManager_Td checks that the total blockscore of a known header is the
+// blockscore of the genesis plus its number, and that of an unknown one nil.
 func TestDBManager_Td(t *testing.T) {
 	log.EnableLogForTest(log.LvlCrit, log.LvlTrace)
+	genesis := &types.Header{Number: big.NewInt(0), BlockScore: big.NewInt(131072)}
+	header := &types.Header{Number: new(big.Int).SetUint64(num1), BlockScore: big.NewInt(1), ParentHash: hash1}
 	for _, dbm := range dbManagers {
-		assert.Nil(t, dbm.ReadTd(hash1, num1))
+		assert.Nil(t, dbm.ReadTd(header.Hash(), num1))
 
-		dbm.WriteTd(hash1, num1, big.NewInt(12345))
-		assert.Equal(t, big.NewInt(12345), dbm.ReadTd(hash1, num1))
+		dbm.WriteHeader(genesis)
+		dbm.WriteCanonicalHash(genesis.Hash(), 0)
+		dbm.WriteHeader(header)
+		assert.Equal(t, big.NewInt(131072), dbm.ReadTd(genesis.Hash(), 0))
+		assert.Equal(t, new(big.Int).SetUint64(131072+num1), dbm.ReadTd(header.Hash(), num1))
+		assert.Nil(t, dbm.ReadTd(header.Hash(), num1+1), "at another number")
 
-		dbm.WriteTd(hash1, num1, big.NewInt(54321))
-		assert.Equal(t, big.NewInt(54321), dbm.ReadTd(hash1, num1))
-
-		dbm.DeleteTd(hash1, num1)
-		assert.Nil(t, dbm.ReadTd(hash1, num1))
+		dbm.DeleteHeader(header.Hash(), num1)
+		assert.Nil(t, dbm.ReadTd(header.Hash(), num1))
+		dbm.DeleteHeader(genesis.Hash(), 0)
+		dbm.DeleteCanonicalHash(0)
 	}
 }
 
@@ -586,6 +617,9 @@ func TestDBManager_TxLookupEntry(t *testing.T) {
 		header := &types.Header{Number: big.NewInt(int64(num1))}
 		block := types.NewBlockWithHeader(header)
 		block = block.WithBody(body.Transactions)
+		// An entry names the block by number, so the canonical block resolves it.
+		dbm.WriteBlock(block)
+		dbm.WriteCanonicalHash(block.Hash(), block.NumberU64())
 
 		dbm.WriteTxLookupEntries(block)
 

@@ -59,6 +59,23 @@ func TestCN_CheckSyncMode(t *testing.T) {
 	assert.Equal(t, errCNLightSync, checkSyncMode(c))
 }
 
+func TestCN_CheckFreezerThreshold(t *testing.T) {
+	c := &Config{FreezerThreshold: 0, TrieBlockInterval: 128}
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 255
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 256
+	assert.NoError(t, checkFreezerThreshold(c))
+
+	// With state committed every block, the floor still applies.
+	c.TrieBlockInterval, c.FreezerThreshold = 1, 127
+	assert.ErrorContains(t, checkFreezerThreshold(c), "too low")
+	c.FreezerThreshold = 128
+	assert.NoError(t, checkFreezerThreshold(c))
+
+	assert.NoError(t, checkFreezerThreshold(GetDefaultConfig()))
+}
+
 func TestCN_SetAcceptTxs(t *testing.T) {
 	{
 		mockCtrl, _, _, cn := newCN(t)

@@ -451,7 +451,6 @@ func (g *Genesis) Commit(baseStateRoot common.Hash, db database.DBManager) (*typ
 	if block.Number().Sign() != 0 {
 		return nil, fmt.Errorf("can't commit genesis block with number > 0")
 	}
-	db.WriteTd(block.Hash(), block.NumberU64(), g.BlockScore)
 	db.WriteBlock(block)
 	db.WriteReceipts(block.Hash(), block.NumberU64(), nil)
 	db.WriteCanonicalHash(block.Hash(), block.NumberU64())
