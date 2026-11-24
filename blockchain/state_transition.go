@@ -227,14 +227,6 @@ func ApplyMessage(evm *vm.EVM, msg Message) (*ExecutionResult, error) {
 	return NewStateTransition(evm, msg).TransitionDb()
 }
 
-// to returns the recipient of the message.
-func (st *StateTransition) to() common.Address {
-	if st.msg == nil || st.msg.To() == nil /* contract creation */ {
-		return common.Address{}
-	}
-	return *st.msg.To()
-}
-
 func (st *StateTransition) checkBalanceOverflow(address common.Address, balance *big.Int) error {
 	_, overflow := uint256.FromBig(balance)
 	if overflow {

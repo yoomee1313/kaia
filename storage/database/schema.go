@@ -125,7 +125,6 @@ var (
 
 	governancePrefix     = []byte("governance")
 	governanceHistoryKey = []byte("governanceIdxHistory")
-	governanceStateKey   = []byte("governanceState")
 
 	databaseDirPrefix  = []byte("databaseDirectory")
 	migrationStatusKey = []byte("migrationStatus")

@@ -128,18 +128,6 @@ func (t *throttler) adjustThreshold(ratio uint) {
 	thresholdGauge.Update(int64(newThreshold))
 }
 
-// newAllowed generates a new allowed list of throttler.
-func (t *throttler) newAllowed(allowed []common.Address) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	a := make(map[common.Address]bool, len(allowed))
-	for _, addr := range allowed {
-		a[addr] = true
-	}
-	t.allowed = a
-}
-
 // updateThrottled removes outdated addresses from the throttle list and adds new addresses to the list.
 func (t *throttler) updateThrottled(newThrottled []common.Address) {
 	var removeThrottled []common.Address

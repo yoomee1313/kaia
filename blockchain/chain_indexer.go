@@ -115,19 +115,6 @@ func NewChainIndexer(chainDB, indexDB database.DBManager, backend ChainIndexerBa
 	return c
 }
 
-// AddKnownSectionHead marks a new section head as known/processed if it is newer
-// than the already known best section head
-func (c *ChainIndexer) AddKnownSectionHead(section uint64, shead common.Hash) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	if section < c.storedSections {
-		return
-	}
-	c.setSectionHead(section, shead)
-	c.setValidSections(section + 1)
-}
-
 // Start creates a goroutine to feed chain head events into the indexer for
 // cascading background processing. Children do not need to be started, they
 // are notified about new events by their parents.

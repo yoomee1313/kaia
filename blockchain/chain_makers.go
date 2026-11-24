@@ -64,10 +64,6 @@ func (b *BlockGen) SetExtra(data []byte) {
 	b.header.Extra = data
 }
 
-func (b *BlockGen) SetVoteData(data []byte) {
-	b.header.Vote = data
-}
-
 func (b *BlockGen) SetGovData(data []byte) {
 	b.header.Governance = data
 }
@@ -229,7 +225,6 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, sealer conse
 		// TODO(karalabe): This is needed for consensus engines, which depends on multiple blocks.
 		// It's nonetheless ugly to spin up a blockchain here. Get rid of this somehow.
 		cacheConfig := &CacheConfig{
-			ArchiveMode:         false,
 			CacheSize:           512,
 			BlockInterval:       DefaultBlockInterval,
 			TriesInMemory:       DefaultTriesInMemory,
@@ -335,19 +330,3 @@ func MakeBlockChain(parent *types.Block, n int, sealer consensus.Sealer, db data
 	})
 	return blocks
 }
-
-type fakeChainReader struct {
-	config  *params.ChainConfig
-	genesis *types.Block
-}
-
-// Config returns the chain configuration.
-func (cr *fakeChainReader) Config() *params.ChainConfig {
-	return cr.config
-}
-
-func (cr *fakeChainReader) CurrentHeader() *types.Header                            { return nil }
-func (cr *fakeChainReader) GetHeaderByNumber(number uint64) *types.Header           { return nil }
-func (cr *fakeChainReader) GetHeaderByHash(hash common.Hash) *types.Header          { return nil }
-func (cr *fakeChainReader) GetHeader(hash common.Hash, number uint64) *types.Header { return nil }
-func (cr *fakeChainReader) GetBlock(hash common.Hash, number uint64) *types.Block   { return nil }

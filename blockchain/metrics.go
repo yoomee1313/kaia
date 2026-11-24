@@ -30,9 +30,6 @@ var (
 	cacheGetFutureBlockMissMeter = metrics.NewRegisteredMeter("klay/cache/get/futureblock/miss", nil)
 	cacheGetFutureBlockHitMeter  = metrics.NewRegisteredMeter("klay/cache/get/futureblock/hit", nil)
 
-	cacheGetBadBlockMissMeter = metrics.NewRegisteredMeter("klay/cache/get/badblock/miss", nil)
-	cacheGetBadBlockHitMeter  = metrics.NewRegisteredMeter("klay/cache/get/badblock/hit", nil)
-
 	trieDBNodesSizeBytesGauge = metrics.NewRegisteredGauge("klay/triedb/nodessizebytes", nil)
 	trieDBPreimagesSizeGauge  = metrics.NewRegisteredGauge("klay/triedb/preimagessizebytes", nil)
 

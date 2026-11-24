@@ -2308,7 +2308,6 @@ func makeTestTxBundleLivePruningScenario(livePruningEnabled bool) func(*testing.
 
 func cacheConfigForLivePruning() *blockchain.CacheConfig {
 	return &blockchain.CacheConfig{
-		ArchiveMode:          false,
 		CacheSize:            0,
 		BlockInterval:        1,
 		TriesInMemory:        blockchain.DefaultTriesInMemory,

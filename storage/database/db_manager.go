@@ -26,7 +26,6 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -143,10 +142,6 @@ type DBManager interface {
 	DeleteBadBlocks()
 
 	FindCommonAncestor(a, b *types.Header) *types.Header
-
-	ReadIstanbulSnapshot(hash common.Hash) ([]byte, error)
-	WriteIstanbulSnapshot(hash common.Hash, blob []byte)
-	DeleteIstanbulSnapshot(hash common.Hash)
 
 	WriteMerkleProof(key, value []byte)
 
@@ -290,15 +285,6 @@ type DBManager interface {
 	ReadBlockReceiptsInCache(blockHash common.Hash) types.Receipts
 	ReadTxReceiptInCache(txHash common.Hash) *types.Receipt
 
-	// Governance related functions
-	WriteGovernance(data map[string]interface{}, num uint64) error
-	WriteGovernanceIdx(num uint64) error
-	ReadGovernance(num uint64) (map[string]interface{}, error)
-	ReadRecentGovernanceIdx(count int) ([]uint64, error)
-	ReadGovernanceAtNumber(num uint64, epoch uint64) (uint64, map[string]interface{}, error)
-	WriteGovernanceState(b []byte)
-	ReadGovernanceState() ([]byte, error)
-	DeleteGovernance(num uint64)
 	// TODO-Kaia implement governance DB deletion methods.
 
 	// DB migration related function
@@ -1829,26 +1815,6 @@ func (dbm *databaseManager) FindCommonAncestor(a, b *types.Header) *types.Header
 	return a
 }
 
-// Istanbul Snapshot operations.
-func (dbm *databaseManager) ReadIstanbulSnapshot(hash common.Hash) ([]byte, error) {
-	db := dbm.getDatabase(MiscDB)
-	return db.Get(snapshotKey(hash))
-}
-
-func (dbm *databaseManager) WriteIstanbulSnapshot(hash common.Hash, blob []byte) {
-	db := dbm.getDatabase(MiscDB)
-	if err := db.Put(snapshotKey(hash), blob); err != nil {
-		logger.Crit("Failed to write istanbul snapshot", "err", err)
-	}
-}
-
-func (dbm *databaseManager) DeleteIstanbulSnapshot(hash common.Hash) {
-	db := dbm.getDatabase(MiscDB)
-	if err := db.Delete(snapshotKey(hash)); err != nil {
-		logger.Crit("Failed to delete snpahost", "err", err)
-	}
-}
-
 // Merkle Proof operation.
 func (dbm *databaseManager) WriteMerkleProof(key, value []byte) {
 	db := dbm.getDatabase(MiscDB)
@@ -2810,146 +2776,6 @@ func (dbm *databaseManager) ReadBlockReceiptsInCache(blockHash common.Hash) type
 
 func (dbm *databaseManager) ReadTxReceiptInCache(txHash common.Hash) *types.Receipt {
 	return dbm.cm.readTxReceiptInCache(txHash)
-}
-
-func (dbm *databaseManager) WriteGovernance(data map[string]interface{}, num uint64) error {
-	db := dbm.getDatabase(MiscDB)
-	b, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	if err := dbm.WriteGovernanceIdx(num); err != nil {
-		if err == errGovIdxAlreadyExist {
-			// Overwriting existing data is not allowed, but the attempt is not considered as a failure.
-			return nil
-		}
-		return err
-	}
-	return db.Put(makeKey(governancePrefix, num), b)
-}
-
-func (dbm *databaseManager) DeleteGovernance(num uint64) {
-	db := dbm.getDatabase(MiscDB)
-	if err := dbm.deleteLastGovernance(num); err != nil {
-		logger.Crit("Failed to delete Governance index", "err", err)
-	}
-	if err := db.Delete(makeKey(governancePrefix, num)); err != nil {
-		logger.Crit("Failed to delete Governance", "err", err)
-	}
-}
-
-func (dbm *databaseManager) WriteGovernanceIdx(num uint64) error {
-	db := dbm.getDatabase(MiscDB)
-	newSlice := make([]uint64, 0)
-
-	if data, err := db.Get(governanceHistoryKey); err == nil {
-		if err = json.Unmarshal(data, &newSlice); err != nil {
-			return err
-		}
-	}
-
-	if len(newSlice) > 0 && num <= newSlice[len(newSlice)-1] {
-		logger.Error("The same or more recent governance index exist. Skip writing governance index",
-			"newIdx", num, "govIdxes", newSlice)
-		return errGovIdxAlreadyExist
-	}
-
-	newSlice = append(newSlice, num)
-
-	data, err := json.Marshal(newSlice)
-	if err != nil {
-		return err
-	}
-	return db.Put(governanceHistoryKey, data)
-}
-
-// deleteLastGovernance deletes the last governanceIdx only if it is equal to `num`
-func (dbm *databaseManager) deleteLastGovernance(num uint64) error {
-	db := dbm.getDatabase(MiscDB)
-	idxHistory, err := dbm.ReadRecentGovernanceIdx(0)
-	if err != nil {
-		return nil // Do nothing and return nil if no recent index found
-	}
-	end := len(idxHistory)
-	if idxHistory[end-1] != num {
-		return nil // Do nothing and return nil if the target number does not match the tip number
-	}
-	data, err := json.Marshal(idxHistory[0 : end-1])
-	if err != nil {
-		return err
-	}
-	return db.Put(governanceHistoryKey, data)
-}
-
-func (dbm *databaseManager) ReadGovernance(num uint64) (map[string]interface{}, error) {
-	db := dbm.getDatabase(MiscDB)
-
-	if data, err := db.Get(makeKey(governancePrefix, num)); err != nil {
-		return nil, err
-	} else {
-		result := make(map[string]interface{})
-		if e := json.Unmarshal(data, &result); e != nil {
-			return nil, e
-		}
-		return result, nil
-	}
-}
-
-// ReadRecentGovernanceIdx returns latest `count` number of indices. If `count` is 0, it returns all indices.
-func (dbm *databaseManager) ReadRecentGovernanceIdx(count int) ([]uint64, error) {
-	db := dbm.getDatabase(MiscDB)
-
-	if history, err := db.Get(governanceHistoryKey); err != nil {
-		return nil, err
-	} else {
-		idxHistory := make([]uint64, 0)
-		if e := json.Unmarshal(history, &idxHistory); e != nil {
-			return nil, e
-		}
-
-		// Make sure idxHistory should be in ascending order
-		slices.Sort(idxHistory)
-
-		max := 0
-		leng := len(idxHistory)
-		if leng < count || count == 0 {
-			max = leng
-		} else {
-			max = count
-		}
-		if count > 0 {
-			return idxHistory[leng-max:], nil
-		}
-		return idxHistory, nil
-	}
-}
-
-// ReadGovernanceAtNumber returns the block number and governance information which to be used for the block `num`
-func (dbm *databaseManager) ReadGovernanceAtNumber(num uint64, epoch uint64) (uint64, map[string]interface{}, error) {
-	minimum := num - (num % epoch)
-	if minimum >= epoch {
-		minimum -= epoch
-	}
-	totalIdx, _ := dbm.ReadRecentGovernanceIdx(0)
-	for i := len(totalIdx) - 1; i >= 0; i-- {
-		if totalIdx[i] <= minimum {
-			result, err := dbm.ReadGovernance(totalIdx[i])
-			return totalIdx[i], result, err
-		}
-	}
-	return 0, nil, errors.New("No governance data found")
-}
-
-func (dbm *databaseManager) WriteGovernanceState(b []byte) {
-	db := dbm.getDatabase(MiscDB)
-	if err := db.Put(governanceStateKey, b); err != nil {
-		logger.Crit("Failed to write governance state", "err", err)
-	}
-}
-
-func (dbm *databaseManager) ReadGovernanceState() ([]byte, error) {
-	db := dbm.getDatabase(MiscDB)
-	return db.Get(governanceStateKey)
 }
 
 func (dbm *databaseManager) WriteChainDataFetcherCheckpoint(checkpoint uint64) {
