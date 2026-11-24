@@ -190,7 +190,6 @@ func newTestContext(numNodes int, config *params.ChainConfig, overrides *testOve
 
 	// Create blockchain
 	cacheConfig := &blockchain.CacheConfig{
-		ArchiveMode:       false,
 		CacheSize:         512,
 		BlockInterval:     blockchain.DefaultBlockInterval,
 		TriesInMemory:     blockchain.DefaultTriesInMemory,
@@ -286,7 +285,7 @@ func (ctx *testContext) MakeBlock(parent *types.Block) *types.Block {
 	if err := chain.PrepareHeader(header); err != nil {
 		panic(err)
 	}
-	state, _ := chain.StateAt(parent.Root())
+	state, _ := chain.StateAt(parent.Header())
 	block, _ := chain.Processor().FinalizeState(header, state, nil, nil)
 	return block
 }

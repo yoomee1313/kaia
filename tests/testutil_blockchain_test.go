@@ -288,7 +288,6 @@ func (ctx *blockchainTestContext) Stop() error {
 		return err
 	}
 
-	blockchain.ClearMigrationPrerequisites()
 	return nil
 }
 

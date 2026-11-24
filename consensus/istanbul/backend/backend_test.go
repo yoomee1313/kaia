@@ -359,7 +359,7 @@ func buildBlockWithTx(t *testing.T, chain *blockchain.BlockChain, engine *backen
 	if err := chain.PrepareHeader(header); err != nil {
 		t.Fatal(err)
 	}
-	state, err := chain.StateAt(parent.Root())
+	state, err := chain.StateAt(parent.Header())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +622,7 @@ func sealProposalWithForeignAuthor(t *testing.T, chain *blockchain.BlockChain, a
 		header.MixHash[i] = prevMixHash[i] ^ revealHash[i]
 	}
 
-	state, err := chain.StateAt(parent.Root())
+	state, err := chain.StateAt(parent.Header())
 	require.NoError(t, err)
 	block, err := chain.Processor().FinalizeState(header, state, nil, nil)
 	require.NoError(t, err)

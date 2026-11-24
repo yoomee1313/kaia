@@ -34,7 +34,7 @@ import (
 // #region getter
 
 // getNodes returns the transitioned node map for producing block `num`.
-// Resolves parent state from chain (StateAt(parent.Root)). Use this for
+// Resolves parent state from chain (StateAt(parent)). Use this for
 // post-commit reads (RPC, peer set queries).
 func (v *ValsetModule) getNodes(num uint64) (valset.NodeMap, error) {
 	if !v.Chain.Config().IsPermissionlessForkEnabled(new(big.Int).SetUint64(num)) {
@@ -49,7 +49,7 @@ func (v *ValsetModule) getNodes(num uint64) (valset.NodeMap, error) {
 		if genesisHeader == nil {
 			return nil, errParentHeaderNotFound(num)
 		}
-		statedb, err := v.Chain.StateAt(genesisHeader.Root)
+		statedb, err := v.Chain.StateAt(genesisHeader)
 		if err != nil {
 			return nil, fmt.Errorf("StateAt(%d) failed: %w", num, err)
 		}
@@ -64,7 +64,7 @@ func (v *ValsetModule) getNodes(num uint64) (valset.NodeMap, error) {
 	if parentHeader == nil {
 		return nil, errParentHeaderNotFound(num)
 	}
-	parentStatedb, err := v.Chain.StateAt(parentHeader.Root)
+	parentStatedb, err := v.Chain.StateAt(parentHeader)
 	if err != nil {
 		return nil, fmt.Errorf("StateAt(%d) failed: %w", num-1, err)
 	}
@@ -103,7 +103,7 @@ func (v *ValsetModule) getTransitionResult(num uint64, parentStatedb *state.Stat
 //
 //	= ABv2(N) + Block(N) + Gov(N+1) + isVrankEpoch(N+1) + GetCFS(N) + GetPFS(N) + GetPfReport(N)
 //
-// Caller must ensure statedb == StateAt(header.Root).
+// Caller must ensure statedb == StateAt(header).
 func (v *ValsetModule) applyTransition(header *types.Header, statedb *state.StateDB) (*TransitionResult, error) {
 	// ABv2 read from state(header.Root), i.e. ABv2(N).
 	abv2result, err := system.ReadABv2Snapshot(statedb, v.Chain, header)
@@ -340,7 +340,7 @@ func (v *ValsetModule) verifyVRankEpochAtHead() error {
 	if head == nil || !v.Chain.Config().IsPermissionlessForkEnabled(head.Number()) {
 		return nil
 	}
-	statedb, err := v.Chain.StateAt(head.Root())
+	statedb, err := v.Chain.StateAt(head.Header())
 	if err != nil {
 		return fmt.Errorf("StateAt(head) failed: %w", err)
 	}

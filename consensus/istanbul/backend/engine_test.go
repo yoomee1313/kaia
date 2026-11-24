@@ -498,7 +498,7 @@ func makeBlockWithoutSealAndModifiedHeader(chain *blockchain.BlockChain, engine 
 	if modifyHeader != nil {
 		modifyHeader(header)
 	}
-	state, _ := chain.StateAt(parent.Root())
+	state, _ := chain.StateAt(parent.Header())
 	block, _ := chain.Processor().FinalizeState(header, state, nil, nil)
 	return block
 }

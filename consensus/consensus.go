@@ -78,8 +78,8 @@ type ChainReader interface {
 	// State retrieves statedb
 	State() (*state.StateDB, error)
 
-	// StateAt retrieves statedb on a particular point in time
-	StateAt(root common.Hash) (*state.StateDB, error)
+	// StateAt retrieves the statedb of the block of header, to read it
+	StateAt(header *types.Header) (*state.StateDB, error)
 }
 
 // ChainContext extends ChainReader with transaction execution capability.

@@ -32,6 +32,7 @@ import (
 	"github.com/kaiachain/kaia/cmd/utils/nodecmd"
 	"github.com/kaiachain/kaia/console"
 	"github.com/kaiachain/kaia/log"
+	"github.com/kaiachain/kaia/storage/database"
 	"github.com/urfave/cli/v2"
 )
 
@@ -83,7 +84,12 @@ func init() {
 
 	app.CommandNotFound = nodecmd.CommandNotExist
 	app.OnUsageError = nodecmd.OnUsageError
-	app.Before = nodecmd.BeforeRunNode
+	app.Before = func(ctx *cli.Context) error {
+		if err := nodecmd.BeforeRunNode(ctx); err != nil {
+			return err
+		}
+		return checkGCMode(ctx.String(utils.GCModeFlag.Name))
+	}
 	app.After = func(ctx *cli.Context) error {
 		debug.Exit()
 		console.Stdin.Close() // Resets terminal mode.
@@ -91,9 +97,23 @@ func init() {
 	}
 }
 
+// defaultGCMode is the garbage collection mode of a consensus node unless
+// set.
+const defaultGCMode = string(database.HistoryModeBAL)
+
+// checkGCMode accepts the garbage collection modes a consensus node runs in.
+func checkGCMode(mode string) error {
+	switch mode {
+	case "", string(database.HistoryModeBAL):
+		return nil
+	}
+	return fmt.Errorf("a consensus node runs with --%s history, not %s", utils.GCModeFlag.Name, mode)
+}
+
 func main() {
 	// Set NodeTypeFlag to cn
 	utils.NodeTypeFlag.Value = "cn"
+	utils.GCModeFlag.Value = defaultGCMode
 
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, err)

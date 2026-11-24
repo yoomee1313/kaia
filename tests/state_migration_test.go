@@ -224,7 +224,7 @@ func startMigration(t *testing.T, node *cn.CN) {
 	waitMigrationEnds(t, node)
 
 	t.Log("=========== migrate trie ==============")
-	err := node.BlockChain().PrepareStateMigration()
+	err := node.BlockChain().States().PrepareMigration()
 	assert.NoError(t, err)
 }
 

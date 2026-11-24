@@ -90,7 +90,7 @@ func (s *StakingModule) getFromStateByNumber(num uint64) (*staking.StakingInfo, 
 	}
 
 	// Otherwise bring up the state from the database.
-	statedb, err := s.Chain.StateAt(header.Root)
+	statedb, err := s.Chain.StateAt(header)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get state for block number %d: %w", num, err)
 	}

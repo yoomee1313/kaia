@@ -71,7 +71,7 @@ func TestRewardbaseAfterRestartWithoutHeadState(t *testing.T) {
 	bc = ctx.nodes[0].cn.BlockChain().(*blockchain.BlockChain)
 	rewound := bc.CurrentBlock()
 	require.Less(t, rewound.NumberU64(), head.NumberU64(), "NewBlockChain rewinds the head to the newest block with state")
-	_, err = bc.StateAt(rewound.Root())
+	_, err = bc.StateAt(rewound.Header())
 	require.NoError(t, err, "the rewound head has a readable state")
 
 	// The node resumes on the rewound head; PrepareHeader resolves the registered address from that state.

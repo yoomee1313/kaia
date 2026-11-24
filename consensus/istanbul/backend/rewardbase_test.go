@@ -116,7 +116,7 @@ func testProposerRewardbaseIsFinalBeforeExecution(t *testing.T, permissionless b
 		"PrepareHeader must decide the registered reward address before any transaction is executed")
 
 	// 2. Execute one fee-paying transfer against the prepared header (work/worker.go commitTransaction).
-	state, err := chain.StateAt(parent.Root())
+	state, err := chain.StateAt(parent.Header())
 	require.NoError(t, err)
 	require.NoError(t, chain.Processor().InitializeState(header, state))
 
@@ -158,7 +158,7 @@ func testProposerRewardbaseIsFinalBeforeExecution(t *testing.T, permissionless b
 	require.Equal(t, sealed.Hash(), chain.CurrentBlock().Hash())
 
 	// 5. The fee credit went to the sealed reward address and nowhere else.
-	imported, err := chain.StateAt(chain.CurrentBlock().Root())
+	imported, err := chain.StateAt(chain.CurrentBlock().Header())
 	require.NoError(t, err)
 	require.Zero(t, credited.Cmp(imported.GetBalance(registered)), "the registered reward address receives the non-deferred fee credit (whole fee before Permissionless, fee - fee/2 since)")
 	assert.Zero(t, imported.GetBalance(configured).Sign(), "the configured --rewardbase receives nothing")

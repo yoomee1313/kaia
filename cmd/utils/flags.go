@@ -180,7 +180,7 @@ var (
 	}
 	GCModeFlag = &cli.StringFlag{
 		Name:     "gcmode",
-		Usage:    `Blockchain garbage collection mode ("full", "archive")`,
+		Usage:    `Blockchain garbage collection mode ("full", "archive" or "history"). A history node records the block access lists of its blocks, serves past states from them and starts from genesis by applying them up to the last block of the BAL hash chain. On a new database it keeps its state with live pruning, so --state.live-pruning is ignored. A node may switch modes on the same database: lists missing for the blocks it ran without are regenerated with db regen`,
 		Value:    "full",
 		Aliases:  []string{"common.garbage-collection-mode"},
 		EnvVars:  []string{"KLAYTN_GCMODE", "KAIA_GCMODE"},
@@ -537,6 +537,12 @@ var (
 		Value:    true,
 		Aliases:  []string{"snapshot-database.async-gen"},
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
+		Category: "MISC",
+	}
+	BALSkipReadsFlag = &cli.BoolFlag{
+		Name:     "bal.skip-reads",
+		Usage:    "Stores only the writes of the block access lists, without their reads, which a BAL regeneration in reads mode can rebuild",
+		EnvVars:  []string{"KAIA_BAL_SKIP_READS"},
 		Category: "MISC",
 	}
 	TrieMemoryCacheSizeFlag = &cli.IntFlag{

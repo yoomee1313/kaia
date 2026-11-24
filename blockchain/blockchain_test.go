@@ -36,11 +36,14 @@ import (
 	"testing"
 	"time"
 
+	"sync/atomic"
+
 	"github.com/alicebob/miniredis/v2"
 	"github.com/holiman/uint256"
 	"github.com/kaiachain/kaia/accounts/abi"
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
+	"github.com/kaiachain/kaia/blockchain/types/accountkey"
 	"github.com/kaiachain/kaia/blockchain/vm"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/compiler"
@@ -48,8 +51,10 @@ import (
 	"github.com/kaiachain/kaia/consensus/faker"
 	"github.com/kaiachain/kaia/consensus/istanbul"
 	"github.com/kaiachain/kaia/crypto"
+	"github.com/kaiachain/kaia/kaiax"
 	"github.com/kaiachain/kaia/log"
 	"github.com/kaiachain/kaia/params"
+	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/database"
 	"github.com/kaiachain/kaia/storage/statedb"
 	"github.com/stretchr/testify/assert"
@@ -294,13 +299,6 @@ func testFork(t *testing.T, blockchain *BlockChain, i, n int, full bool, compara
 	comparator(tdPre, tdPost)
 }
 
-func printChain(bc *BlockChain) {
-	for i := bc.CurrentBlock().Number().Uint64(); i > 0; i-- {
-		b := bc.GetBlockByNumber(uint64(i))
-		fmt.Printf("\t%x %v\n", b.Hash(), b.BlockScore())
-	}
-}
-
 // testBlockChainImport tries to process a chain of blocks, writing them into
 // the database if successful.
 func testBlockChainImport(chain types.Blocks, blockchain *BlockChain) error {
@@ -317,7 +315,7 @@ func testBlockChainImport(chain types.Blocks, blockchain *BlockChain) error {
 			}
 			return err
 		}
-		statedb, err := state.New(blockchain.GetBlockByHash(block.ParentHash()).Root(), blockchain.stateCache, nil, nil)
+		statedb, err := state.New(blockchain.GetBlockByHash(block.ParentHash()).Root(), blockchain.StateCache(), nil, nil)
 		if err != nil {
 			return err
 		}
@@ -354,15 +352,6 @@ func testHeaderChainImport(chain []*types.Header, blockchain *BlockChain) error 
 		blockchain.mu.Unlock()
 	}
 	return nil
-}
-
-func insertChain(done chan bool, blockchain *BlockChain, chain types.Blocks, t *testing.T) {
-	_, err := blockchain.InsertChain(chain)
-	if err != nil {
-		fmt.Println(err)
-		t.FailNow()
-	}
-	done <- true
 }
 
 func TestLastBlock(t *testing.T) {
@@ -1492,10 +1481,10 @@ func TestTrieForkGC(t *testing.T) {
 	}
 	// Dereference all the recent tries and ensure no past trie is left in
 	for i := range DefaultTriesInMemory {
-		chain.stateCache.TrieDB().Dereference(blocks[len(blocks)-1-i].Root())
-		chain.stateCache.TrieDB().Dereference(forks[len(blocks)-1-i].Root())
+		chain.StateCache().TrieDB().Dereference(blocks[len(blocks)-1-i].Root())
+		chain.StateCache().TrieDB().Dereference(forks[len(blocks)-1-i].Root())
 	}
-	if len(chain.stateCache.TrieDB().Nodes()) > 0 {
+	if len(chain.StateCache().TrieDB().Nodes()) > 0 {
 		t.Fatalf("stale tries still alive after garbase collection")
 	}
 }
@@ -1526,7 +1515,6 @@ func TestStatePruning(t *testing.T) {
 
 	db.WritePruningEnabled()
 	cacheConfig := &CacheConfig{
-		ArchiveMode:          false,
 		CacheSize:            512,
 		BlockInterval:        2, // Write frequently to test pruning
 		TriesInMemory:        DefaultTriesInMemory,
@@ -1557,19 +1545,19 @@ func TestStatePruning(t *testing.T) {
 	blockchain, _ = NewBlockChain(db, cacheConfig, gspec.Config, sealer, vm.Config{})
 
 	// Genesis block always survives
-	state, err := blockchain.StateAt(genesis.Root())
+	state, err := blockchain.StateAt(genesis.Header())
 	assert.Nil(t, err)
 	assert.NotZero(t, state.GetBalance(addr1).Uint64())
 
 	// Pruned blocks should be inaccessible.
 	for num := uint64(1); num <= pruneNum; num++ {
-		_, err := blockchain.StateAt(blockchain.GetBlockByNumber(num).Root())
+		_, err := blockchain.StateAt(blockchain.GetBlockByNumber(num).Header())
 		assert.IsType(t, &statedb.MissingNodeError{}, err, num)
 	}
 
 	// Recent unpruned blocks should be accessible.
 	for num := pruneNum + 1; num < uint64(numBlocks); num++ {
-		state, err := blockchain.StateAt(blockchain.GetBlockByNumber(num).Root())
+		state, err := blockchain.StateAt(blockchain.GetBlockByNumber(num).Header())
 		require.Nil(t, err, num)
 		assert.NotZero(t, state.GetBalance(addr1).Uint64())
 		assert.NotZero(t, state.GetBalance(addr2).Uint64())
@@ -1607,7 +1595,7 @@ func TestLargeReorgTrieGC(t *testing.T) {
 		t.Fatalf("failed to insert shared chain: %v", err)
 	}
 	// Ensure that the state associated with the forking point is pruned away
-	if node, _ := chain.stateCache.TrieDB().Node(shared[len(shared)-1].Root()); node != nil {
+	if node, _ := chain.StateCache().TrieDB().Node(shared[len(shared)-1].Root()); node != nil {
 		t.Fatalf("common-but-old ancestor still cache")
 	}
 	// Import the competitor chain without exceeding the canonical's TD and ensure
@@ -1616,7 +1604,7 @@ func TestLargeReorgTrieGC(t *testing.T) {
 		t.Fatalf("failed to insert competitor chain: %v", err)
 	}
 	for i, block := range competitor[:len(competitor)-2] {
-		if node, _ := chain.stateCache.TrieDB().Node(block.Root()); node != nil {
+		if node, _ := chain.StateCache().TrieDB().Node(block.Root()); node != nil {
 			t.Fatalf("competitor %d: low TD chain became processed", i)
 		}
 	}
@@ -1626,7 +1614,7 @@ func TestLargeReorgTrieGC(t *testing.T) {
 		t.Fatalf("failed to finalize competitor chain: %v", err)
 	}
 	for i, block := range competitor[:len(competitor)-DefaultTriesInMemory] {
-		if node, _ := chain.stateCache.TrieDB().Node(block.Root()); node != nil {
+		if node, _ := chain.StateCache().TrieDB().Node(block.Root()); node != nil {
 			t.Fatalf("competitor %d: competing chain state missing", i)
 		}
 	}
@@ -2184,18 +2172,21 @@ func TestBlockChain_writeBlockLogsToRemoteCache_WithMiniRedis(t *testing.T) {
 	receipts, _, encodedBlockLogs := getTestLogs(t)
 	key := []byte{1, 2, 3, 4}
 
-	blockchain := &BlockChain{
-		stateCache: state.NewDatabaseWithNewCache(database.NewMemoryDBManager(), &statedb.TrieNodeCacheConfig{
-			CacheType:          statedb.CacheTypeHybrid,
-			LocalCacheSizeMiB:  100,
-			RedisEndpoints:     []string{mr.Addr()},
-			RedisClusterEnable: false,
-		}),
+	memDB := database.NewMemoryDBManager()
+	states, err := state.NewManager(state.NewDatabaseWithNewCache(memDB, &statedb.TrieNodeCacheConfig{
+		CacheType:          statedb.CacheTypeHybrid,
+		LocalCacheSizeMiB:  100,
+		RedisEndpoints:     []string{mr.Addr()},
+		RedisClusterEnable: false,
+	}), memDB, state.ManagerConfig{})
+	if err != nil {
+		t.Fatal(err)
 	}
+	blockchain := &BlockChain{states: states}
 
 	blockchain.writeBlockLogsToRemoteCache(key, receipts)
 
-	ret := blockchain.stateCache.TrieDB().TrieNodeCache().Get(key)
+	ret := blockchain.StateCache().TrieDB().TrieNodeCache().Get(key)
 	if ret == nil {
 		t.Fatal("no cache")
 	}
@@ -2409,7 +2400,7 @@ func TestTransientStorageReset(t *testing.T) {
 		t.Fatalf("failed to insert into chain: %v", err)
 	}
 	// Check the storage
-	state, err := chain.StateAt(chain.CurrentHeader().Root)
+	state, err := chain.StateAt(chain.CurrentHeader())
 	if err != nil {
 		t.Fatalf("Failed to load state %v", err)
 	}
@@ -2791,5 +2782,595 @@ func TestBlobTx(t *testing.T) {
 	}
 	if actualTotalCost.Cmp(expectedTotalCost) != 0 {
 		t.Fatalf("total cost not properly charged: total cost %v != expected total cost %v", actualTotalCost, expectedTotalCost)
+	}
+}
+
+// TestBlockAccessList checks the lists recorded for real txs: on prague the
+// kinds of change of each tx type, and on shanghai, before EIP-6780, a
+// contract destroyed with SELFDESTRUCT and recreated at the same address with
+// CREATE2.
+func TestBlockAccessList(t *testing.T) {
+	t.Run("prague", testBlockAccessList)
+	t.Run("shanghai self-destruct", testBlockAccessListSelfDestruct)
+}
+
+func testBlockAccessList(t *testing.T) {
+	env := NewEnv(t, "prague", 8)
+	var (
+		addrs     = env.Addrs
+		newEOA    = common.HexToAddress("0x00000000000000000000000000000000000e0a01")
+		contract  = crypto.CreateAddress(addrs[0], 1) // second tx of addrs[0]
+		ephemeral = crypto.CreateAddress2(FactoryAddr, [32]byte{}, crypto.Keccak256([]byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
+
+		roleKeys     = []*ecdsa.PrivateKey{MustKey(t), MustKey(t), MustKey(t)}
+		multisigKeys = []*ecdsa.PrivateKey{MustKey(t), MustKey(t), MustKey(t)}
+	)
+	roleBased := accountkey.NewAccountKeyRoleBasedWithValues(accountkey.AccountKeyRoleBased{
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[0].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[1].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[2].PublicKey),
+	})
+	multisig := accountkey.NewAccountKeyWeightedMultiSigWithValues(2, accountkey.WeightedPublicKeys{
+		accountkey.NewWeightedPublicKey(1, (*accountkey.PublicKeySerializable)(&multisigKeys[0].PublicKey)),
+		accountkey.NewWeightedPublicKey(1, (*accountkey.PublicKeySerializable)(&multisigKeys[1].PublicKey)),
+		accountkey.NewWeightedPublicKey(1, (*accountkey.PublicKeySerializable)(&multisigKeys[2].PublicKey)),
+	})
+
+	chain, blocks := env.Generate(4, func(i int, b *BlockGen) {
+		b.SetRewardbase(common.Address{0xbe, byte(i)})
+		switch i {
+		case 0:
+			// Value transfer creating a new EOA, contract creation, fee delegation.
+			b.AddTx(env.LegacyTx(b, 0, &newEOA, big.NewInt(params.KAIA), nil))
+			b.AddTx(env.LegacyTx(b, 0, nil, common.Big0, InitCode(StoreCode())))
+			b.AddTx(env.KaiaTx(types.TxTypeFeeDelegatedValueTransfer, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:    b.TxNonce(addrs[1]),
+				types.TxValueKeyFrom:     addrs[1],
+				types.TxValueKeyTo:       addrs[2],
+				types.TxValueKeyAmount:   big.NewInt(7),
+				types.TxValueKeyFeePayer: addrs[3],
+			}, env.Keys[1:2], env.Keys[3:4]))
+		case 1:
+			// Storage update, delete and no-op write.
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(1, 0)))
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(2, 0x22)))
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(3, 0x33)))
+			// Key updates.
+			b.AddTx(env.KaiaTx(types.TxTypeAccountUpdate, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:      b.TxNonce(addrs[4]),
+				types.TxValueKeyFrom:       addrs[4],
+				types.TxValueKeyAccountKey: roleBased,
+			}, env.Keys[4:5], nil))
+			b.AddTx(env.KaiaTx(types.TxTypeFeeDelegatedAccountUpdate, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:      b.TxNonce(addrs[5]),
+				types.TxValueKeyFrom:       addrs[5],
+				types.TxValueKeyAccountKey: multisig,
+				types.TxValueKeyFeePayer:   addrs[3],
+			}, env.Keys[5:6], env.Keys[3:4]))
+			// EIP-7702 delegation that writes the storage of the EOA.
+			b.AddTx(env.SetCodeTx(b, 6, StoreAddr, SlotData(5, 0x55)))
+			// EIP-6780: created and self-destructed in the same tx.
+			b.AddTx(env.LegacyTx(b, 7, &FactoryAddr, common.Big0, []byte{byte(vm.CALLER), byte(vm.SELFDESTRUCT)}))
+		case 2:
+			// Reward-only empty block.
+		case 3:
+			// Txs signed with the updated keys, and removal of the delegation.
+			b.AddTx(env.KaiaTx(types.TxTypeValueTransfer, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:  b.TxNonce(addrs[4]),
+				types.TxValueKeyFrom:   addrs[4],
+				types.TxValueKeyTo:     newEOA,
+				types.TxValueKeyAmount: big.NewInt(11),
+			}, roleKeys[:1], nil))
+			b.AddTx(env.KaiaTx(types.TxTypeValueTransfer, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:  b.TxNonce(addrs[5]),
+				types.TxValueKeyFrom:   addrs[5],
+				types.TxValueKeyTo:     newEOA,
+				types.TxValueKeyAmount: big.NewInt(13),
+			}, multisigKeys[:2], nil))
+			b.AddTx(env.SetCodeTx(b, 6, common.Address{}, nil))
+		}
+	})
+	lists := CheckBAL(t, chain, blocks)
+
+	// Changes of InitializeState have index 0 and do not leak into tx 1.
+	a := FindAccess(t, lists[0], addrs[0])
+	require.Equal(t, []uint32{0, 1, 2}, BalanceIndices(a))
+	require.Equal(t, uint32(0), FindAccess(t, lists[0], SystemAddr).StorageChanges[0].Changes[0].BlockAccessIndex)
+
+	// A new EOA and a new contract carry the whole account.
+	require.Len(t, FindAccess(t, lists[0], newEOA).AccountRecords, 1)
+	c := FindAccess(t, lists[0], contract)
+	require.Len(t, c.AccountRecords, 1)
+	require.Len(t, c.CodeChanges, 1)
+	require.Len(t, c.StorageChanges, 2)
+
+	// Slot 1 cleared, slot 2 unchanged (read only), slot 3 set.
+	c = FindAccess(t, lists[1], contract)
+	require.Empty(t, c.AccountRecords)
+	require.Len(t, c.StorageChanges, 2)
+	require.Equal(t, common.Hash{}, c.StorageChanges[0].Changes[0].NewValue)
+	require.Equal(t, []common.Hash{common.BigToHash(common.Big2)}, c.StorageReads)
+
+	// Key updates store the whole account, fee payer balances are recorded.
+	require.Equal(t, uint32(4), FindAccess(t, lists[1], addrs[4]).AccountRecords[0].BlockAccessIndex)
+	require.Equal(t, uint32(5), FindAccess(t, lists[1], addrs[5]).AccountRecords[0].BlockAccessIndex)
+	require.Equal(t, []uint32{3}, BalanceIndices(FindAccess(t, lists[0], addrs[3])))
+	require.Equal(t, []uint32{5}, BalanceIndices(FindAccess(t, lists[1], addrs[3])))
+
+	// Delegation changes code and code info, and writes EOA storage.
+	d := FindAccess(t, lists[1], addrs[6])
+	require.Len(t, d.CodeChanges, 1)
+	require.Len(t, d.AccountRecords, 1)
+	require.Len(t, d.StorageChanges, 1)
+	d = FindAccess(t, lists[3], addrs[6])
+	require.Empty(t, d.CodeChanges[0].NewCode)
+	require.Len(t, d.AccountRecords, 1)
+
+	// An account created and destroyed in the same tx is only accessed.
+	require.False(t, FindAccess(t, lists[1], ephemeral).Changed())
+
+	// Reward-only block: the reward is in FinalizeState, index len(txs)+1 = 1.
+	r := FindAccess(t, lists[2], common.Address{0xbe, 2})
+	require.Equal(t, []uint32{1}, BalanceIndices(r))
+}
+
+func testBlockAccessListSelfDestruct(t *testing.T) {
+	env := NewEnv(t, "shanghai", 2)
+	initCode := InitCode(DestructibleCode())
+	child := crypto.CreateAddress2(FactoryAddr, [32]byte{}, crypto.Keccak256(initCode))
+
+	chain, blocks := env.Generate(4, func(i int, b *BlockGen) {
+		b.SetRewardbase(common.Address{0xbe, byte(i)})
+		switch i {
+		case 0:
+			b.AddTx(env.LegacyTx(b, 1, &FactoryAddr, common.Big0, initCode))
+			b.AddTx(env.LegacyTx(b, 1, &child, common.Big0, SlotData(3, 0x33)))
+		case 1:
+			// Destroy, recreate with fresh storage, write again.
+			b.AddTx(env.LegacyTx(b, 1, &child, common.Big0, nil))
+			b.AddTx(env.LegacyTx(b, 1, &FactoryAddr, common.Big0, initCode))
+			b.AddTx(env.LegacyTx(b, 1, &child, common.Big0, SlotData(4, 0x44)))
+		case 2:
+			// Destroy and leave it deleted.
+			b.AddTx(env.LegacyTx(b, 1, &child, common.Big0, nil))
+		}
+	})
+	lists := CheckBAL(t, chain, blocks)
+
+	c := FindAccess(t, lists[1], child)
+	require.Equal(t, []uint32{1}, c.Deleted)
+	// The deletion already drops the storage; the recreation records no clear.
+	require.Empty(t, c.StorageCleared)
+	require.Equal(t, uint32(2), c.AccountRecords[0].BlockAccessIndex)
+
+	c = FindAccess(t, lists[2], child)
+	require.Equal(t, []uint32{1}, c.Deleted)
+	require.False(t, func() bool { _, ok := c.LastWriteIndex(); return ok }())
+
+	state, err := chain.StateAt(blocks[2].Header())
+	require.NoError(t, err)
+	require.False(t, state.Exist(child))
+}
+
+// TestBALRecorder records the lists while blocks are inserted and reads them
+// back: the writes, and the reads unless the history skips them.
+func TestBALRecorder(t *testing.T) {
+	t.Run("reads", func(t *testing.T) { testBALRecorder(t, false) })
+	t.Run("skip reads", func(t *testing.T) { testBALRecorder(t, true) })
+}
+
+func testBALRecorder(t *testing.T, skipReads bool) {
+	env := NewEnv(t, "prague", 2)
+	cacheConfig := &CacheConfig{
+		CacheSize:           512,
+		BlockInterval:       DefaultBlockInterval,
+		TriesInMemory:       DefaultTriesInMemory,
+		TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
+	}
+	if skipReads {
+		cacheConfig.BAL = state.BALConfig{SkipReads: true}
+	}
+	chain, blocks := env.GenerateWithCache(cacheConfig, 5, func(i int, b *BlockGen) {
+		if i%2 == 0 {
+			b.AddTx(env.LegacyTx(b, 1, &env.Addrs[0], big.NewInt(params.KAIA), nil))
+			b.AddTx(env.LegacyTx(b, 1, nil, common.Big0, InitCode(StoreCode())))
+		}
+		b.AddTx(env.LegacyTx(b, 0, &StoreAddr, common.Big0, SlotData(1, byte(i+1))))
+	})
+	chain.Stop()
+
+	first, next := env.DB.ReadBALRange()
+	require.Equal(t, [2]uint64{1, uint64(len(blocks) + 1)}, [2]uint64{first, next})
+	lists := CheckBAL(t, chain, blocks)
+	for i, block := range blocks {
+		n := block.NumberU64()
+		enc, err := env.DB.ReadCanonicalBAL(n)
+		require.NoError(t, err)
+
+		// The writes are stored as they are hashed.
+		hash, err := lists[i].Hash()
+		require.NoError(t, err)
+		require.Equal(t, hash, crypto.Keccak256Hash(enc), "block %d", n)
+		writes, err := env.DB.ReadCanonicalBALList(n)
+		require.NoError(t, err)
+		RequireSameList(t, lists[i].Writes(), writes)
+		readsEnc := env.DB.ReadBALReads(block.Hash(), n)
+		if skipReads {
+			require.Nil(t, readsEnc, "block %d", n)
+			continue
+		}
+
+		// With the reads they give back the recorded list.
+		reads, err := types.DecodeBALReads(readsEnc)
+		require.NoError(t, err)
+		full, err := types.CombineBAL(writes, reads)
+		require.NoError(t, err)
+		RequireSameList(t, lists[i], full)
+	}
+}
+
+// balHistoryChain is a history chain whose blocks make every kind of change.
+type balHistoryChain struct {
+	env    *Env
+	chain  *BlockChain
+	blocks []*types.Block
+}
+
+func newBALHistoryChain(t *testing.T, hardfork string) *balHistoryChain {
+	env := NewEnv(t, hardfork, 6)
+	addrs := env.Addrs
+	var (
+		newEOA   = common.HexToAddress("0x00000000000000000000000000000000000e0a02")
+		contract = crypto.CreateAddress(addrs[0], 0)
+		initCode = InitCode(DestructibleCode())
+		child    = crypto.CreateAddress2(FactoryAddr, [32]byte{}, crypto.Keccak256(initCode))
+		roleKeys = []*ecdsa.PrivateKey{MustKey(t), MustKey(t), MustKey(t)}
+	)
+	roleBased := accountkey.NewAccountKeyRoleBasedWithValues(accountkey.AccountKeyRoleBased{
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[0].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[1].PublicKey),
+		accountkey.NewAccountKeyPublicWithValue(&roleKeys[2].PublicKey),
+	})
+
+	chain, blocks := env.GenerateWithCache(HistoryCacheConfig(), 9, func(i int, b *BlockGen) {
+		b.SetRewardbase(common.Address{0xbe, byte(i % 3)})
+		switch i {
+		case 0:
+			b.AddTx(env.LegacyTx(b, 0, nil, common.Big0, InitCode(StoreCode())))
+			b.AddTx(env.LegacyTx(b, 1, &newEOA, big.NewInt(params.KAIA), nil))
+		case 1:
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(1, 0)))
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(5, 0x55)))
+			b.AddTx(env.LegacyTx(b, 2, &FactoryAddr, common.Big0, initCode))
+		case 2:
+			b.AddTx(env.KaiaTx(types.TxTypeAccountUpdate, map[types.TxValueKeyType]interface{}{
+				types.TxValueKeyNonce:      b.TxNonce(addrs[3]),
+				types.TxValueKeyFrom:       addrs[3],
+				types.TxValueKeyAccountKey: roleBased,
+			}, env.Keys[3:4], nil))
+			b.AddTx(env.LegacyTx(b, 2, &child, common.Big0, SlotData(3, 0x33)))
+		case 3:
+			// Destroy, recreate with fresh storage, write again.
+			b.AddTx(env.LegacyTx(b, 2, &child, common.Big0, nil))
+			b.AddTx(env.LegacyTx(b, 2, &FactoryAddr, common.Big0, initCode))
+			b.AddTx(env.LegacyTx(b, 2, &child, common.Big0, SlotData(4, 0x44)))
+		case 4:
+			if hardfork == "prague" {
+				b.AddTx(env.SetCodeTx(b, 4, StoreAddr, nil))
+			}
+		case 5:
+			// Destroy and leave it deleted.
+			b.AddTx(env.LegacyTx(b, 2, &child, common.Big0, nil))
+			if hardfork == "prague" {
+				b.AddTx(env.LegacyTx(b, 4, &addrs[4], common.Big0, SlotData(7, 0x77)))
+			}
+		case 7:
+			// Recreate in a later block.
+			b.AddTx(env.LegacyTx(b, 2, &FactoryAddr, common.Big0, initCode))
+			b.AddTx(env.LegacyTx(b, 0, &contract, common.Big0, SlotData(5, 0)))
+		}
+		b.AddTx(env.LegacyTx(b, 5, &addrs[1], big.NewInt(int64(i+1)), nil))
+	})
+	CheckBAL(t, chain, blocks)
+	return &balHistoryChain{env: env, chain: chain, blocks: blocks}
+}
+
+// TestBALStateAt checks how a history node opens states: from the trie while
+// it is stored, and from the BAL history once it is gone, where the next block
+// executes as on the trie. Only a state opened to read falls back, one opened
+// to execute records its list, and after a rewind a state opened before fails
+// on the rebuilt index.
+func TestBALStateAt(t *testing.T) {
+	c := newBALHistoryChain(t, "prague")
+	env, chain, blocks := c.env, c.chain, c.blocks
+	WaitBALIndex(t, chain, uint64(len(blocks)+1))
+	headers := []*types.Header{env.Genesis.Header()}
+	for _, block := range blocks {
+		headers = append(headers, block.Header())
+	}
+
+	onTrie, err := chain.StateAt(headers[4])
+	require.NoError(t, err)
+	require.Nil(t, onTrie.Reader(), "a stored trie is read from the trie")
+	require.Same(t, chain.StateCache(), onTrie.Database())
+
+	// Without the trie of block 4, StateAt reads it from the BAL history, and
+	// block 5 executes on it as on the trie.
+	env.DB.DeleteTrieNode(headers[4].Root.ExtendZero())
+	_, err = state.New(headers[4].Root, state.NewDatabase(env.DB), nil, nil)
+	require.Error(t, err)
+	sdb, err := chain.StateAt(headers[4])
+	require.NoError(t, err)
+	require.True(t, sdb.ReadOnly())
+	receipts, _, usedGas, _, _, err := chain.Processor().Process(blocks[4], sdb, vm.Config{})
+	require.NoError(t, err)
+	require.Equal(t, blocks[4].GasUsed(), usedGas)
+	wantReceipts, err := rlp.EncodeToBytes(chain.GetReceiptsByBlockHash(blocks[4].Hash()))
+	require.NoError(t, err)
+	gotReceipts, err := rlp.EncodeToBytes(receipts)
+	require.NoError(t, err)
+	require.Equal(t, wantReceipts, gotReceipts)
+
+	// Only a state opened to read falls back to the BAL history.
+	for _, use := range []state.Use{state.ForTrie, state.ForBuild, state.ForExec, state.ForApply} {
+		_, err = chain.States().Open(headers[4], use)
+		require.ErrorAs(t, err, new(*statedb.MissingNodeError), "use %d", use)
+	}
+	head := chain.CurrentBlock().Header()
+	for _, use := range []state.Use{state.ForBuild, state.ForExec} {
+		exec, err := chain.States().Open(head, use)
+		require.NoError(t, err)
+		require.NotNil(t, exec.BAL(), "use %d: a state opened to execute records the list", use)
+	}
+	apply, err := chain.States().Open(head, state.ForApply)
+	require.NoError(t, err)
+	require.Nil(t, apply.BAL(), "a state opened to apply a list records none")
+
+	// A block the history does not have keeps the trie error.
+	_, err = chain.StateAt(&types.Header{Number: big.NewInt(100), Root: common.Hash{0x01}})
+	require.ErrorAs(t, err, new(*statedb.MissingNodeError))
+
+	// A rewind rebuilds the index up to the new head, and a state opened
+	// before keeps failing instead of reading the rebuilt index.
+	old, err := chain.StateAt(headers[4])
+	require.NoError(t, err)
+	require.NoError(t, chain.SetHead(6))
+	WaitBALIndex(t, chain, 7)
+	old.GetBalance(env.Addrs[0])
+	require.ErrorIs(t, old.Error(), state.ErrRebuilt)
+	sdb, err = chain.StateAt(headers[4])
+	require.NoError(t, err)
+	require.Equal(t, headers[4].Root, sdb.IntermediateRoot(true))
+}
+
+const balBatchInterval = 16
+
+// balBatchFixture is a chain of 60 blocks with every state, and a history chain
+// at genesis to insert them into with their lists.
+type balBatchFixture struct {
+	*Fixture
+	src     *BlockChain
+	history *BlockChain
+}
+
+func newBALBatchFixture(t *testing.T) *balBatchFixture {
+	f := NewFixture(t, "prague", 60)
+	src, err := newBALChain(f.Env.DB, HistoryCacheConfig(), f.Env.Config, f.Env.Sealer, vm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { src.Stop() })
+	db := database.NewMemoryDBManager()
+	f.Env.Gspec.MustCommit(db)
+	history, err := newBALChain(db, &CacheConfig{
+		CacheSize:           512,
+		BlockInterval:       balBatchInterval,
+		TriesInMemory:       DefaultTriesInMemory,
+		TrieNodeCacheConfig: statedb.GetEmptyTrieNodeCacheConfig(),
+	}, f.Env.Config, f.Env.Sealer, vm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { history.Stop() })
+	return &balBatchFixture{Fixture: f, src: src, history: history}
+}
+
+// balBlocks returns blocks from to to with their receipts and lists, the list
+// of block tamper, if any, changed.
+func (f *balBatchFixture) balBlocks(t *testing.T, from, to, tamper uint64) (types.Blocks, []types.Receipts) {
+	var (
+		blocks   types.Blocks
+		receipts []types.Receipts
+	)
+	for n := from; n <= to; n++ {
+		block := f.Blocks[n-1]
+		enc, err := f.Lists[n-1].Writes().Encode()
+		require.NoError(t, err)
+		if n == tamper {
+			list, err := types.DecodeBAL(enc)
+			require.NoError(t, err)
+			a := FindAccess(t, list, StoreAddr)
+			a.StorageChanges = append(a.StorageChanges, types.SlotChanges{
+				Slot:    common.HexToHash("0xff"),
+				Changes: []types.StorageChange{{BlockAccessIndex: a.StorageChanges[0].Changes[0].BlockAccessIndex, NewValue: common.HexToHash("0x01")}},
+			})
+			enc, err = list.Encode()
+			require.NoError(t, err)
+		}
+		blocks = append(blocks, block.WithBAL(enc))
+		receipts = append(receipts, f.src.GetReceiptsByBlockHash(block.Hash()))
+	}
+	return blocks, receipts
+}
+
+// requireState checks the state of the history chain at block n against the
+// one of the source chain.
+func (f *balBatchFixture) requireState(t *testing.T, n uint64) {
+	t.Helper()
+	header := f.Blocks[n-1].Header()
+	want, err := f.src.StateAt(header)
+	require.NoError(t, err)
+	got, err := f.history.StateAt(header)
+	require.NoError(t, err, "block %d", n)
+	for _, addr := range append([]common.Address{StoreAddr}, f.Env.Addrs...) {
+		require.Equal(t, want.GetBalance(addr), got.GetBalance(addr), "block %d", n)
+		require.Equal(t, want.GetNonce(addr), got.GetNonce(addr), "block %d", n)
+	}
+	for slot := range 5 {
+		key := common.BytesToHash([]byte{byte(slot)})
+		require.Equal(t, want.GetState(StoreAddr, key), got.GetState(StoreAddr, key), "block %d slot %d", n, slot)
+	}
+}
+
+// TestBALBatch inserts a history chain in batches and checks that it gets
+// the same head, receipts and state, with the state committed only at the
+// commit interval and at the end of each batch, and the states of the other
+// blocks read from the BAL history.
+func TestBALBatch(t *testing.T) {
+	f := newBALBatchFixture(t)
+	ends := []uint64{10, 40, 60}
+	from := uint64(1)
+	for _, to := range ends {
+		_, err := f.history.InsertChainWithBALs(f.balBlocks(t, from, to, 0))
+		require.NoError(t, err)
+		require.Equal(t, to, f.history.CurrentBlock().NumberU64())
+		require.Equal(t, f.Blocks[to-1].Hash(), f.history.CurrentBlock().Hash())
+		f.requireState(t, to)
+		from = to + 1
+	}
+	for n := uint64(1); n <= 60; n++ {
+		block := f.history.GetBlockByNumber(n)
+		require.NotNil(t, block)
+		receipts := f.history.GetReceiptsByBlockHash(block.Hash())
+		require.Equal(t, block.ReceiptHash(), types.DeriveReceiptsRoot(receipts, block.Number()), "block %d", n)
+		f.requireState(t, n)
+	}
+	f.RequireLists(t, f.history, 1, 60)
+}
+
+// TestBALBatchTampered inserts batches with a wrong list. In the middle of a
+// batch, it is rejected at the next commit, and the chain is back at the last
+// checked block, without the events of the dropped blocks; once the rest is
+// inserted, the index serves the states of the blocks that are not committed.
+// In the last block, there is no block written after the last checked one to
+// roll back.
+func TestBALBatchTampered(t *testing.T) {
+	t.Run("middle", testBALBatchTamperedMiddle)
+	t.Run("last", testBALBatchTamperedLast)
+}
+
+func testBALBatchTamperedMiddle(t *testing.T) {
+	f := newBALBatchFixture(t)
+	_, err := f.history.InsertChainWithBALs(f.balBlocks(t, 1, 10, 0))
+	require.NoError(t, err)
+
+	events := make(chan ChainEvent, 100)
+	sub := f.history.SubscribeChainEvent(events)
+	defer sub.Unsubscribe()
+
+	n, err := f.history.InsertChainWithBALs(f.balBlocks(t, 11, 40, 20))
+	require.ErrorContains(t, err, "invalid merkle root")
+	require.Equal(t, 6, n)
+	require.Equal(t, uint64(16), f.history.CurrentBlock().NumberU64())
+	require.Nil(t, f.history.GetHeaderByNumber(17))
+	require.Nil(t, f.history.GetBlockByHash(f.Blocks[19].Hash()))
+	f.requireState(t, 16)
+	for len(events) > 0 {
+		require.LessOrEqual(t, (<-events).Block.NumberU64(), uint64(16))
+	}
+
+	_, err = f.history.InsertChainWithBALs(f.balBlocks(t, 17, 60, 0))
+	require.NoError(t, err)
+	require.Equal(t, f.Blocks[59].Hash(), f.history.CurrentBlock().Hash())
+	WaitBALIndex(t, f.history, 61)
+	for _, n := range []uint64{5, 17, 20, 35, 47, 59, 60} {
+		f.requireState(t, n)
+	}
+	f.RequireLists(t, f.history, 1, 60)
+}
+
+func testBALBatchTamperedLast(t *testing.T) {
+	f := newBALBatchFixture(t)
+	_, err := f.history.InsertChainWithBALs(f.balBlocks(t, 1, 16, 0))
+	require.NoError(t, err)
+	_, err = f.history.InsertChainWithBALs(f.balBlocks(t, 17, 17, 17))
+	require.ErrorContains(t, err, "invalid merkle root")
+	require.Equal(t, uint64(16), f.history.CurrentBlock().NumberU64())
+	require.Nil(t, f.history.GetBlockByHash(f.Blocks[16].Hash()))
+	f.requireState(t, 16)
+}
+
+// balStateReader is an execution module reading the state of each inserted
+// block and of its parent, like the valset and gasless modules.
+type balStateReader struct {
+	f     *balBatchFixture
+	mu    sync.Mutex
+	err   error
+	reads int
+}
+
+func (r *balStateReader) PostInsertBlock(block *types.Block) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	parent := r.f.history.GetHeaderByHash(block.ParentHash())
+	for _, h := range []*types.Header{block.Header(), parent} {
+		got, err := r.f.history.StateAt(h)
+		if err != nil {
+			r.err = fmt.Errorf("block %d: %w", h.Number.Uint64(), err)
+			return r.err
+		}
+		want, err := r.f.src.StateAt(h)
+		if err != nil {
+			return err
+		}
+		for _, addr := range r.f.Env.Addrs {
+			if want.GetBalance(addr).Cmp(got.GetBalance(addr)) != 0 {
+				r.err = fmt.Errorf("block %d: balance of %x", h.Number.Uint64(), addr)
+				return r.err
+			}
+		}
+		r.reads++
+	}
+	return nil
+}
+
+// TestBALBatchModules checks that modules read the state of the blocks inside
+// a batch while it is inserted, and that other goroutines can read it too.
+func TestBALBatchModules(t *testing.T) {
+	f := newBALBatchFixture(t)
+	r := &balStateReader{f: f}
+	f.history.RegisterKaiaxModules(nil, nil, []kaiax.ExecutionModule{r}, nil, nil, nil)
+
+	var (
+		done  = make(chan struct{})
+		wg    sync.WaitGroup
+		reads atomic.Int64
+	)
+	wg.Go(func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			head := f.history.CurrentBlock()
+			if sdb, err := f.history.StateAt(head.Header()); err == nil {
+				sdb.GetBalance(f.Env.Addrs[2])
+				reads.Add(1)
+			}
+		}
+	})
+	_, err := f.history.InsertChainWithBALs(f.balBlocks(t, 1, 60, 0))
+	close(done)
+	wg.Wait()
+	require.NoError(t, err)
+	require.NoError(t, r.err)
+	require.Equal(t, 120, r.reads)
+	require.Positive(t, reads.Load())
+
+	// The BAL history serves the states of the blocks between commits, also
+	// after their batch was checked.
+	for _, n := range []int{40, 47, 50} {
+		got, err := f.history.StateAt(f.Blocks[n].Header())
+		require.NoError(t, err)
+		want, err := f.src.StateAt(f.Blocks[n].Header())
+		require.NoError(t, err)
+		require.Equal(t, want.GetBalance(f.Env.Addrs[2]), got.GetBalance(f.Env.Addrs[2]), "block %d", n+1)
 	}
 }

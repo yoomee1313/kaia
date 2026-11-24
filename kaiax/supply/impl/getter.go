@@ -87,7 +87,7 @@ func (s *SupplyModule) totalSupplyFromState(num uint64) (*big.Int, error) {
 	if header == nil {
 		return nil, supply.ErrNoBlock
 	}
-	stateDB, err := s.Chain.StateAt(header.Root)
+	stateDB, err := s.Chain.StateAt(header)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +129,7 @@ func (s *SupplyModule) getCanonicalBurn(num uint64) (*big.Int, *big.Int, error) 
 	if header == nil {
 		return nil, nil, supply.ErrNoCanonicalBurn(supply.ErrNoBlock)
 	}
-	state, err := s.Chain.StateAt(header.Root)
+	state, err := s.Chain.StateAt(header)
 	if err != nil {
 		return nil, nil, supply.ErrNoCanonicalBurn(err)
 	}

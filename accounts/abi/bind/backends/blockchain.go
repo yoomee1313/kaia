@@ -181,7 +181,7 @@ func (b *BlockchainContractBackend) getBlockAndState(num *big.Int) (*types.Block
 		return nil, nil, errBlockDoesNotExist
 	}
 
-	state, err := b.bc.StateAt(block.Root())
+	state, err := b.bc.StateAt(block.Header())
 	return block, state, err
 }
 

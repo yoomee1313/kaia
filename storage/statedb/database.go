@@ -470,6 +470,20 @@ func (db *Database) insertPruningMark(hash common.ExtHash, blockNum uint64) {
 	})
 }
 
+// DropPruningMarksFrom drops the pruning marks not written yet of block
+// number and the blocks after it, which a rewind deleted.
+func (db *Database) DropPruningMarksFrom(number uint64) {
+	db.lock.Lock()
+	defer db.lock.Unlock()
+	kept := db.pruningMarks[:0]
+	for _, m := range db.pruningMarks {
+		if m.Number < number {
+			kept = append(kept, m)
+		}
+	}
+	db.pruningMarks = kept
+}
+
 // getCachedNode finds an encoded node in the trie node cache if enabled.
 func (db *Database) getCachedNode(hash common.ExtHash) []byte {
 	if db.trieNodeCache != nil {

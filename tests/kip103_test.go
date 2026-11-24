@@ -136,7 +136,7 @@ func TestRebalanceTreasury_EOA(t *testing.T) {
 		t.Fatal("timeout")
 	}
 
-	curState, err := node.BlockChain().StateAt(header.Root)
+	curState, err := node.BlockChain().StateAt(header)
 	if err != nil {
 		t.Fatal(err)
 	}

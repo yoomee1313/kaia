@@ -23,6 +23,7 @@
 package cn
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/hexutil"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/params"
 	"github.com/kaiachain/kaia/rlp"
 	"github.com/kaiachain/kaia/storage/statedb"
@@ -38,26 +40,26 @@ import (
 // TODO-Kaia: Rearrange DebugCNAPI and DebugStorageCNAPI receivers
 // StartWarmUp retrieves all state/storage tries of the latest committed state root and caches the tries.
 func (api *DebugStorageCNAPI) StartWarmUp(minLoad uint) error {
-	return api.cn.blockchain.StartWarmUp(minLoad)
+	return api.cn.blockchain.States().StartWarmUp(minLoad)
 }
 
 // TODO-Kaia: Rearrange DebugCNAPI and DebugStorageCNAPI receivers
 // StartContractWarmUp retrieves a storage trie of the latest state root and caches the trie
 // corresponding to the given contract address.
 func (api *DebugStorageCNAPI) StartContractWarmUp(contractAddr common.Address, minLoad uint) error {
-	return api.cn.blockchain.StartContractWarmUp(contractAddr, minLoad)
+	return api.cn.blockchain.States().StartContractWarmUp(contractAddr, minLoad)
 }
 
 // TODO-Kaia: Rearrange DebugCNAPI and DebugStorageCNAPI receivers
 // StopWarmUp stops the warming up process.
 func (api *DebugStorageCNAPI) StopWarmUp() error {
-	return api.cn.blockchain.StopWarmUp()
+	return api.cn.blockchain.States().StopWarmUp()
 }
 
 // TODO-Kaia: Rearrange DebugCNAPI and DebugStorageCNAPI receivers
 // StartCollectingTrieStats  collects state/storage trie statistics and print in the log.
 func (api *DebugStorageCNAPI) StartCollectingTrieStats(contractAddr common.Address) error {
-	return api.cn.blockchain.StartCollectingTrieStats(contractAddr)
+	return api.cn.blockchain.States().StartCollectingTrieStats(contractAddr)
 }
 
 // DebugStorageCNAPI is the collection of CN full node APIs exposed over
@@ -107,11 +109,42 @@ func (api *DebugStorageCNAPI) StorageRangeAt(ctx context.Context, blockHash comm
 	}
 	defer release()
 
+	if statedb.ReadOnly() {
+		return readOnlyStorageRangeAt(statedb, contractAddress, keyStart, maxResult)
+	}
 	st := statedb.StorageTrie(contractAddress)
 	if st == nil {
 		return StorageRangeResult{}, fmt.Errorf("account %x doesn't exist", contractAddress)
 	}
 	return storageRangeAt(st, keyStart, maxResult)
+}
+
+// readOnlyStorageRangeAt is storageRangeAt for a state without a state trie,
+// like one read from the BAL history: its slots are listed in the order of
+// their hashes, each with its key.
+func readOnlyStorageRangeAt(statedb *state.StateDB, addr common.Address, start []byte, maxResult int) (StorageRangeResult, error) {
+	if !statedb.Exist(addr) {
+		return StorageRangeResult{}, fmt.Errorf("account %x doesn't exist", addr)
+	}
+	var from common.Hash // a key prefix, like the start of a trie iterator
+	copy(from[:], start)
+	result := StorageRangeResult{Storage: storageMap{}}
+	statedb.ForEachStorage(addr, func(key, value common.Hash) bool {
+		hash := crypto.Keccak256Hash(key[:])
+		if bytes.Compare(hash[:], from[:]) < 0 {
+			return true
+		}
+		if len(result.Storage) == maxResult {
+			result.NextKey = &hash
+			return false
+		}
+		result.Storage[hash] = storageEntry{Key: &key, Value: value}
+		return true
+	})
+	if err := statedb.Error(); err != nil {
+		return StorageRangeResult{}, err
+	}
+	return result, nil
 }
 
 func storageRangeAt(st state.Trie, start []byte, maxResult int) (StorageRangeResult, error) {
@@ -133,6 +166,9 @@ func storageRangeAt(st state.Trie, start []byte, maxResult int) (StorageRangeRes
 	if it.Next() {
 		next := common.BytesToHash(it.Key)
 		result.NextKey = &next
+	}
+	if it.Err != nil {
+		return StorageRangeResult{}, it.Err
 	}
 	return result, nil
 }

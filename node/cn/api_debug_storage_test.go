@@ -27,8 +27,11 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/kaiachain/kaia/blockchain/state"
+	"github.com/kaiachain/kaia/blockchain/types/account"
 	"github.com/kaiachain/kaia/common"
+	"github.com/kaiachain/kaia/crypto"
 	"github.com/kaiachain/kaia/storage/database"
+	"github.com/stretchr/testify/require"
 )
 
 var dumper = spew.ConfigState{Indent: "    "}
@@ -92,4 +95,114 @@ func TestStorageRangeAt(t *testing.T) {
 				test.start, test.limit, dumper.Sdump(result), dumper.Sdump(&test.want))
 		}
 	}
+}
+
+// slotReader serves the account and the storage of one contract, read from
+// a state, and lists its slots if lists is set, like the BAL history.
+type slotReader struct {
+	addr  common.Address
+	acc   account.Account
+	slots map[common.Hash]common.Hash
+	lists bool
+}
+
+func (r slotReader) Account(addr common.Address) (account.Account, error) {
+	if addr != r.addr {
+		return nil, nil
+	}
+	return r.acc.DeepCopy(), nil
+}
+
+func (r slotReader) Storage(addr common.Address, slot common.Hash) (common.Hash, error) {
+	return r.slots[slot], nil
+}
+
+func (r slotReader) Code(common.Address, common.Hash) ([]byte, error)  { return nil, nil }
+func (r slotReader) CodeSize(common.Address, common.Hash) (int, error) { return 0, nil }
+
+type listingReader struct{ slotReader }
+
+func (r listingReader) Slots(addr common.Address) ([]common.Hash, error) {
+	var slots []common.Hash
+	for slot := range r.slots {
+		slots = append(slots, slot)
+	}
+	return slots, nil
+}
+
+// TestStorageRangeAtReadOnly pages through the storage of a contract of a
+// read-only state, like one read from the BAL history, and gets what the
+// storage trie of the same storage gives, with every key: the slots the
+// reader lists that are set, and the slots written in memory.
+func TestStorageRangeAtReadOnly(t *testing.T) {
+	db := state.NewDatabase(database.NewMemoryDBManager())
+	addr := common.Address{0x01}
+	slots := map[common.Hash]common.Hash{}
+	base, err := state.New(common.Hash{}, db, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, base.SetCode(addr, []byte{1}))
+	for i := byte(1); i <= 6; i++ {
+		slots[common.Hash{i}] = common.Hash{0x10 + i}
+		base.SetState(addr, common.Hash{i}, common.Hash{0x10 + i})
+	}
+	slots[common.Hash{7}] = common.Hash{} // listed but not set
+	root, err := base.Commit(true)
+	require.NoError(t, err)
+	acc := base.GetAccount(addr)
+
+	// The same writes in memory, on the trie and on a read-only state.
+	write := func(sdb *state.StateDB) {
+		sdb.SetState(addr, common.Hash{1}, common.Hash{})
+		sdb.SetState(addr, common.Hash{8}, common.Hash{0x18})
+	}
+	onTrie, err := state.New(root, db, nil, nil)
+	require.NoError(t, err)
+	write(onTrie)
+	onTrie.IntermediateRoot(true)
+	ro := state.NewReadOnly(root, db, listingReader{slotReader{addr: addr, acc: acc, slots: slots}})
+	write(ro)
+
+	var want, got []StorageRangeResult
+	for _, r := range []struct {
+		pages *[]StorageRangeResult
+		next  func(start []byte) (StorageRangeResult, error)
+	}{
+		{&want, func(start []byte) (StorageRangeResult, error) {
+			return storageRangeAt(onTrie.StorageTrie(addr), start, 2)
+		}},
+		{&got, func(start []byte) (StorageRangeResult, error) { return readOnlyStorageRangeAt(ro, addr, start, 2) }},
+	} {
+		var start []byte
+		for {
+			page, err := r.next(start)
+			require.NoError(t, err)
+			*r.pages = append(*r.pages, page)
+			if page.NextKey == nil {
+				break
+			}
+			start = page.NextKey[:]
+		}
+	}
+	require.Len(t, got, len(want))
+	count := 0
+	for i := range want {
+		require.Len(t, got[i].Storage, len(want[i].Storage), "page %d", i)
+		for hash, e := range want[i].Storage {
+			g, ok := got[i].Storage[hash]
+			require.True(t, ok, "page %d slot %x", i, hash)
+			require.Equal(t, e.Value, g.Value)
+			require.NotNil(t, g.Key)
+			require.Equal(t, hash, crypto.Keccak256Hash(g.Key[:]))
+			count++
+		}
+		require.Equal(t, want[i].NextKey, got[i].NextKey, "page %d", i)
+	}
+	require.Equal(t, 6, count, "slots 2-6 and 8")
+
+	// A reader that cannot list slots cannot be iterated.
+	plain := state.NewReadOnly(root, db, slotReader{addr: addr, acc: acc, slots: slots})
+	_, err = readOnlyStorageRangeAt(plain, addr, nil, 10)
+	require.ErrorIs(t, err, state.ErrNoIteration)
+	_, err = readOnlyStorageRangeAt(ro, common.Address{0x02}, nil, 10)
+	require.ErrorContains(t, err, "doesn't exist")
 }

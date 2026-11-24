@@ -23,6 +23,7 @@
 package work
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/big"
@@ -245,6 +246,7 @@ type BlockChain interface {
 	GetReceiptsByBlockHash(blockHash common.Hash) types.Receipts
 
 	InsertChain(chain types.Blocks) (int, error)
+	InsertChainContext(ctx context.Context, blocks types.Blocks, receipts []types.Receipts) (int, error)
 	TrieNode(hash common.Hash) ([]byte, error)
 	ContractCode(hash common.Hash) ([]byte, error)
 	ContractCodeWithPrefix(hash common.Hash) ([]byte, error)
@@ -269,10 +271,8 @@ type BlockChain interface {
 
 	Processor() blockchain.Processor
 	BadBlocks() ([]blockchain.BadBlockArgs, error)
-	StateAt(root common.Hash) (*state.StateDB, error)
-	PrunableStateAt(root common.Hash, num uint64) (*state.StateDB, error)
-	StateAtWithPersistent(root common.Hash) (*state.StateDB, error)
-	StateAtWithGCLock(root common.Hash) (*state.StateDB, error)
+	StateAt(header *types.Header) (*state.StateDB, error)
+	StateAtWithPersistent(header *types.Header) (*state.StateDB, error)
 	Export(w io.Writer) error
 	ExportN(w io.Writer, first, last uint64) error
 	ValidateHeader(header *types.Header) error
@@ -294,20 +294,9 @@ type BlockChain interface {
 	PostChainEvents(events []interface{}, logs []*types.Log)
 	ApplyTransaction(config *params.ChainConfig, author *common.Address, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg *vm.Config) (*types.Receipt, *vm.InternalTxTrace, error)
 
-	// State Migration
-	PrepareStateMigration() error
-	StartStateMigration(uint64, common.Hash) error
-	StopStateMigration() error
-	StateMigrationStatus() (bool, uint64, int, int, int, float64, error)
-
-	// Warm up
-	StartWarmUp(minLoad uint) error
-	StartContractWarmUp(contractAddr common.Address, minLoad uint) error
-	StopWarmUp() error
-
-	// Collect state/storage trie statistics
-	StartCollectingTrieStats(contractAddr common.Address) error
-	GetContractStorageRoot(block *types.Block, db state.Database, contractAddr common.Address) (common.ExtHash, error)
+	// States of the written blocks: state migration, warm up and trie
+	// statistics
+	States() *state.Manager
 
 	// Save trie node cache to this
 	SaveTrieNodeCacheToDisk() error

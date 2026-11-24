@@ -32,6 +32,7 @@ The cacheSender concurrently recovers and caches an address from a signature in 
 
 Each file provides the following features
   - bad_blocks.go : keeps block hashes of bad blocks which are usually for hard forks.
+  - block_execution.go : executes the transactions of a block, or applies its block access list instead.
   - block_validator.go : implements BlockValidator which is responsible for validation block headers and the processed state.
   - blockchain.go : implements the canonical chain of blocks and managing functions to support imports, reverts and reorganisations.
   - chain_indexer.go : implements ChainIndexer.
@@ -39,15 +40,13 @@ Each file provides the following features
   - error.go : defines errors frequently used in blockchain package.
   - events.go : defines event structs delivered between go-routines.
   - evm.go : creates an EVM with a given context for use.
-  - gaspool.go : defines GasPool which tracks and manages the amount of gas available during the transaction execution.
   - gen_genesis.go : is auto-generated code by gencodec to marshal/unmarshal Genesis as/from JSON.
   - gen_genesis_account.go : is auto-generated code by gencodec to marshal/unmarshal GenesisAccount as/from JSON.
   - genesis.go : defines Genesis which specifies values of a genesis block and initial settings of the chain.
-  - genesis_alloc.go : contains the genesis allocation of built-in genesis blocks.
+  - genesis_alloc.go : contains the genesis of the built-in networks.
   - headerchain.go : implements HeaderChain which makes a chain with block headers.
   - init_derive_sha.go : initialize a DeriveSha function with a specific type.
   - metrics.go : contains metrics used for blockchain package.
-  - mkalloc.go : creates the genesis allocation constants in genesis_alloc.go.
   - state_processor.go : implements StateProcessor which takes care of transitioning state.
   - state_transition.go : implements a state transaction model worked with messages in transactions.
   - tx_cacher.go : recovers senders of transactions from signatures and caches the sender address.

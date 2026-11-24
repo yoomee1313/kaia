@@ -224,7 +224,7 @@ func (context *chainContext) State() (*state.StateDB, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (context *chainContext) StateAt(root common.Hash) (*state.StateDB, error) {
+func (context *chainContext) StateAt(header *types.Header) (*state.StateDB, error) {
 	return nil, errors.New("not implemented")
 }
 

@@ -194,7 +194,7 @@ func (mr *MockBlockChainMockRecorder) State() *gomock.Call {
 }
 
 // StateAt mocks base method.
-func (m *MockBlockChain) StateAt(arg0 common.Hash) (*state.StateDB, error) {
+func (m *MockBlockChain) StateAt(arg0 *types.Header) (*state.StateDB, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "StateAt", arg0)
 	ret0, _ := ret[0].(*state.StateDB)

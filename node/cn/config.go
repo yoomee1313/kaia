@@ -141,6 +141,11 @@ type Config struct {
 	TrieNodeCacheConfig  statedb.TrieNodeCacheConfig
 	SnapshotCacheSize    int
 	SnapshotAsyncGen     bool
+	BALSkipReads         bool
+
+	// HistoryMode is how much of the chain the node keeps, from --gcmode.
+	// NoPruning makes it an archive, which is a full node.
+	HistoryMode database.HistoryMode
 
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`

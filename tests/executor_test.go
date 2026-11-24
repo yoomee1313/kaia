@@ -20,6 +20,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/profile"
@@ -47,7 +48,7 @@ func TestDefaultExecutor_Clone(t *testing.T) {
 
 	// Initialize original — clone must remain uninitialized.
 	parent := bcdata.bc.CurrentBlock()
-	parentState, err := bcdata.bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+	parentState, err := bcdata.bc.States().Open(parent.Header(), state.ForBuild)
 	require.NoError(t, err)
 
 	header := &types.Header{
@@ -62,7 +63,7 @@ func TestDefaultExecutor_Clone(t *testing.T) {
 	assert.ErrorIs(t, err, work.ErrExecutorNotInitialized)
 
 	// Initialize clone separately — should succeed independently.
-	cloneState, err := bcdata.bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+	cloneState, err := bcdata.bc.States().Open(parent.Header(), state.ForBuild)
 	require.NoError(t, err)
 	require.NoError(t, clone.ResetWithState(cloneState, header))
 
@@ -118,7 +119,7 @@ func TestExecuteTransactions_MatchesInsertChain(t *testing.T) {
 
 	// --- 3. Speculative execution (validator path) ---
 	parent := bcdata.bc.CurrentBlock()
-	parentState, err := bcdata.bc.PrunableStateAt(parent.Root(), parent.NumberU64())
+	parentState, err := bcdata.bc.States().Open(parent.Header(), state.ForBuild)
 	require.NoError(t, err)
 
 	executor := work.NewDefaultExecutor(bcdata.bc.Config(), bcdata.bc, common.Address{})

@@ -37,7 +37,7 @@ func (v *ValsetModule) PostInsertBlock(block *types.Block) error {
 func (v *ValsetModule) postInsertBlockPermissionless(block *types.Block) error {
 	header := block.Header()
 	nextNum := header.Number.Uint64() + 1
-	parentStatedb, err := v.Chain.StateAt(header.Root)
+	parentStatedb, err := v.Chain.StateAt(header)
 	if err != nil {
 		return err
 	}

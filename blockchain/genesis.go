@@ -29,7 +29,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
@@ -46,10 +45,7 @@ import (
 //go:generate gencodec -type Genesis -field-override genesisSpecMarshaling -out gen_genesis.go
 //go:generate gencodec -type GenesisAccount -field-override genesisAccountMarshaling -out gen_genesis_account.go
 
-var (
-	errGenesisNoConfig = errors.New("genesis has no chain configuration")
-	errNoGenesis       = errors.New("genesis block is not provided")
-)
+var errGenesisNoConfig = errors.New("genesis has no chain configuration")
 
 // Genesis specifies the header fields, state of a genesis block. It also defines hard
 // fork switch-over blocks through the chain configuration.
@@ -175,34 +171,6 @@ func (o *ChainOverrides) apply(cfg *params.ChainConfig) error {
 		cfg.PermissionlessCompatibleBlock = new(big.Int).Set(o.OverridePermissionless)
 	}
 	return cfg.CheckConfigForkOrder()
-}
-
-// findBlockWithState returns the latest block with state.
-func findBlockWithState(db database.DBManager) *types.Block {
-	headBlock := db.ReadBlockByHash(db.ReadHeadBlockHash())
-	if headBlock == nil {
-		headBlock = db.ReadBlockByHash(db.ReadHeadBlockBackupHash())
-		if headBlock == nil {
-			logger.Crit("failed to read head block by head block hash")
-		}
-	}
-
-	startBlock := headBlock
-	for _, err := state.New(headBlock.Root(), state.NewDatabase(db), nil, nil); err != nil; {
-		if headBlock.NumberU64() == 0 {
-			logger.Crit("failed to find state from the head block to the genesis block",
-				"headBlockNum", headBlock.NumberU64(),
-				"headBlockHash", headBlock.Hash().String(), "headBlockRoot", headBlock.Root().String())
-		}
-		headBlock = db.ReadBlockByNumber(headBlock.NumberU64() - 1)
-		if headBlock == nil {
-			logger.Crit("failed to read previous block by head block number")
-		}
-		logger.Warn("found previous block", "blockNum", headBlock.NumberU64())
-	}
-	logger.Info("found the latest block with state",
-		"blockNum", headBlock.NumberU64(), "startedNum", startBlock.NumberU64())
-	return headBlock
 }
 
 // SetupGenesisBlock writes or updates the genesis block and ChainConfig in db.
@@ -521,18 +489,6 @@ func DefaultTestGenesisBlock() *Genesis {
 	return ret
 }
 
-func decodePrealloc(data string) GenesisAlloc {
-	var p []struct{ Addr, Balance *big.Int }
-	if err := rlp.NewStream(strings.NewReader(data), 0).Decode(&p); err != nil {
-		panic(err)
-	}
-	ga := make(GenesisAlloc, len(p))
-	for _, account := range p {
-		ga[common.BigToAddress(account.Addr)] = GenesisAccount{Balance: account.Balance}
-	}
-	return ga
-}
-
 func commitGenesisState(genesis *Genesis, db database.DBManager, overrides *ChainOverrides) error {
 	if err := overrides.apply(genesis.Config); err != nil {
 		return err
@@ -573,4 +529,25 @@ func SetGenesisGovernance(genesis *Genesis) []byte {
 		logger.Crit("Error in RLP Encoding governance data", "err", err)
 	}
 	return ret
+}
+
+// SetGenesisSpec gives the genesis the chain was made with, to rebuild its
+// state.
+func (bc *BlockChain) SetGenesisSpec(genesis *Genesis) { bc.genesisSpec.Store(genesis) }
+
+// GenesisSpec returns the genesis the chain was made with, nil if not known.
+func (bc *BlockChain) GenesisSpec() *Genesis { return bc.genesisSpec.Load() }
+
+// genesisState returns the genesis state rebuilt in memory, nil if the genesis
+// of the chain is not known.
+func (bc *BlockChain) genesisState() state.Database {
+	genesis := bc.GenesisSpec()
+	if genesis == nil {
+		return nil
+	}
+	dbm := database.NewMemoryDBManager()
+	if genesis.ToBlock(common.Hash{}, dbm).Root() != bc.Genesis().Root() {
+		return nil
+	}
+	return state.NewDatabase(dbm)
 }

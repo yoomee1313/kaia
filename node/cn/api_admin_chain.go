@@ -162,17 +162,17 @@ func (api *AdminChainCNAPI) importChain(stream *rlp.Stream) (bool, error) {
 
 // StartStateMigration starts state migration.
 func (api *AdminChainCNAPI) StartStateMigration() error {
-	return api.cn.blockchain.PrepareStateMigration()
+	return api.cn.blockchain.States().PrepareMigration()
 }
 
 // StopStateMigration stops state migration and removes stateMigrationDB.
 func (api *AdminChainCNAPI) StopStateMigration() error {
-	return api.cn.BlockChain().StopStateMigration()
+	return api.cn.BlockChain().States().StopMigration()
 }
 
 // StateMigrationStatus returns the status information of state trie migration.
 func (api *AdminChainCNAPI) StateMigrationStatus() map[string]interface{} {
-	isMigration, blkNum, read, committed, pending, progress, err := api.cn.BlockChain().StateMigrationStatus()
+	isMigration, blkNum, read, committed, pending, progress, err := api.cn.BlockChain().States().MigrationStatus()
 
 	errStr := "null"
 	if err != nil {

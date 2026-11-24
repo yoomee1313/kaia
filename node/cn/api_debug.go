@@ -72,9 +72,12 @@ func (api *DebugCNAPI) DumpBlock(ctx context.Context, blockNrOrHash rpc.BlockNum
 			return state.Dump{}, fmt.Errorf("block %v not found", blockNrOrHashString)
 		}
 	}
-	stateDb, err := api.cn.BlockChain().StateAtWithPersistent(block.Root())
+	stateDb, err := api.cn.BlockChain().StateAtWithPersistent(block.Header())
 	if err != nil {
 		return state.Dump{}, err
+	}
+	if stateDb.ReadOnly() {
+		return state.Dump{}, state.ErrNoIteration
 	}
 	return stateDb.RawDump(), nil
 }
@@ -104,8 +107,7 @@ func (api *DebugCNAPI) DumpStateTrie(ctx context.Context, blockNrOrHash rpc.Bloc
 		Tries: make([]Trie, 0),
 	}
 
-	db := state.NewDatabaseWithExistingCache(api.cn.chainDB, api.cn.blockchain.StateCache().TrieDB().TrieNodeCache())
-	stateDB, err := state.New(block.Root(), db, nil, nil)
+	stateDB, err := api.cn.blockchain.StateAt(block.Header())
 	if err != nil {
 		return DumpStateTrieResult{}, err
 	}
@@ -119,6 +121,9 @@ func (api *DebugCNAPI) DumpStateTrie(ctx context.Context, blockNrOrHash rpc.Bloc
 		}
 
 		result.Tries = append(result.Tries, t)
+	}
+	if it.Error != nil {
+		return DumpStateTrieResult{}, it.Error
 	}
 	return result, nil
 }
@@ -244,11 +249,11 @@ func (api *DebugCNAPI) GetModifiedStorageNodesByNumber(ctx context.Context, cont
 
 // TODO-Kaia: Rearrange DebugCNAPI and DebugStorageCNAPI receivers
 func (api *DebugCNAPI) getModifiedStorageNodes(contractAddr common.Address, startBlock, endBlock *types.Block, printDetail *bool) (int, error) {
-	startBlockRoot, err := api.cn.blockchain.GetContractStorageRoot(startBlock, api.cn.blockchain.StateCache(), contractAddr)
+	startBlockRoot, err := state.ContractStorageRoot(startBlock.Root(), api.cn.blockchain.StateCache(), contractAddr)
 	if err != nil {
 		return 0, err
 	}
-	endBlockRoot, err := api.cn.blockchain.GetContractStorageRoot(endBlock, api.cn.blockchain.StateCache(), contractAddr)
+	endBlockRoot, err := state.ContractStorageRoot(endBlock.Root(), api.cn.blockchain.StateCache(), contractAddr)
 	if err != nil {
 		return 0, err
 	}

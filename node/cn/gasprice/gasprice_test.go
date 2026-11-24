@@ -95,7 +95,7 @@ func (b *testBackend) GetBlockReceipts(ctx context.Context, hash common.Hash) ty
 func (b *testBackend) Pending() (*types.Block, types.Receipts, *state.StateDB) {
 	if b.pending {
 		block := b.chain.GetBlockByNumber(testHead + 1)
-		state, _ := b.chain.StateAt(block.Root())
+		state, _ := b.chain.StateAt(block.Header())
 		return block, b.chain.GetReceiptsByBlockHash(block.Hash()), state
 	}
 	return nil, nil, nil

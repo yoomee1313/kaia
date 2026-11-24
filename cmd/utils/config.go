@@ -695,11 +695,12 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	cfg.DynamoDBConfig.WriteCapacityUnits = ctx.Int64(DynamoDBWriteCapacityFlag.Name)
 	cfg.DynamoDBConfig.ReadOnly = ctx.Bool(DynamoDBReadOnlyFlag.Name)
 
-	if gcmode := ctx.String(GCModeFlag.Name); gcmode != "full" && gcmode != "archive" {
-		log.Fatalf("--%s must be either 'full' or 'archive'", GCModeFlag.Name)
+	archive, mode, err := parseGCMode(ctx.String(GCModeFlag.Name))
+	if err != nil {
+		log.Fatalf("--%s: %v", GCModeFlag.Name, err)
 	}
-	cfg.NoPruning = ctx.String(GCModeFlag.Name) == "archive"
-	logger.Info("Archiving mode of this node", "isArchiveMode", cfg.NoPruning)
+	cfg.NoPruning, cfg.HistoryMode = archive, mode
+	logger.Info("Garbage collection mode of this node", "gcmode", ctx.String(GCModeFlag.Name))
 
 	cfg.AnchoringPeriod = ctx.Uint64(AnchoringPeriodFlag.Name)
 	cfg.SentChainTxsLimit = ctx.Uint64(SentChainTxsLimit.Name)
@@ -811,6 +812,7 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 	} else {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
+	cfg.BALSkipReads = ctx.Bool(BALSkipReadsFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)
@@ -1231,4 +1233,17 @@ func (kCfg *KaiaConfig) SetServiceChainConfig(ctx *cli.Context) {
 
 	cfg.DataDir = kCfg.Node.DataDir
 	cfg.Name = kCfg.Node.Name
+}
+
+// parseGCMode returns whether --gcmode s makes the node an archive and how much
+// of the chain it keeps: an archive is a full node that flushes the state of
+// every block.
+func parseGCMode(s string) (archive bool, mode database.HistoryMode, err error) {
+	if s == "archive" {
+		return true, database.HistoryModeFull, nil
+	}
+	if mode, err = database.ParseHistoryMode(s); err != nil {
+		return false, "", fmt.Errorf("unknown mode %q, want full, archive or history", s)
+	}
+	return false, mode, nil
 }

@@ -75,8 +75,6 @@ var (
 	evictionInterval    = time.Minute     // Time interval to check for evictable transactions
 	statsReportInterval = 8 * time.Second // Time interval to report transaction pool stats
 
-	txPoolIsFullErr = errors.New("txpool is full")
-
 	errNotAllowedAnchoringTx = errors.New("locally anchoring chaindata tx is not allowed in this node")
 
 	// ErrTxPoolOverflow is returned if the transaction pool is full and can't accept
@@ -141,7 +139,7 @@ const (
 type blockChain interface {
 	CurrentBlock() *types.Block
 	GetBlock(hash common.Hash, number uint64) *types.Block
-	StateAt(root common.Hash) (*state.StateDB, error)
+	StateAt(header *types.Header) (*state.StateDB, error)
 	GetTxAndLookupInfo(txHash common.Hash) (*types.Transaction, common.Hash, uint64, uint64)
 
 	SubscribeChainHeadEvent(ch chan<- ChainHeadEvent) event.Subscription
@@ -529,7 +527,7 @@ func (pool *TxPool) reset(oldHead, newHead *types.Header) {
 	if newHead == nil {
 		newHead = pool.chain.CurrentBlock().Header() // Special case during testing
 	}
-	stateDB, err := pool.chain.StateAt(newHead.Root)
+	stateDB, err := pool.chain.StateAt(newHead)
 	if err != nil {
 		logger.Error("Failed to reset txpool state", "err", err)
 		return

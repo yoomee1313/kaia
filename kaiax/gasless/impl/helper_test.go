@@ -94,7 +94,7 @@ func (bc *testBlockChain) State() (*state.StateDB, error) {
 	return bc.statedb, nil
 }
 
-func (bc *testBlockChain) StateAt(common.Hash) (*state.StateDB, error) {
+func (bc *testBlockChain) StateAt(*types.Header) (*state.StateDB, error) {
 	return bc.statedb, nil
 }
 

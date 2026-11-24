@@ -367,7 +367,7 @@ func repayAmount(approveTxOrNil, swapTx *types.Transaction) *big.Int {
 }
 
 func getGaslessInfo(bc backends.BlockChainForCaller, header *types.Header) (common.Address, []common.Address, error) {
-	statedb, err := bc.StateAt(header.Root)
+	statedb, err := bc.StateAt(header)
 	if err != nil {
 		return common.Address{}, nil, err
 	}

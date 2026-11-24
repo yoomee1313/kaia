@@ -371,6 +371,7 @@ var FlagGroups = []FlagGroup{
 			SnapshotFlag,
 			SnapshotCacheSizeFlag,
 			SnapshotAsyncGen,
+			BALSkipReadsFlag,
 			DocRootFlag,
 		},
 	},

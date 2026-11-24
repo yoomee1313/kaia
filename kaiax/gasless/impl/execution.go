@@ -24,7 +24,7 @@ import (
 var _ kaiax.ExecutionModule = (*GaslessModule)(nil)
 
 func (g *GaslessModule) PostInsertBlock(block *types.Block) error {
-	currentState, err := g.Chain.StateAt(block.Header().Root)
+	currentState, err := g.Chain.StateAt(block.Header())
 	if err != nil {
 		return err
 	}

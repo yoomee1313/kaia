@@ -28,17 +28,26 @@ the objects and the persistent layer.
 stateObject represents a Kaia account identified by its address.
 Once it is loaded from the persistent layer, it is cached and managed by StateDB.
 
-StateDB caches stateObjects and mediates the operations to them.
+StateDB caches stateObjects and mediates the operations to them. It reads
+accounts, storage and code through a Reader, the snapshot or the block access
+list history, and from the state trie what the reader does not serve.
+
+Manager keeps the states of the blocks a chain writes: the trie nodes and the
+snapshot, and for a history node the block access list history.
 
 # Source Files
 
 Related functions and variables are defined in the files listed below
+  - bal.go                   : Recording, storing, indexing and reading the block access lists, and the BAL history Manager opens states from
   - database.go              : Defines Database and other interfaces used in the package
   - dump.go                  : Functions to dump the contents of StateDB both in raw format and indented format
   - journal.go               : journal and state changes to track the list of state modifications since the last state commit
+  - manager.go               : Manager, which keeps the states of the written blocks in the state trie and the BAL history, and opens the states of blocks
+  - state_migration.go       : Migration, warm-up and statistics of the state trie
   - state_object.go          : Implementation of stateObject
   - state_object_encoder.go  : stateObjectEncoder is used to encode stateObject in parallel manner
-  - statedb.go               : Implementation of StateDB
+  - statedb.go               : Implementation of StateDB, with the recording of the block access list of the executed block into a Recorder and the applying of a list with Apply
   - sync.go                  : Functions to schedule a state trie download
+  - trie.go                  : Flushing, garbage collection and pruning of the trie nodes of the written blocks, and the snapshot
 */
 package state

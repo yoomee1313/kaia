@@ -276,7 +276,7 @@ func (d *dummyChain) State() (*state.StateDB, error) {
 }
 
 // StateAt retrieves statedb on a particular point in time
-func (d *dummyChain) StateAt(root common.Hash) (*state.StateDB, error) {
+func (d *dummyChain) StateAt(header *types.Header) (*state.StateDB, error) {
 	return nil, nil
 }
 

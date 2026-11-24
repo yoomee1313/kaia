@@ -59,25 +59,25 @@ func TestBlockChain_migrateState(t *testing.T) {
 	}
 	defer chain.Stop()
 
-	chain.testMigrationHook = func() {
+	chain.States().SetMigrationHook(func() {
 		// sleep 2 seconds to write byte codes while migrating statedb
 		t.Log("taking 2 seconds for testing purpose...")
 		time.Sleep(2 * time.Second)
-	}
+	})
 
-	if err := chain.PrepareStateMigration(); err != nil {
+	if err := chain.States().PrepareMigration(); err != nil {
 		t.Fatalf("failed to prepare state migration: %v", err)
 	}
 
 	b := chain.CurrentBlock()
-	if err := chain.StartStateMigration(b.NumberU64(), b.Root()); err != nil {
+	if err := chain.States().StartMigration(b.NumberU64(), b.Root()); err != nil {
 		t.Fatalf("failed to start state migration: %v", err)
 	}
 
 	// write code while statedb migration
 	expectedCode := []byte{0x60, 0x80, 0x60, 0x40}
 	codeHash := common.BytesToHash(expectedCode)
-	chain.stateCache.TrieDB().DiskDB().WriteCode(codeHash, expectedCode)
+	chain.StateCache().TrieDB().DiskDB().WriteCode(codeHash, expectedCode)
 
 	for chain.db.InMigration() {
 		t.Log("It is in migration, sleeping 1 second")

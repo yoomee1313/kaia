@@ -16,7 +16,7 @@
 // along with the klaytn library. If not, see <http://www.gnu.org/licenses/>.
 // Modified and improved for the Kaia development.
 
-package blockchain
+package state
 
 import (
 	"errors"
@@ -29,7 +29,6 @@ import (
 	"github.com/VictoriaMetrics/fastcache"
 	"github.com/alecthomas/units"
 	lru "github.com/hashicorp/golang-lru"
-	"github.com/kaiachain/kaia/blockchain/state"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/common/mclock"
@@ -44,12 +43,33 @@ const (
 )
 
 var (
-	stopWarmUpErr           = errors.New("warm-up terminate by StopWarmUp")
-	blockChainStopWarmUpErr = errors.New("warm-up terminate as blockchain stopped")
+	ErrQuitBySignal = errors.New("quit by signal")
+	ErrNotInWarmUp  = errors.New("not in warm up")
+
+	stateStoppedErr = errors.New("warm-up terminate as blockchain stopped")
 )
 
-func (bc *BlockChain) stateMigrationCommit(s *statedb.TrieSync, batch database.Batch) (int, error) {
-	written, err := s.Commit(batch)
+// migration is the state of the state trie migration.
+type migration struct {
+	stop chan struct{} // stops the running migration
+
+	readCnt      int
+	committedCnt int
+	pendingCnt   int
+	progress     float64
+	err          error
+
+	hook func() // called before the migration copies the trie nodes, for tests
+}
+
+// SetMigrationHook sets f to be called before a migration copies the trie
+// nodes, for tests.
+func (s *Manager) SetMigrationHook(f func()) {
+	s.migration.hook = f
+}
+
+func migrationCommit(sync *statedb.TrieSync, batch database.Batch) (int, error) {
+	written, err := sync.Commit(batch)
 	if written == 0 || err != nil {
 		return written, err
 	}
@@ -64,7 +84,7 @@ func (bc *BlockChain) stateMigrationCommit(s *statedb.TrieSync, batch database.B
 	return written, nil
 }
 
-func (bc *BlockChain) concurrentRead(db state.Database, quitCh chan struct{}, hashCh chan common.Hash, resultCh chan statedb.SyncResult) {
+func concurrentRead(db Database, quitCh chan struct{}, hashCh chan common.Hash, resultCh chan statedb.SyncResult) {
 	for {
 		select {
 		case <-quitCh:
@@ -83,33 +103,34 @@ func (bc *BlockChain) concurrentRead(db state.Database, quitCh chan struct{}, ha
 	}
 }
 
-// migrateState is the core implementation of state trie migration.
+// migrate is the core implementation of state trie migration.
 // This migrates a trie from StateTrieDB to StateTrieMigrationDB.
 // Reading StateTrieDB happens in parallel and writing StateTrieMigrationDB happens in batch write.
 //
 // Before this function is called, StateTrieMigrationDB should be set.
 // After the migration finish, the original StateTrieDB is removed and StateTrieMigrationDB becomes a new StateTrieDB.
-func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
-	bc.migrationErr = nil
+func (s *Manager) migrate(rootHash common.Hash) (returnErr error) {
+	m := &s.migration
+	m.err = nil
 	defer func() {
-		bc.migrationErr = returnErr
+		m.err = returnErr
 		// If migration stops by quit signal, it doesn't finish migration and it will restart again.
 		if returnErr != ErrQuitBySignal {
 			// lock to prevent from a conflict of state DB close and state DB write
-			bc.mu.Lock()
-			bc.db.FinishStateMigration(returnErr == nil)
-			bc.mu.Unlock()
+			s.cfg.ChainLock.Lock()
+			s.diskDB.FinishStateMigration(returnErr == nil)
+			s.cfg.ChainLock.Unlock()
 		}
 	}()
 
 	start := time.Now()
 
-	srcState := bc.StateCache()
-	dstState := state.NewDatabase(bc.db)
+	srcState := s.db
+	dstState := NewDatabase(s.diskDB)
 
 	// NOTE: lruCache is mandatory when state migration and block processing are executed simultaneously
 	lruCache, _ := lru.New(int(2 * units.Giga / common.HashLength)) // 2GB for 62,500,000 common.Hash key values
-	trieSync := state.NewStateSync(rootHash, dstState.TrieDB().DiskDB(), nil, lruCache, nil)
+	trieSync := NewStateSync(rootHash, dstState.TrieDB().DiskDB(), nil, lruCache, nil)
 	var queue []common.Hash
 
 	quitCh := make(chan struct{})
@@ -121,15 +142,15 @@ func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
 	resultCh := make(chan statedb.SyncResult, threads)
 
 	for range threads {
-		go bc.concurrentRead(srcState, quitCh, hashCh, resultCh)
+		go concurrentRead(srcState, quitCh, hashCh, resultCh)
 	}
 
 	stateTrieBatch := dstState.TrieDB().DiskDB().NewBatch(database.StateTrieDB)
 	defer stateTrieBatch.Release()
 	stats := migrationStats{initialStartTime: start, startTime: mclock.Now()}
 
-	if bc.testMigrationHook != nil {
-		bc.testMigrationHook()
+	if m.hook != nil {
+		m.hook()
 	}
 
 	// Migration main loop
@@ -170,7 +191,7 @@ func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
 
 		// Commit trie nodes
 		startWrite := time.Now()
-		written, err := bc.stateMigrationCommit(trieSync, stateTrieBatch)
+		written, err := migrationCommit(trieSync, stateTrieBatch)
 		if err != nil {
 			logger.Error("State migration is failed by commit error", "err", err)
 			return fmt.Errorf("failed to commit data #%d: %v", written, err)
@@ -182,16 +203,16 @@ func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
 		stats.stateMigrationReport(false, trieSync.Pending(), trieSync.CalcProgressPercentage())
 
 		select {
-		case <-bc.stopStateMigration:
+		case <-m.stop:
 			logger.Info("State migration terminated by request")
 			return errors.New("stop state migration")
-		case <-bc.quit:
+		case <-s.quit:
 			logger.Info("State migration stopped by quit signal; should continue on node restart")
 			return ErrQuitBySignal
 		default:
 		}
 
-		bc.readCnt, bc.committedCnt, bc.pendingCnt, bc.progress = stats.totalRead, stats.totalCommitted, trieSync.Pending(), stats.progress
+		m.readCnt, m.committedCnt, m.pendingCnt, m.progress = stats.totalRead, stats.totalCommitted, trieSync.Pending(), stats.progress
 	}
 
 	// Flush trie nodes which is not written yet.
@@ -201,7 +222,7 @@ func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
 	}
 
 	stats.stateMigrationReport(true, trieSync.Pending(), trieSync.CalcProgressPercentage())
-	bc.readCnt, bc.committedCnt, bc.pendingCnt, bc.progress = stats.totalRead, stats.totalCommitted, trieSync.Pending(), stats.progress
+	m.readCnt, m.committedCnt, m.pendingCnt, m.progress = stats.totalRead, stats.totalCommitted, trieSync.Pending(), stats.progress
 
 	// Clear memory of trieSync
 	trieSync = nil
@@ -213,7 +234,7 @@ func (bc *BlockChain) migrateState(rootHash common.Hash) (returnErr error) {
 		"totalElapsed", elapsed, "committed per second", speed)
 
 	startCheck := time.Now()
-	if err := state.CheckStateConsistencyParallel(srcState, dstState, rootHash, bc.quit); err != nil {
+	if err := CheckStateConsistencyParallel(srcState, dstState, rootHash, s.quit); err != nil {
 		logger.Error("State migration : copied stateDB is invalid", "err", err)
 		return err
 	}
@@ -261,150 +282,100 @@ func (st *migrationStats) stateMigrationReport(force bool, pending int, progress
 	}
 }
 
-func (bc *BlockChain) checkTrieContents(oldDB, newDB *statedb.Database, root common.Hash) ([]common.Address, error) {
-	oldTrie, err := statedb.NewSecureTrie(root, oldDB, nil)
-	if err != nil {
-		return nil, err
-	}
+// ResumeMigration continues the migration of the state of a block, which was
+// running when the node stopped, or removes the old state database left by
+// a finished migration.
+func (s *Manager) ResumeMigration() {
+	if s.diskDB.InMigration() {
+		number := s.diskDB.MigrationBlockNumber()
 
-	newTrie, err := statedb.NewSecureTrie(root, newDB, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	diff, _ := statedb.NewDifferenceIterator(oldTrie.NodeIterator([]byte{}), newTrie.NodeIterator([]byte{}))
-	iter := statedb.NewIterator(diff)
-
-	var dirty []common.Address
-
-	for iter.Next() {
-		key := newTrie.GetKey(iter.Key)
-		if key == nil {
-			return nil, fmt.Errorf("no preimage found for hash %x", iter.Key)
-		}
-
-		dirty = append(dirty, common.BytesToAddress(key))
-	}
-
-	return dirty, nil
-}
-
-// restartStateMigration is called when a server is restarted while migration. The migration continues.
-func (bc *BlockChain) restartStateMigration() {
-	if bc.db.InMigration() {
-		number := bc.db.MigrationBlockNumber()
-
-		block := bc.GetBlockByNumber(number)
-		if block == nil {
+		header := s.cfg.HeaderAt(number)
+		if header == nil {
 			logger.Error("failed to get migration block number", "blockNumber", number)
 			return
 		}
+		r := header.Root
 
-		root := block.Root()
-		logger.Warn("State migration : Restarted", "blockNumber", number, "root", root.String())
+		logger.Warn("State migration : Restarted", "blockNumber", number, "root", r.String())
 
-		bc.wg.Go(func() {
-			bc.migrateState(root)
+		s.wg.Go(func() {
+			s.migrate(r)
 		})
-	} else if dbPath := bc.db.MigrationOldDBPath(); dbPath != "" {
+	} else if dbPath := s.diskDB.MigrationOldDBPath(); dbPath != "" {
 		// Remove the old database if it exists.
 		// This can happen when the node is stopped while removing the old database.
-		go bc.db.RemoveOldDB(dbPath, nil)
+		go s.diskDB.RemoveOldDB(dbPath, nil)
 	}
 }
 
-// PrepareStateMigration sets prepareStateMigration to be called in checkStartStateMigration.
-func (bc *BlockChain) PrepareStateMigration() error {
-	if bc.db.ReadPruningEnabled() {
+// PrepareMigration starts the migration at the next block whose state is
+// flushed to disk, after the head.
+func (s *Manager) PrepareMigration() error {
+	next := s.cfg.Head().Number.Uint64() + 1
+	if s.diskDB.ReadPruningEnabled() {
 		return errors.New("state migration not supported with live pruning enabled")
 	}
 
-	if bc.db.InMigration() || bc.prepareStateMigration {
+	if s.diskDB.InMigration() || !s.FlushNext(s.startPreparedMigration) {
 		return errors.New("migration already started")
 	}
 
-	bc.prepareStateMigration = true
-	logger.Info("State migration is prepared", "expectedMigrationStartingBlockNumber", bc.CurrentBlock().NumberU64()+1)
+	logger.Info("State migration is prepared", "expectedMigrationStartingBlockNumber", next)
 
 	return nil
 }
 
-func (bc *BlockChain) checkStartStateMigration(number uint64, root common.Hash) bool {
-	if bc.prepareStateMigration {
-		logger.Info("State migration is started", "block", number, "root", root)
+// startPreparedMigration starts the prepared migration of the state of the
+// block number with root, flushed to disk, and asks to flush the trie nodes
+// in memory to the new database.
+func (s *Manager) startPreparedMigration(number uint64, root common.Hash) bool {
+	logger.Info("State migration is started", "block", number, "root", root)
 
-		if err := bc.StartStateMigration(number, root); err != nil {
-			logger.Error("Failed to start state migration", "err", err)
-		}
-
-		bc.prepareStateMigration = false
-
-		return true
+	if err := s.StartMigration(number, root); err != nil {
+		logger.Error("Failed to start state migration", "err", err)
 	}
-
-	return false
+	return true
 }
 
-// migrationPrerequisites is a collection of functions that needs to be run
-// before state trie migration. If one of the functions fails to run,
-// the migration will not start.
-var migrationPrerequisites []func(uint64) error
-
-func RegisterMigrationPrerequisites(f func(uint64) error) {
-	migrationPrerequisites = append(migrationPrerequisites, f)
-}
-
-// For tests starting and stopping node instances, clear residual migrationPrerequisites
-// that might no longer work.
-// TODO: remove this function when we have a better way to handle this.
-// e.g. StartStateMigration directly calls checkStakingInfoStored instead of this callback.
-func ClearMigrationPrerequisites() {
-	migrationPrerequisites = nil
-}
-
-// StartStateMigration checks prerequisites, configures DB and starts migration.
-func (bc *BlockChain) StartStateMigration(number uint64, root common.Hash) error {
-	if bc.db.InMigration() {
+// StartMigration configures the database and starts the migration of the state of the block number with root.
+func (s *Manager) StartMigration(number uint64, root common.Hash) error {
+	if s.diskDB.InMigration() {
 		return errors.New("migration already started")
 	}
 
-	for _, f := range migrationPrerequisites {
-		if err := f(number); err != nil {
-			return err
-		}
-	}
-
-	if err := bc.db.CreateMigrationDBAndSetStatus(number); err != nil {
+	if err := s.diskDB.CreateMigrationDBAndSetStatus(number); err != nil {
 		return err
 	}
 
-	bc.wg.Go(func() {
-		bc.migrateState(root)
+	s.wg.Go(func() {
+		s.migrate(root)
 	})
 
 	return nil
 }
 
-func (bc *BlockChain) StopStateMigration() error {
-	if !bc.db.InMigration() {
+// StopMigration stops the running migration.
+func (s *Manager) StopMigration() error {
+	if !s.diskDB.InMigration() {
 		return errors.New("not in migration")
 	}
 
-	bc.stopStateMigration <- struct{}{}
+	s.migration.stop <- struct{}{}
 
 	return nil
 }
 
-// StateMigrationStatus returns if it is in migration, the block number of in migration,
+// MigrationStatus returns if it is in migration, the block number of in migration,
 // number of committed blocks and number of pending blocks
-func (bc *BlockChain) StateMigrationStatus() (bool, uint64, int, int, int, float64, error) {
-	return bc.db.InMigration(), bc.db.MigrationBlockNumber(), bc.readCnt, bc.committedCnt, bc.pendingCnt, bc.progress, bc.migrationErr
+func (s *Manager) MigrationStatus() (bool, uint64, int, int, int, float64, error) {
+	m := &s.migration
+	return s.diskDB.InMigration(), s.diskDB.MigrationBlockNumber(), m.readCnt, m.committedCnt, m.pendingCnt, m.progress, m.err
 }
 
-// trieWarmUp runs state.Iterator, generated from the given state or storage trie node hash,
+// trieWarmUp runs Iterator, generated from the given state or storage trie node hash,
 // until it reaches end. If it reaches end, it will send a nil error to errCh to indicate that
 // it has been finished.
-func (bc *BlockChain) trieWarmUp(next func() bool, resultCh chan int, errCh chan error) {
+func (s *Manager) trieWarmUp(next func() bool, resultCh chan int, errCh chan error) {
 	var (
 		resultErr    error
 		reportTicker = time.NewTicker(DefaultWarmUpReportInterval)
@@ -419,10 +390,10 @@ func (bc *BlockChain) trieWarmUp(next func() bool, resultCh chan int, errCh chan
 
 	for next() {
 		select {
-		case <-bc.quitWarmUp:
+		case <-s.warmUp:
 			return
-		case <-bc.quit:
-			resultErr = blockChainStopWarmUpErr
+		case <-s.quit:
+			resultErr = stateStoppedErr
 			return
 		case <-reportTicker.C:
 			resultCh <- nReads
@@ -436,10 +407,10 @@ func (bc *BlockChain) trieWarmUp(next func() bool, resultCh chan int, errCh chan
 // warmUpTrieCache receives errors from each warm-up goroutine.
 // If it receives a nil error, it means a child goroutine is successfully terminated.
 // It also periodically checks and logs warm-up progress.
-func (bc *BlockChain) warmUpTrieCache(mainTrieDB *statedb.Database, minLoad uint, nChildren int,
+func (s *Manager) warmUpTrieCache(mainTrieDB *statedb.Database, minLoad uint, nChildren int,
 	resultCh chan int, errCh chan error,
 ) {
-	defer func() { bc.quitWarmUp = nil }()
+	defer func() { s.warmUp = nil }()
 
 	cache := mainTrieDB.TrieNodeCache()
 	mainTrieCacheLimit := mainTrieDB.GetTrieNodeLocalCacheByteLimit()
@@ -487,7 +458,7 @@ func (bc *BlockChain) warmUpTrieCache(mainTrieDB *statedb.Database, minLoad uint
 			logged = time.Now()
 			updateContext()
 			if progress > uint64(minLoad) { // more than 90%
-				close(bc.quitWarmUp)
+				close(s.warmUp)
 				logger.Info("Warm up is completed", context...)
 				return
 			}
@@ -509,72 +480,78 @@ func (bc *BlockChain) warmUpTrieCache(mainTrieDB *statedb.Database, minLoad uint
 	logger.Info("Warm up is completed", context...)
 }
 
-// StartWarmUp retrieves all state/storage tries of the latest state root and caches the tries.
-func (bc *BlockChain) StartWarmUp(minLoad uint) error {
-	block, db, mainTrieDB, err := bc.prepareWarmUp()
+// StartWarmUp retrieves all state/storage tries of the last state flushed to
+// disk and caches the tries.
+func (s *Manager) StartWarmUp(minLoad uint) error {
+	header, err := s.lastCommittedHeader()
+	if err != nil {
+		return err
+	}
+	number, root := header.Number.Uint64(), header.Root
+	db, mainTrieDB, err := s.prepareWarmUp()
 	if err != nil {
 		return err
 	}
 	// retrieve children nodes of state trie root node
-	children, err := db.TrieDB().NodeChildren(block.Root().ExtendZero())
+	children, err := db.TrieDB().NodeChildren(root.ExtendZero())
 	if err != nil {
 		return err
 	}
 	// run goroutine for each child node
 	resultCh := make(chan int, len(children))
 	errCh := make(chan error)
-	bc.quitWarmUp = make(chan struct{})
+	s.warmUp = make(chan struct{})
 	for idx, child := range children {
 		childHash := child.Unextend()
-		stateDB, err := state.New(childHash, db, nil, nil)
+		stateDB, err := New(childHash, db, nil, nil)
 		if err != nil {
 			logger.Warn("[WarmUp] Failed to get state",
 				"rootHash", children, "childIdx", idx, "childHash", childHash.Hex())
 			continue
 		}
-		it := state.NewNodeIterator(stateDB)
-		go bc.trieWarmUp(it.Next, resultCh, errCh)
+		it := NewNodeIterator(stateDB)
+		go s.trieWarmUp(it.Next, resultCh, errCh)
 	}
 	// run a warm-up checker routine
-	go bc.warmUpTrieCache(mainTrieDB, minLoad, len(children), resultCh, errCh)
-	logger.Info("State trie warm-up is started", "blockNum", block.NumberU64(),
-		"root", block.Root().String(), "len(children)", len(children))
+	go s.warmUpTrieCache(mainTrieDB, minLoad, len(children), resultCh, errCh)
+	logger.Info("State trie warm-up is started", "blockNum", number,
+		"root", root.String(), "len(children)", len(children))
 	return nil
 }
 
 // StopWarmUp stops the warming up process.
-func (bc *BlockChain) StopWarmUp() error {
-	if bc.quitWarmUp == nil {
+func (s *Manager) StopWarmUp() error {
+	if s.warmUp == nil {
 		return ErrNotInWarmUp
 	}
 
-	close(bc.quitWarmUp)
+	close(s.warmUp)
 
 	return nil
 }
 
-// StartCollectingTrieStats collects state or storage trie statistics.
-func (bc *BlockChain) StartCollectingTrieStats(contractAddr common.Address) error {
-	block := bc.GetBlockByNumber(bc.lastCommittedBlock)
-	if block == nil {
-		return fmt.Errorf("Block #%d not found", bc.lastCommittedBlock)
+// StartCollectingTrieStats collects the statistics of the last state trie
+// flushed to disk, or of the storage trie of contractAddr in it.
+func (s *Manager) StartCollectingTrieStats(contractAddr common.Address) error {
+	header, err := s.lastCommittedHeader()
+	if err != nil {
+		return err
 	}
-
-	mainTrieDB := bc.StateCache().TrieDB()
-	cache := mainTrieDB.TrieNodeCache()
+	number, root := header.Number.Uint64(), header.Root
+	cache := s.db.TrieDB().TrieNodeCache()
 	if cache == nil {
 		return fmt.Errorf("target cache is nil")
 	}
-	db := state.NewDatabaseWithExistingCache(bc.db, cache)
+	db := NewDatabaseWithExistingCache(s.diskDB, cache)
 
-	startNode := block.Root().ExtendZero()
+	startNode := root.ExtendZero()
 	// If the contractAddr is given, start collecting stats from the root of storage trie
 	if !common.EmptyAddress(contractAddr) {
 		var err error
-		startNode, err = bc.GetContractStorageRoot(block, db, contractAddr)
+		startNode, err = ContractStorageRoot(root, db, contractAddr)
 		if err != nil {
 			logger.Error("Failed to get the contract storage root",
-				"contractAddr", contractAddr.String(), "rootHash", block.Root().String(),
+				"contractAddr", contractAddr.String(), "rootHash", root.String(),
 				"err", err)
 			return err
 		}
@@ -587,21 +564,21 @@ func (bc *BlockChain) StartCollectingTrieStats(contractAddr common.Address) erro
 	}
 
 	logger.Info("Started collecting trie statistics",
-		"blockNum", block.NumberU64(), "root", block.Root().String(), "len(children)", len(children))
+		"blockNum", number, "root", root.String(), "len(children)", len(children))
 	go collectTrieStats(db, startNode)
 
 	return nil
 }
 
 // collectChildrenStats wraps CollectChildrenStats, in order to send finish signal to resultCh.
-func collectChildrenStats(db state.Database, child common.ExtHash, resultCh chan<- statedb.NodeInfo) {
+func collectChildrenStats(db Database, child common.ExtHash, resultCh chan<- statedb.NodeInfo) {
 	db.TrieDB().CollectChildrenStats(child, 2, resultCh)
 	resultCh <- statedb.NodeInfo{Finished: true}
 }
 
 // collectTrieStats is the main function of collecting trie statistics.
 // It spawns goroutines for the upper-most children and iterates each sub-trie.
-func collectTrieStats(db state.Database, startNode common.ExtHash) {
+func collectTrieStats(db Database, startNode common.ExtHash) {
 	children, err := db.TrieDB().NodeChildren(startNode)
 	if err != nil {
 		logger.Error("Failed to retrieve the children of start node", "err", err)
@@ -662,9 +639,10 @@ func printDepthStats(depthCounter map[int]int) {
 	}
 }
 
-// GetContractStorageRoot returns the storage root of a contract based on the given block.
-func (bc *BlockChain) GetContractStorageRoot(block *types.Block, db state.Database, contractAddr common.Address) (common.ExtHash, error) {
-	stateDB, err := state.New(block.Root(), db, nil, nil)
+// ContractStorageRoot returns the storage root of contractAddr in the state
+// with root.
+func ContractStorageRoot(root common.Hash, db Database, contractAddr common.Address) (common.ExtHash, error) {
+	stateDB, err := New(root, db, nil, nil)
 	if err != nil {
 		return common.ExtHash{}, fmt.Errorf("failed to get StateDB - %w", err)
 	}
@@ -672,28 +650,23 @@ func (bc *BlockChain) GetContractStorageRoot(block *types.Block, db state.Databa
 }
 
 // prepareWarmUp creates and returns resources needed for state warm-up.
-func (bc *BlockChain) prepareWarmUp() (*types.Block, state.Database, *statedb.Database, error) {
-	// There is a chance of concurrent access to quitWarmUp, though not likely to happen.
-	if bc.quitWarmUp != nil {
-		return nil, nil, nil, fmt.Errorf("already warming up")
+func (s *Manager) prepareWarmUp() (Database, *statedb.Database, error) {
+	// There is a chance of concurrent access to warmUp, though not likely to happen.
+	if s.warmUp != nil {
+		return nil, nil, fmt.Errorf("already warming up")
 	}
 
-	block := bc.GetBlockByNumber(bc.lastCommittedBlock)
-	if block == nil {
-		return nil, nil, nil, fmt.Errorf("block #%d not found", bc.lastCommittedBlock)
-	}
-
-	mainTrieDB := bc.StateCache().TrieDB()
+	mainTrieDB := s.db.TrieDB()
 	cache := mainTrieDB.TrieNodeCache()
 	if cache == nil {
-		return nil, nil, nil, fmt.Errorf("target cache is nil")
+		return nil, nil, fmt.Errorf("target cache is nil")
 	}
-	db := state.NewDatabaseWithExistingCache(bc.db, cache)
-	return block, db, mainTrieDB, nil
+	db := NewDatabaseWithExistingCache(s.diskDB, cache)
+	return db, mainTrieDB, nil
 }
 
-func prepareContractWarmUp(block *types.Block, db state.Database, contractAddr common.Address) (common.ExtHash, state.Trie, error) {
-	stateDB, err := state.New(block.Root(), db, nil, nil)
+func prepareContractWarmUp(root common.Hash, db Database, contractAddr common.Address) (common.ExtHash, Trie, error) {
+	stateDB, err := New(root, db, nil, nil)
 	if err != nil {
 		return common.ExtHash{}, nil, fmt.Errorf("failed to get StateDB, err: %w", err)
 	}
@@ -708,15 +681,20 @@ func prepareContractWarmUp(block *types.Block, db state.Database, contractAddr c
 	return storageTrieRoot, storageTrie, nil
 }
 
-// StartContractWarmUp retrieves a storage trie of the latest state root and caches the trie
-// corresponding to the given contract address.
-func (bc *BlockChain) StartContractWarmUp(contractAddr common.Address, minLoad uint) error {
-	block, db, mainTrieDB, err := bc.prepareWarmUp()
+// StartContractWarmUp retrieves the storage trie of contractAddr in the last
+// state flushed to disk and caches the trie.
+func (s *Manager) StartContractWarmUp(contractAddr common.Address, minLoad uint) error {
+	header, err := s.lastCommittedHeader()
+	if err != nil {
+		return err
+	}
+	number, root := header.Number.Uint64(), header.Root
+	db, mainTrieDB, err := s.prepareWarmUp()
 	if err != nil {
 		return err
 	}
 	// prepare contract storage trie specific resources - storageTrieRoot and storageTrie
-	storageTrieRoot, storageTrie, err := prepareContractWarmUp(block, db, contractAddr)
+	storageTrieRoot, storageTrie, err := prepareContractWarmUp(root, db, contractAddr)
 	if err != nil {
 		return fmt.Errorf("failed to prepare contract warm-up, err: %w", err)
 	}
@@ -728,15 +706,26 @@ func (bc *BlockChain) StartContractWarmUp(contractAddr common.Address, minLoad u
 	// run goroutine for each child node
 	resultCh := make(chan int, len(children))
 	errCh := make(chan error)
-	bc.quitWarmUp = make(chan struct{})
+	s.warmUp = make(chan struct{})
 	for _, child := range children {
 		it := statedb.NewIterator(storageTrie.NodeIterator(child[:]))
-		go bc.trieWarmUp(it.Next, resultCh, errCh)
+		go s.trieWarmUp(it.Next, resultCh, errCh)
 	}
 	// run a warm-up checker routine
-	go bc.warmUpTrieCache(mainTrieDB, minLoad, len(children), resultCh, errCh)
+	go s.warmUpTrieCache(mainTrieDB, minLoad, len(children), resultCh, errCh)
 	logger.Info("Contract storage trie warm-up is started",
-		"blockNum", block.NumberU64(), "root", block.Root().String(), "contractAddr", contractAddr.String(),
+		"blockNum", number, "root", root.String(), "contractAddr", contractAddr.String(),
 		"contractStorageRoot", storageTrieRoot.String(), "len(children)", len(children))
 	return nil
+}
+
+// lastCommittedHeader returns the header of the last block whose state was
+// flushed to disk.
+func (s *Manager) lastCommittedHeader() (*types.Header, error) {
+	number := s.LastCommitted()
+	header := s.cfg.HeaderAt(number)
+	if header == nil {
+		return nil, fmt.Errorf("block #%d not found", number)
+	}
+	return header, nil
 }

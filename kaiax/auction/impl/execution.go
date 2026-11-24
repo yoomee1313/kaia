@@ -66,7 +66,7 @@ func (a *AuctionModule) updateAuctionInfo(num *big.Int) bool {
 	if header == nil {
 		return false
 	}
-	_, err := a.Chain.StateAt(header.Root)
+	_, err := a.Chain.StateAt(header)
 	if err != nil {
 		return false
 	}

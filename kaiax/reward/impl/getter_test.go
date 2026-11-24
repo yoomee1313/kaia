@@ -1922,7 +1922,7 @@ func newRewardDistributionTestContext(t *testing.T, config *params.ChainConfig, 
 		ValsetModule:  mValset,
 	}))
 
-	stateDB, err := chain.StateAt(chain.Genesis().Root())
+	stateDB, err := chain.StateAt(chain.Genesis().Header())
 	require.NoError(t, err)
 
 	t.Cleanup(chain.Stop)

@@ -288,11 +288,24 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			return nil, err
 		}
 	}
+	mode := config.HistoryMode
+	if config.NoPruning {
+		mode = database.HistoryModeFull
+	}
+	// A history node keeps its state with live pruning when it starts on a new
+	// database, whatever --state.live-pruning says. On a database with blocks
+	// it keeps the pruning the database has, so that a node switches modes.
+	if mode == database.HistoryModeBAL {
+		if head := chainDB.ReadHeaderNumber(chainDB.ReadHeadBlockHash()); head == nil || *head == 0 {
+			config.LivePruning = true
+		}
+	}
 	var (
 		sealer      = engine.NewSealer(chainConfig, ctx.NodeKey())
 		vmConfig    = config.getVMConfig()
 		cacheConfig = &blockchain.CacheConfig{
 			ArchiveMode:          config.NoPruning,
+			HistoryMode:          mode,
 			CacheSize:            config.TrieCacheSize,
 			BlockInterval:        config.TrieBlockInterval,
 			TriesInMemory:        config.TriesInMemory,
@@ -301,12 +314,15 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 			SenderTxHashIndexing: config.SenderTxHashIndexing,
 			SnapshotCacheSize:    config.SnapshotCacheSize,
 			SnapshotAsyncGen:     config.SnapshotAsyncGen,
+			BAL:                  state.BALConfig{SkipReads: config.BALSkipReads},
 		}
 	)
-
 	bc, err := blockchain.NewBlockChain(chainDB, cacheConfig, cn.chainConfig, sealer, vmConfig)
 	if err != nil {
 		return nil, err
+	}
+	if config.Genesis != nil {
+		bc.SetGenesisSpec(config.Genesis)
 	}
 	bc.SetCanonicalBlock(config.StartBlockNumber)
 
@@ -381,7 +397,6 @@ func New(ctx *node.ServiceContext, config *Config) (*CN, error) {
 	if cn.protocolManager, err = NewProtocolManager(cn.chainConfig, config.SyncMode, config.NetworkId, cn.eventMux, cn.txPool, handler, cn.blockchain, chainDB, cacheLimit, ctx.NodeType(), config, cn.stakingModule); err != nil {
 		return nil, err
 	}
-
 	if err := cn.setAcceptTxs(); err != nil {
 		logger.Error("Failed to decode IstanbulExtra", "err", err)
 	}

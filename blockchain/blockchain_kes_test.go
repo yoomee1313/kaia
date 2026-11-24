@@ -109,7 +109,12 @@ func TestBlockChain_sendKESSubscriptionData(t *testing.T) {
 	defer close(logsCh)
 
 	// prepare Blockchain to be tested
-	bc := BlockChain{stateCache: state.NewDatabaseWithExistingCache(database.NewMemoryDBManager(), mockTrieNodeCache)}
+	memDB := database.NewMemoryDBManager()
+	states, err := state.NewManager(state.NewDatabaseWithExistingCache(memDB, mockTrieNodeCache), memDB, state.ManagerConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := BlockChain{states: states}
 	bc.SubscribeChainEvent(chainCh)
 	bc.SubscribeLogsEvent(logsCh)
 

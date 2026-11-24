@@ -451,6 +451,6 @@ func (hc *HeaderChain) State() (*state.StateDB, error) {
 	return nil, errors.New("HeaderChain does not support State() method")
 }
 
-func (hc *HeaderChain) StateAt(root common.Hash) (*state.StateDB, error) {
+func (hc *HeaderChain) StateAt(header *types.Header) (*state.StateDB, error) {
 	return nil, errors.New("HeaderChain does not support StateAt() method")
 }

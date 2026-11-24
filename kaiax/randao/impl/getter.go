@@ -64,7 +64,7 @@ func (r *RandaoModule) getParentBlockStateDB(blockNum *big.Int) (*state.StateDB,
 
 	// If no state exist at block number `parentNum`,
 	// return the error `consensus.ErrPrunedAncestor`
-	statedb, err := r.Chain.StateAt(pHeader.Root)
+	statedb, err := r.Chain.StateAt(pHeader)
 	if err != nil {
 		return nil, nil, consensus.ErrPrunedAncestor
 	}

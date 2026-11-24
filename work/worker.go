@@ -114,6 +114,9 @@ type Task struct {
 	receipts []*types.Receipt
 	blobs    int
 
+	// exec runs the block of the task, see Begin.
+	exec *blockchain.BlockExecution
+
 	createdAt time.Time
 }
 
@@ -227,7 +230,7 @@ func (self *worker) pending() (*types.Block, types.Receipts, *state.StateDB) {
 		return nil, nil, nil
 	}
 	receipts := self.chain.GetReceiptsByBlockHash(block.Hash())
-	state, err := self.chain.StateAt(block.Root())
+	state, err := self.chain.StateAt(block.Header())
 	if err != nil {
 		return nil, nil, nil
 	}
@@ -325,7 +328,7 @@ func (self *worker) update() {
 
 // makeCurrent creates a new environment for the current cycle.
 func (self *worker) makeCurrent(parent *types.Block, header *types.Header) error {
-	stateDB, err := self.chain.StateAt(parent.Root())
+	stateDB, err := self.chain.States().Open(parent.Header(), state.ForBuild)
 	if err != nil {
 		return err
 	}
@@ -427,11 +430,6 @@ func (self *worker) commitNewWork() {
 	// Obtain current work's state lock after we receive new work assignment.
 	self.current.stateMu.Lock()
 	defer self.current.stateMu.Unlock()
-
-	if err := self.chain.Processor().InitializeState(header, self.current.state); err != nil {
-		logger.Error("Failed to initialize state for mining", "number", header.Number, "err", err)
-		return
-	}
 
 	// Create the current work task
 	// measure miner balance before executing txs
@@ -629,6 +627,13 @@ func (env *Task) CommitTransactions(mux *event.TypeMux, txs *types.TransactionsB
 }
 
 func (env *Task) ApplyTransactions(txs *types.TransactionsByPriceAndNonce, bc BlockChain, nodeAddr common.Address, txBundlingModules []builder.TxBundlingModule) []*types.Log {
+	if env.exec == nil {
+		if err := env.Begin(bc, nodeAddr); err != nil {
+			logger.Error("Failed to begin the block", "number", env.header.Number, "err", err)
+			return nil
+		}
+	}
+
 	var (
 		arrayTxs                 = builder.Arrayify(txs)
 		incorporatedTxs, bundles = builder.ExtractBundlesAndIncorporate(arrayTxs, txBundlingModules)
@@ -687,6 +692,7 @@ func (env *Task) ApplyTransactions(txs *types.TransactionsByPriceAndNonce, bc Bl
 	vmConfig := &vm.Config{
 		RunningEVM: chEVM,
 	}
+	exec := env.exec.WithVMConfig(vmConfig)
 
 	var numTxsChecked int64 = 0
 	var numTxsNonceTooLow int64 = 0
@@ -777,14 +783,13 @@ CommitTransactionLoop:
 		// Start executing the transaction
 		if len(targetBundle.BundleTxs) != 0 {
 			isExecutingBundleTxs.Store(1)
-			err, tx, logs = env.commitBundleTransaction(targetBundle, bc, nodeAddr, vmConfig)
+			err, tx, logs = env.commitBundleTransaction(targetBundle, exec, nodeAddr)
 			if err != nil && tx != nil {
 				// override sender to error tx
 				from, _ = types.Sender(env.signer, tx)
 			}
 		} else {
-			env.state.SetTxContext(tx.Hash(), common.Hash{}, env.tcount)
-			err, logs = env.commitTransaction(tx, bc, nodeAddr, vmConfig)
+			err, logs = env.commitTransaction(tx, exec)
 		}
 
 		switch err {
@@ -875,10 +880,10 @@ CommitTransactionLoop:
 	return coalescedLogs
 }
 
-func (env *Task) commitTransaction(tx *types.Transaction, bc BlockChain, nodeAddr common.Address, vmConfig *vm.Config) (error, []*types.Log) {
+func (env *Task) commitTransaction(tx *types.Transaction, exec *blockchain.BlockExecution) (error, []*types.Log) {
 	snap := env.state.Snapshot()
 
-	receipt, _, err := bc.ApplyTransaction(env.config, &nodeAddr, env.state, env.header, tx, &env.header.GasUsed, vmConfig)
+	receipt, _, err := exec.ApplyTx(env.tcount, tx)
 	if err != nil {
 		if err != vm.ErrInsufficientBalance && err != vm.ErrTotalTimeLimitReached {
 			tx.MarkUnexecutable(true)
@@ -899,7 +904,7 @@ func (env *Task) commitTransaction(tx *types.Transaction, bc BlockChain, nodeAdd
 	return nil, receipt.Logs
 }
 
-func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, nodeAddr common.Address, vmConfig *vm.Config) (error, *types.Transaction, []*types.Log) {
+func (env *Task) commitBundleTransaction(bundle *builder.Bundle, exec *blockchain.BlockExecution, nodeAddr common.Address) (error, *types.Transaction, []*types.Log) {
 	lastSnapshot := env.state.Copy()
 	gasUsedSnapshot := env.header.GasUsed
 	blobGasUsedSnapshot := env.header.BlobGasUsed
@@ -937,8 +942,7 @@ func (env *Task) commitBundleTransaction(bundle *builder.Bundle, bc BlockChain, 
 			return kerrors.ErrTxGeneration, nil, nil
 		}
 
-		env.state.SetTxContext(tx.Hash(), common.Hash{}, env.tcount)
-		receipt, _, err := bc.ApplyTransaction(env.config, &nodeAddr, env.state, env.header, tx, &env.header.GasUsed, vmConfig)
+		receipt, _, err := exec.ApplyTx(env.tcount, tx)
 		// Bundled tx will be rejected with any receipt.Status other than success.
 		// There may be cases where a revert occurs within the EVM, which could result in an attack on a tx sender in an already executed bundle.
 		if err != nil || receipt.Status != types.ReceiptStatusSuccessful {
@@ -1037,6 +1041,20 @@ func (env *Task) hasBlobSpace(tx *types.Transaction, bundle *builder.Bundle, nod
 	}
 
 	return true
+}
+
+// Begin starts executing the block of the task, built by nodeAddr, and runs
+// the changes before the txs. ApplyTransactions begins it if not yet begun.
+func (env *Task) Begin(bc BlockChain, nodeAddr common.Address) error {
+	exec, err := blockchain.BeginBlockExecution(bc, env.config, env.header, env.state, blockchain.BlockExecutionConfig{
+		Author:  nodeAddr,
+		UsedGas: &env.header.GasUsed,
+	})
+	if err != nil {
+		return err
+	}
+	env.exec = exec
+	return nil
 }
 
 func NewTask(config *params.ChainConfig, signer types.Signer, statedb *state.StateDB, header *types.Header) *Task {

@@ -30,9 +30,6 @@ var (
 	cacheGetFutureBlockMissMeter = metrics.NewRegisteredMeter("klay/cache/get/futureblock/miss", nil)
 	cacheGetFutureBlockHitMeter  = metrics.NewRegisteredMeter("klay/cache/get/futureblock/hit", nil)
 
-	trieDBNodesSizeBytesGauge = metrics.NewRegisteredGauge("klay/triedb/nodessizebytes", nil)
-	trieDBPreimagesSizeGauge  = metrics.NewRegisteredGauge("klay/triedb/preimagessizebytes", nil)
-
 	headBlockNumberGauge = metrics.NewRegisteredGauge("blockchain/head/blocknumber", nil)
 	blockTxCountsGauge   = metrics.NewRegisteredGauge("blockchain/block/tx/gauge", nil)
 	blockTxCountsCounter = metrics.NewRegisteredCounter("blockchain/block/tx/counter", nil)

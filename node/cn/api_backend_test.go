@@ -465,7 +465,7 @@ func TestCNAPIBackend_StateAndHeaderByNumber(t *testing.T) {
 		mockCtrl, mockBlockChain, _, api := newCNAPIBackend(t)
 
 		mockBlockChain.EXPECT().GetHeaderByNumber(blockNum).Return(expectedHeader).Times(1)
-		mockBlockChain.EXPECT().StateAt(expectedHeader.Root).Return(stateDB, nil).Times(1)
+		mockBlockChain.EXPECT().StateAt(expectedHeader).Return(stateDB, nil).Times(1)
 		returnedStateDB, header, err := api.StateAndHeaderByNumber(context.Background(), rpc.BlockNumber(blockNum))
 
 		assert.Equal(t, stateDB, returnedStateDB)

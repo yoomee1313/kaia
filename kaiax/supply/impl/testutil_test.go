@@ -160,7 +160,6 @@ func (s *SupplyTestSuite) SetupTest() {
 
 		dbm         = database.NewMemoryDBManager()
 		cacheConfig = &blockchain.CacheConfig{
-			ArchiveMode:         false,
 			CacheSize:           512,
 			BlockInterval:       128,
 			TriesInMemory:       128,
@@ -361,7 +360,6 @@ func setupMockStaking(mStaking *staking_mock.MockStakingModule) {
 
 func setupBlocks(t *testing.T, config *params.ChainConfig, genesisBlock *types.Block, dbm database.DBManager, mGov *gov_mock.MockGovModule, mStaking *staking_mock.MockStakingModule, mValset *valset_mock.MockValsetModule) []*types.Block {
 	cacheConfig := &blockchain.CacheConfig{
-		ArchiveMode:         false,
 		CacheSize:           512,
 		BlockInterval:       128,
 		TriesInMemory:       128,
@@ -571,7 +569,7 @@ func (s *SupplyTestSuite) testcases() []supplyTC {
 
 func (s *SupplyTestSuite) dumpState(num uint64) {
 	header := s.chain.GetHeaderByNumber(num)
-	stateDB, _ := s.chain.StateAt(header.Root)
+	stateDB, _ := s.chain.StateAt(header)
 	dump := stateDB.RawDump()
 
 	var out strings.Builder

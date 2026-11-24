@@ -255,7 +255,7 @@ func (bcdata *BCData) MineABlock(transactions types.Transactions, signer types.S
 	}
 	prof.Profile("mine_prepareHeader", time.Now().Sub(start))
 
-	statedb, err := bcdata.bc.PrunableStateAt(bcdata.bc.CurrentBlock().Root(), bcdata.bc.CurrentBlock().NumberU64())
+	statedb, err := bcdata.bc.States().Open(bcdata.bc.CurrentBlock().Header(), state.ForBuild)
 	if err != nil {
 		return nil, nil, nil, err
 	}

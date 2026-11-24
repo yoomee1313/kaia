@@ -83,7 +83,7 @@ func TestGetNodesCache(t *testing.T) {
 		mockChain := chain_mock.NewMockBlockChain(ctrl)
 		mockChain.EXPECT().Config().Return(testPermissionlessConfig(0, 10))
 		mockChain.EXPECT().GetHeaderByNumber(uint64(0)).Return(genesisHeader)
-		mockChain.EXPECT().StateAt(root).Return(nil, stateErr)
+		mockChain.EXPECT().StateAt(genesisHeader).Return(nil, stateErr)
 
 		v := NewValsetModule()
 		v.Chain = mockChain
@@ -102,7 +102,7 @@ func TestGetNodesCache(t *testing.T) {
 		mockChain := chain_mock.NewMockBlockChain(ctrl)
 		mockChain.EXPECT().Config().Return(testPermissionlessConfig(0, 10))
 		mockChain.EXPECT().GetHeaderByNumber(uint64(9)).Return(parentHeader)
-		mockChain.EXPECT().StateAt(root).Return(nil, stateErr)
+		mockChain.EXPECT().StateAt(parentHeader).Return(nil, stateErr)
 
 		v := NewValsetModule()
 		v.Chain = mockChain
@@ -193,7 +193,7 @@ func TestGetNodesParentReadErrors(t *testing.T) {
 		mockChain := chain_mock.NewMockBlockChain(ctrl)
 		mockChain.EXPECT().Config().Return(testPermissionlessConfig(0, 10))
 		mockChain.EXPECT().GetHeaderByNumber(uint64(9)).Return(parentHeader)
-		mockChain.EXPECT().StateAt(root).Return(nil, stateErr)
+		mockChain.EXPECT().StateAt(parentHeader).Return(nil, stateErr)
 
 		v := NewValsetModule()
 		v.Chain = mockChain
@@ -554,7 +554,7 @@ func TestInstallABv2RegistryActivation(t *testing.T) {
 			v := NewValsetModule()
 			v.Chain = chain
 
-			statedb, err := chain.StateAt(head.Root)
+			statedb, err := chain.StateAt(head)
 			require.NoError(t, err)
 			records := make([]testRegistryRecord, len(tc.records))
 			for i, r := range tc.records {
@@ -694,7 +694,7 @@ func TestGetNodesExcludesUserTxAtCurrentBlock(t *testing.T) {
 
 	header1 := chain.GetHeaderByNumber(1)
 	require.NotNil(t, header1)
-	state1, err := chain.StateAt(header1.Root)
+	state1, err := chain.StateAt(header1)
 	require.NoError(t, err)
 	snapshot1, err := system.ReadABv2Snapshot(state1, chain, header1)
 	require.NoError(t, err)
@@ -785,7 +785,7 @@ func newABv2Harness(t *testing.T, options ...abv2HarnessOpt) *testABv2Harness {
 	v.Chain = chain
 
 	header := chain.CurrentHeader()
-	statedb, err := chain.StateAt(header.Root)
+	statedb, err := chain.StateAt(header)
 	require.NoError(t, err)
 	require.NoError(t, system.InstallRegistry(statedb, &params.RegistryConfig{
 		Records: map[string]common.Address{
@@ -820,7 +820,7 @@ func newABv2Harness(t *testing.T, options ...abv2HarnessOpt) *testABv2Harness {
 	t.Cleanup(func() { _ = initializedBackend.Close() })
 	initializedChain := initializedBackend.BlockChain()
 	initializedHeader := initializedChain.CurrentHeader()
-	initializedStateDB, err := initializedChain.StateAt(initializedHeader.Root)
+	initializedStateDB, err := initializedChain.StateAt(initializedHeader)
 	require.NoError(t, err)
 	initializedValset := NewValsetModule()
 	initializedValset.Chain = initializedChain
