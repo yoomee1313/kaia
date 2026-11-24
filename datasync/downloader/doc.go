@@ -25,11 +25,14 @@ Package downloader contains the manual full chain synchronisation.
 
 The downloader is responsible for synchronizing up-to-date status from the peers connected to it. To do this,
 it downloads "headers", "bodies", and "receipts" in parallel, merges them through the pipeline, and reflects them in the state trie.
+A node that syncs by applying block access lists (BALs) also downloads the receipts and BALs of the blocks that
+BALs.Applies accepts, and inserts those blocks by applying their BALs instead of executing them.
 
 # Source Files
 
 Downloader related functions and variables are defined in the files listed below.
   - api.go              : Console APIs to get synchronization information.
+  - bals.go             : The BALs interface, and the download and insertion of the blocks inserted by applying their BALs.
   - downloader.go       : Functions and variables to sync peer and block. And modules for QoS(Quality of Service).
   - downloader_test.go  : Functions for testing the downloader package.
   - events.go           : Definitions of event types.

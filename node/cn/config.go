@@ -147,6 +147,12 @@ type Config struct {
 	// NoPruning makes it an archive, which is a full node.
 	HistoryMode database.HistoryMode
 
+	// Sync by applying the block access lists of the blocks up to the last
+	// block of the signed BAL hash chain, a chain file or the directory of
+	// its npm package, instead of executing them; off with --sync.execute.
+	SyncApplyBALs bool
+	BALHashChain  string
+
 	// Mining-related options
 	ServiceChainSigner common.Address `toml:",omitempty"`
 	ExtraData          []byte         `toml:",omitempty"`

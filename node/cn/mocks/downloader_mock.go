@@ -136,6 +136,32 @@ func (mr *MockProtocolManagerDownloaderMockRecorder) DeliverStakingInfos(arg0, a
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeliverStakingInfos", reflect.TypeOf((*MockProtocolManagerDownloader)(nil).DeliverStakingInfos), arg0, arg1)
 }
 
+// DeliverBALs mocks base method.
+func (m *MockProtocolManagerDownloader) DeliverBALs(arg0 string, arg1 [][]byte) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeliverBALs", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeliverBALs indicates an expected call of DeliverBALs.
+func (mr *MockProtocolManagerDownloaderMockRecorder) DeliverBALs(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeliverBALs", reflect.TypeOf((*MockProtocolManagerDownloader)(nil).DeliverBALs), arg0, arg1)
+}
+
+// SetBALs mocks base method.
+func (m *MockProtocolManagerDownloader) SetBALs(arg0 downloader.BALs) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetBALs", arg0)
+}
+
+// SetBALs indicates an expected call of SetBALs.
+func (mr *MockProtocolManagerDownloaderMockRecorder) SetBALs(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetBALs", reflect.TypeOf((*MockProtocolManagerDownloader)(nil).SetBALs), arg0)
+}
+
 // GetSnapSyncer mocks base method.
 func (m *MockProtocolManagerDownloader) GetSnapSyncer() *snap.Syncer {
 	m.ctrl.T.Helper()

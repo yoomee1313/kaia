@@ -23,6 +23,7 @@
 package downloader
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
@@ -93,6 +94,7 @@ var (
 	errInvalidBody             = errors.New("retrieved block body is invalid")
 	errInvalidReceipt          = errors.New("retrieved receipt is invalid")
 	errInvalidStakingInfo      = errors.New("retrieved staking info is invalid")
+	errInvalidBAL              = errors.New("retrieved block access list is invalid")
 	errCancelStateFetch        = errors.New("state data download canceled (requested)")
 	errCancelContentProcessing = errors.New("content processing canceled (requested)")
 	errCanceled                = errors.New("syncing canceled (requested)")
@@ -128,6 +130,7 @@ type Downloader struct {
 	lightchain    LightChain
 	blockchain    BlockChain
 	stakingModule staking.StakingModule
+	bals          BALs // nil unless blocks may be inserted by applying their BALs
 
 	// Callbacks
 	dropPeer peerDropFn // Drops a peer for misbehaving
@@ -143,9 +146,11 @@ type Downloader struct {
 	bodyCh            chan dataPack        // [kaia/62] Channel receiving inbound block bodies
 	receiptCh         chan dataPack        // [kaia/63] Channel receiving inbound receipts
 	stakingInfoCh     chan dataPack        // [kaia/65] Channel receiving inbound staking infos
+	balCh             chan dataPack        // [kaia/69] Channel receiving inbound BALs
 	bodyWakeCh        chan bool            // [kaia/62] Channel to signal the block body fetcher of new tasks
 	receiptWakeCh     chan bool            // [kaia/63] Channel to signal the receipt fetcher of new tasks
 	stakingInfoWakeCh chan bool            // [kaia/65] Channel to signal the staking info fetcher of new tasks
+	balWakeCh         chan bool            // [kaia/69] Channel to signal the BAL fetcher of new tasks
 	headerProcCh      chan []*types.Header // [kaia/62] Channel to feed the header processor new tasks
 
 	// for snapsyncer
@@ -217,8 +222,9 @@ type BlockChain interface {
 	// FastSyncCommitHead directly commits the head block to a certain entity.
 	FastSyncCommitHead(common.Hash) error
 
-	// InsertChain inserts a batch of blocks into the local chain.
-	InsertChain(types.Blocks) (int, error)
+	// InsertChainContext inserts a batch of blocks into the local chain, or
+	// with receipts applies their BALs, stopping once ctx is done.
+	InsertChainContext(context.Context, types.Blocks, []types.Receipts) (int, error)
 
 	// InsertReceiptChain inserts a batch of receipts into the local chain.
 	InsertReceiptChain(types.Blocks, []types.Receipts) (int, error)
@@ -255,9 +261,11 @@ func New(mode SyncMode, stateDB database.DBManager, stateBloom *statedb.SyncBloo
 		bodyCh:                    make(chan dataPack, 1),
 		receiptCh:                 make(chan dataPack, 1),
 		stakingInfoCh:             make(chan dataPack, 1),
+		balCh:                     make(chan dataPack, 1),
 		bodyWakeCh:                make(chan bool, 1),
 		receiptWakeCh:             make(chan bool, 1),
 		stakingInfoWakeCh:         make(chan bool, 1),
+		balWakeCh:                 make(chan bool, 1),
 		headerProcCh:              make(chan []*types.Header, 1),
 		quitCh:                    make(chan struct{}),
 		stateCh:                   make(chan dataPack),
@@ -428,13 +436,13 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 	d.queue.Reset(blockCacheMaxItems, blockCacheInitialItems)
 	d.peers.Reset()
 
-	for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh} {
+	for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh, d.balWakeCh} {
 		select {
 		case <-ch:
 		default:
 		}
 	}
-	for _, ch := range []chan dataPack{d.headerCh, d.bodyCh, d.receiptCh, d.stakingInfoCh} {
+	for _, ch := range []chan dataPack{d.headerCh, d.bodyCh, d.receiptCh, d.stakingInfoCh, d.balCh} {
 		for empty := false; !empty; {
 			select {
 			case <-ch:
@@ -532,7 +540,11 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 		d.committed = 0
 	}
 	// Initiate the sync using a concurrent header and content retrieval algorithm
-	d.queue.Prepare(origin+1, mode)
+	var bals BALs
+	if mode == FullSync {
+		bals = d.bals
+	}
+	d.queue.Prepare(origin+1, mode, bals)
 	if d.syncInitHook != nil {
 		d.syncInitHook(origin, height)
 	}
@@ -542,6 +554,7 @@ func (d *Downloader) syncWithPeer(p *peerConnection, hash common.Hash, td *big.I
 		func() error { return d.fetchBodies(origin + 1) },       // Bodies are retrieved during normal and fast sync
 		func() error { return d.fetchReceipts(origin + 1) },     // Receipts are retrieved during fast sync
 		func() error { return d.fetchStakingInfos(origin + 1) }, // StakingInfos are retrieved during fast sync
+		func() error { return d.fetchBALs(origin + 1) },         // BALs are retrieved for the blocks inserted by applying them
 		func() error { return d.processHeaders(origin+1, td) },
 	}
 	if mode == FastSync || mode == SnapSync {
@@ -818,6 +831,7 @@ func (d *Downloader) fetchHead(p *peerConnection) (head *types.Header, pivot *ty
 		case <-d.bodyCh:
 		case <-d.receiptCh:
 		case <-d.stakingInfoCh:
+		case <-d.balCh:
 			// Out of bounds delivery, ignore
 		}
 	}
@@ -915,6 +929,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 		case <-d.bodyCh:
 		case <-d.receiptCh:
 		case <-d.stakingInfoCh:
+		case <-d.balCh:
 			// Out of bounds delivery, ignore
 		}
 	}
@@ -980,6 +995,7 @@ func (d *Downloader) findAncestor(p *peerConnection, height uint64) (uint64, err
 			case <-d.bodyCh:
 			case <-d.receiptCh:
 			case <-d.stakingInfoCh:
+			case <-d.balCh:
 				// Out of bounds delivery, ignore
 			}
 		}
@@ -1164,7 +1180,7 @@ func (d *Downloader) fetchHeaders(p *peerConnection, from uint64) error {
 			d.dropPeer(p.id)
 
 			// Finish the sync gracefully instead of dumping the gathered data though
-			for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh} {
+			for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh, d.balWakeCh} {
 				select {
 				case ch <- false:
 				case <-d.cancelCh:
@@ -1367,7 +1383,7 @@ func (d *Downloader) fetchParts(deliveryCh chan dataPack, deliver func(dataPack)
 				// A newer request may already be in flight for this peer. Leave its
 				// state unchanged so the current response can still be delivered.
 
-			case errors.Is(err, errInvalidBody), errors.Is(err, errInvalidReceipt):
+			case errors.Is(err, errInvalidBody), errors.Is(err, errInvalidReceipt), errors.Is(err, errInvalidBAL):
 				if d.isMasterPeer(pid) {
 					return err
 				}
@@ -1562,7 +1578,7 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 			// Terminate header processing if we synced up
 			if len(headers) == 0 {
 				// Notify everyone that headers are fully processed
-				for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh} {
+				for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh, d.balWakeCh} {
 					select {
 					case ch <- false:
 					case <-d.cancelCh:
@@ -1685,7 +1701,7 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 			d.syncStatsLock.Unlock()
 
 			// Signal the content downloaders of the availablility of new tasks
-			for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh} {
+			for _, ch := range []chan bool{d.bodyWakeCh, d.receiptWakeCh, d.stakingInfoWakeCh, d.balWakeCh} {
 				select {
 				case ch <- true:
 				default:
@@ -1731,23 +1747,57 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 		"firstnum", first.Number, "firsthash", first.Hash(),
 		"lastnum", last.Number, "lasthash", last.Hash(),
 	)
-	blocks := make([]*types.Block, len(results))
-	for i, result := range results {
-		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions)
-	}
-
-	for _, block := range blocks {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-d.cancelCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	for len(results) > 0 {
 		select {
 		case <-d.cancelCh:
 			return errCanceled
 		default:
-			if _, err := d.blockchain.InsertChain(types.Blocks{block}); err != nil {
-				logger.Debug("Downloaded item processing failed", "number", block.Number(), "hash", block.Hash(), "err", err)
-				return fmt.Errorf("%w: %v", errInvalidChain, err)
-			}
 		}
+		withBAL := results[0].BAL != nil
+		n := 1
+		for n < len(results) && (results[n].BAL != nil) == withBAL {
+			n++
+		}
+		var err error
+		if withBAL {
+			err = d.insertBALResults(ctx, results[:n])
+		} else {
+			err = d.insertExecResults(ctx, results[:n])
+		}
+		if err != nil {
+			return err
+		}
+		results = results[n:]
 	}
 	return nil
+}
+
+// insertExecResults inserts the blocks of results by executing them.
+func (d *Downloader) insertExecResults(ctx context.Context, results []*fetchResult) error {
+	blocks := make(types.Blocks, len(results))
+	for i, result := range results {
+		blocks[i] = types.NewBlockWithHeader(result.Header).WithBody(result.Transactions)
+	}
+	n, err := d.blockchain.InsertChainContext(ctx, blocks, nil)
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return errCanceled
+	}
+	if n < len(blocks) {
+		logger.Debug("Downloaded item processing failed", "number", blocks[n].Number(), "hash", blocks[n].Hash(), "err", err)
+	}
+	return fmt.Errorf("%w: %v", errInvalidChain, err)
 }
 
 // processFastSyncContent takes fetch results from the queue and writes them to the

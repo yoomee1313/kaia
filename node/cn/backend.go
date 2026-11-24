@@ -920,8 +920,14 @@ func (s *CN) ChainDB() database.DBManager             { return s.chainDB }
 func (s *CN) IsListening() bool                       { return true } // Always listening
 func (s *CN) ProtocolVersion() int                    { return s.protocolManager.ProtocolVersion() }
 func (s *CN) NetVersion() uint64                      { return s.networkId }
-func (s *CN) Progress() kaia.SyncProgress             { return s.protocolManager.Downloader().Progress() }
 func (s *CN) GovModule() gov.GovModule                { return s.govModule }
+
+func (s *CN) Progress() kaia.SyncProgress {
+	if pm, ok := s.protocolManager.(*ProtocolManager); ok {
+		return pm.SyncProgress()
+	}
+	return s.protocolManager.Downloader().Progress()
+}
 
 func (s *CN) ReBroadcastTxs(transactions types.Transactions) {
 	s.protocolManager.ReBroadcastTxs(transactions)

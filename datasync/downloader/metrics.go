@@ -48,6 +48,11 @@ var (
 	stakingInfoDropMeter    = metrics.NewRegisteredMeter("klay/downloader/stakinginfo/drop", nil)
 	stakingInfoTimeoutMeter = metrics.NewRegisteredMeter("klay/downloader/stakinginfo/timeout", nil)
 
+	balInMeter      = metrics.NewRegisteredMeter("klay/downloader/bals/in", nil)
+	balReqTimer     = kaiametrics.NewRegisteredHybridTimer("klay/downloader/bals/req", nil)
+	balDropMeter    = metrics.NewRegisteredMeter("klay/downloader/bals/drop", nil)
+	balTimeoutMeter = metrics.NewRegisteredMeter("klay/downloader/bals/timeout", nil)
+
 	stateInMeter   = metrics.NewRegisteredMeter("klay/downloader/states/in", nil)
 	stateDropMeter = metrics.NewRegisteredMeter("klay/downloader/states/drop", nil)
 

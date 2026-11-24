@@ -539,6 +539,19 @@ var (
 		EnvVars:  []string{"KLAYTN_SNAPSHOT_BACKGROUND_GENERATION", "KAIA_SNAPSHOT_BACKGROUND_GENERATION"},
 		Category: "MISC",
 	}
+	SyncExecuteFlag = &cli.BoolFlag{
+		Name:     "sync.execute",
+		Usage:    "With --gcmode history, execute the blocks received from peers instead of applying their block access lists and receipts up to the last block of the signed BAL hash chain (--bal.hash-chain). Archive and full nodes and consensus nodes always execute",
+		Value:    false,
+		EnvVars:  []string{"KAIA_SYNC_EXECUTE"},
+		Category: "MISC",
+	}
+	BALHashChainFlag = &cli.StringFlag{
+		Name:     "bal.hash-chain",
+		Usage:    "Directory of the installed npm package @kaiachain/bal-hashchain (npm install @kaiachain/bal-hashchain), or a chain file with its .sig next to it. The signed pre-Amber BAL hash chain checks the block access lists fetched from peers before they are applied, and is needed without --sync.execute",
+		EnvVars:  []string{"KAIA_BAL_HASH_CHAIN"},
+		Category: "MISC",
+	}
 	BALSkipReadsFlag = &cli.BoolFlag{
 		Name:     "bal.skip-reads",
 		Usage:    "Stores only the writes of the block access lists, without their reads, which a BAL regeneration in reads mode can rebuild",

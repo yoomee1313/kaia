@@ -8,6 +8,8 @@ import (
 	big "math/big"
 	reflect "reflect"
 
+	"github.com/kaiachain/kaia/datasync/balsync"
+
 	gomock "github.com/golang/mock/gomock"
 	types "github.com/kaiachain/kaia/blockchain/types"
 	common "github.com/kaiachain/kaia/common"
@@ -355,17 +357,31 @@ func (mr *MockPeerMockRecorder) Handle(arg0 interface{}) *gomock.Call {
 }
 
 // Handshake mocks base method.
-func (m *MockPeer) Handshake(arg0 uint64, arg1, arg2 *big.Int, arg3, arg4 common.Hash) error {
+func (m *MockPeer) Handshake(arg0 uint64, arg1, arg2 *big.Int, arg3, arg4 common.Hash, arg5 *balsync.HistoryRange) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Handshake", arg0, arg1, arg2, arg3, arg4)
+	ret := m.ctrl.Call(m, "Handshake", arg0, arg1, arg2, arg3, arg4, arg5)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Handshake indicates an expected call of Handshake.
-func (mr *MockPeerMockRecorder) Handshake(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
+func (mr *MockPeerMockRecorder) Handshake(arg0, arg1, arg2, arg3, arg4, arg5 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Handshake", reflect.TypeOf((*MockPeer)(nil).Handshake), arg0, arg1, arg2, arg3, arg4)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Handshake", reflect.TypeOf((*MockPeer)(nil).Handshake), arg0, arg1, arg2, arg3, arg4, arg5)
+}
+
+// HistoryRange mocks base method.
+func (m *MockPeer) HistoryRange() *balsync.HistoryRange {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "HistoryRange")
+	ret0, _ := ret[0].(*balsync.HistoryRange)
+	return ret0
+}
+
+// HistoryRange indicates an expected call of HistoryRange.
+func (mr *MockPeerMockRecorder) HistoryRange() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HistoryRange", reflect.TypeOf((*MockPeer)(nil).HistoryRange))
 }
 
 // Head mocks base method.

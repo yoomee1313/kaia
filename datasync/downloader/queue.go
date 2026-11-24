@@ -45,6 +45,7 @@ const (
 	bodyType        = uint(0)
 	receiptType     = uint(1)
 	stakingInfoType = uint(2)
+	balType         = uint(3)
 )
 
 var (
@@ -84,9 +85,11 @@ type fetchResult struct {
 	Transactions types.Transactions
 	Receipts     types.Receipts
 	StakingInfo  *staking.P2PStakingInfo
+	BAL          []byte
+	BALPeer      string // the peer the BAL came from
 }
 
-func newFetchResult(header *types.Header, mode SyncMode, proposerPolicy uint64, stakingUpdateInterval uint64, isKaiaFork bool) *fetchResult {
+func newFetchResult(header *types.Header, mode SyncMode, applies bool, proposerPolicy uint64, stakingUpdateInterval uint64, isKaiaFork bool) *fetchResult {
 	var (
 		fastSync = mode == FastSync
 		snapSync = mode == SnapSync
@@ -97,8 +100,11 @@ func newFetchResult(header *types.Header, mode SyncMode, proposerPolicy uint64, 
 	if !header.EmptyBody() {
 		item.pending |= (1 << bodyType)
 	}
-	if (fastSync || snapSync) && !header.EmptyReceipts() {
+	if (fastSync || snapSync || applies) && !header.EmptyReceipts() {
 		item.pending |= (1 << receiptType)
+	}
+	if applies {
+		item.pending |= (1 << balType)
 	}
 	if (fastSync || snapSync) && proposerPolicy == uint64(istanbul.WeightedRandom) &&
 		(header.Number.Uint64()%stakingUpdateInterval == 0 && !isKaiaFork) {
@@ -130,6 +136,13 @@ func (f *fetchResult) SetReceiptsDone() {
 func (f *fetchResult) SetStakingInfoDone() {
 	if v := atomic.LoadInt32(&f.pending); (v & (1 << stakingInfoType)) != 0 {
 		atomic.AddInt32(&f.pending, -(1 << stakingInfoType))
+	}
+}
+
+// SetBALDone flags the BAL as finished.
+func (f *fetchResult) SetBALDone() {
+	if v := atomic.LoadInt32(&f.pending); (v & (1 << balType)) != 0 {
+		atomic.AddInt32(&f.pending, -(1 << balType))
 	}
 }
 
@@ -169,6 +182,12 @@ type queue struct {
 	stakingInfoTaskQueue *prque.Prque                  // [kaia/65] Priority queue of the headers to fetch the staking infos for
 	stakingInfoPendPool  map[string]*fetchRequest      // [kaia/65] Currently pending staking info retrieval operations
 
+	balTaskPool  map[common.Hash]*types.Header // [kaia/69] Pending BAL retrieval tasks, the blocks inserted by applying their BALs
+	balTaskQueue *prque.Prque                  // [kaia/69] Priority queue of the headers to fetch the BALs for
+	balPendPool  map[string]*fetchRequest      // [kaia/69] Currently pending BAL retrieval operations
+
+	bals BALs // nil unless the blocks may be inserted by applying their BALs
+
 	resultCache *resultStore       // Downloaded but not yet delivered fetch results
 	resultSize  common.StorageSize // Approximate size of a block (exponential moving average)
 
@@ -198,6 +217,7 @@ func newQueue(blockCacheLimit int, thresholdInitialSize int, proposerPolicy uint
 		receiptTaskQueue:      prque.New(),
 		receiptExpired:        make(map[string][][]*types.Header),
 		stakingInfoTaskQueue:  prque.New(),
+		balTaskQueue:          prque.New(),
 		active:                sync.NewCond(lock),
 		lock:                  lock,
 		proposerPolicy:        proposerPolicy,
@@ -236,6 +256,10 @@ func (q *queue) Reset(blockCacheLimit int, thresholdInitialSize int) {
 	q.stakingInfoTaskPool = make(map[common.Hash]*types.Header)
 	q.stakingInfoTaskQueue.Reset()
 	q.stakingInfoPendPool = make(map[string]*fetchRequest)
+
+	q.balTaskPool = make(map[common.Hash]*types.Header)
+	q.balTaskQueue.Reset()
+	q.balPendPool = make(map[string]*fetchRequest)
 
 	q.resultCache = newResultStore(blockCacheLimit)
 	q.resultCache.SetThrottleThreshold(uint64(thresholdInitialSize))
@@ -282,6 +306,14 @@ func (q *queue) PendingStakingInfos() int {
 	return q.stakingInfoTaskQueue.Size()
 }
 
+// PendingBALs retrieves the number of BALs pending for retrieval.
+func (q *queue) PendingBALs() int {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	return q.balTaskQueue.Size()
+}
+
 // InFlightHeaders retrieves whether there are header fetch requests currently
 // in flight.
 func (q *queue) InFlightHeaders() bool {
@@ -318,13 +350,22 @@ func (q *queue) InFlightStakingInfos() bool {
 	return len(q.stakingInfoPendPool) > 0
 }
 
+// InFlightBALs retrieves whether there are BAL fetch requests currently in
+// flight.
+func (q *queue) InFlightBALs() bool {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	return len(q.balPendPool) > 0
+}
+
 // Idle returns if the queue is fully idle or has some data still inside.
 func (q *queue) Idle() bool {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
-	queued := q.blockTaskQueue.Size() + q.receiptTaskQueue.Size() + q.stakingInfoTaskQueue.Size()
-	pending := len(q.blockPendPool) + len(q.receiptPendPool) + len(q.stakingInfoPendPool)
+	queued := q.blockTaskQueue.Size() + q.receiptTaskQueue.Size() + q.stakingInfoTaskQueue.Size() + q.balTaskQueue.Size()
+	pending := len(q.blockPendPool) + len(q.receiptPendPool) + len(q.stakingInfoPendPool) + len(q.balPendPool)
 
 	return (queued + pending) == 0
 }
@@ -396,8 +437,15 @@ func (q *queue) Schedule(headers []*types.Header, from uint64) []*types.Header {
 			q.blockTaskPool[hash] = header
 			q.blockTaskQueue.Push(header, -int64(header.Number.Uint64()))
 		}
+		applies := q.mode == FullSync && q.bals != nil && q.bals.Applies(header)
+		if applies {
+			if _, ok := q.balTaskPool[hash]; !ok {
+				q.balTaskPool[hash] = header
+				q.balTaskQueue.Push(header, -int64(header.Number.Uint64()))
+			}
+		}
 		// Queue for receipt retrieval
-		if (q.mode == FastSync || q.mode == SnapSync) && !header.EmptyReceipts() {
+		if (q.mode == FastSync || q.mode == SnapSync || applies) && !header.EmptyReceipts() {
 			if _, ok := q.receiptTaskPool[hash]; ok {
 				logger.Trace("Header already scheduled for receipt fetch", "number", header.Number, "hash", hash)
 			} else {
@@ -458,6 +506,7 @@ func (q *queue) Results(block bool) []*fetchResult {
 		for _, receipt := range result.Receipts {
 			size += receipt.Size()
 		}
+		size += common.StorageSize(len(result.BAL))
 		for _, tx := range result.Transactions {
 			size += tx.Size()
 		}
@@ -491,6 +540,7 @@ func (q *queue) stats() []interface{} {
 		"receiptTasks", q.receiptTaskQueue.Size(),
 		"blockTasks", q.blockTaskQueue.Size(),
 		"stakingInfoTasks", q.stakingInfoTaskQueue.Size(),
+		"balTasks", q.balTaskQueue.Size(),
 		"itemSize", q.resultSize,
 	}
 }
@@ -565,6 +615,15 @@ func (q *queue) ReserveStakingInfos(p *peerConnection, count int) (*fetchRequest
 	return q.reserveHeaders(p, count, q.stakingInfoTaskPool, q.stakingInfoTaskQueue, q.stakingInfoPendPool, stakingInfoType)
 }
 
+// ReserveBALs reserves a set of BAL fetches for the given peer, skipping any
+// previously failed downloads.
+func (q *queue) ReserveBALs(p *peerConnection, count int) (*fetchRequest, bool, bool) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	return q.reserveHeaders(p, count, q.balTaskPool, q.balTaskQueue, q.balPendPool, balType)
+}
+
 // reserveHeaders reserves a set of data download operations for a given peer,
 // skipping any previously failed ones. This method is a generic version used
 // by the individual special reservation functions.
@@ -603,7 +662,8 @@ func (q *queue) reserveHeaders(p *peerConnection, count int, taskPool map[common
 		header := h.(*types.Header)
 		// we can ask the resultCache if this header is within the
 		// "prioritized" segment of blocks. If it is not, we need to throttle
-		stale, throttle, item, err := q.resultCache.AddFetch(header, q.mode, q.proposerPolicy, q.stakingUpdateInterval, q.IsKaiaFork(header.Number))
+		_, applies := q.balTaskPool[header.Hash()]
+		stale, throttle, item, err := q.resultCache.AddFetch(header, q.mode, applies, q.proposerPolicy, q.stakingUpdateInterval, q.IsKaiaFork(header.Number))
 		if stale {
 			// Don't put back in the task queue, this item has already been
 			// delivered upstream
@@ -638,7 +698,7 @@ func (q *queue) reserveHeaders(p *peerConnection, count int, taskPool map[common
 		// Remove it from the task queue
 		taskQueue.PopItem()
 		// Otherwise unless the peer is known not to have the data, add to the retrieve list
-		if p.Lacks(header.Hash()) {
+		if p.Lacks(header.Hash()) || !q.holds(p.id, kind, header.Number.Uint64()) {
 			skip = append(skip, header)
 		} else {
 			send = append(send, header)
@@ -672,6 +732,23 @@ func (q *queue) CancelHeaders(request *fetchRequest) {
 	q.cancel(request, q.headerTaskQueue, q.headerPendPool)
 }
 
+// holds reports whether peer id holds the data kind of block number, by the
+// history it announced.
+func (q *queue) holds(id string, kind uint, number uint64) bool {
+	if q.bals == nil {
+		return true
+	}
+	switch kind {
+	case bodyType:
+		return q.bals.Holds(id, PartBody, number)
+	case receiptType:
+		return q.bals.Holds(id, PartReceipts, number)
+	case balType:
+		return q.bals.Holds(id, PartBAL, number)
+	}
+	return true
+}
+
 // CancelBodies aborts a body fetch request, returning all pending headers to the
 // task queue.
 func (q *queue) CancelBodies(request *fetchRequest) {
@@ -694,6 +771,14 @@ func (q *queue) CancelStakingInfo(request *fetchRequest) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 	q.cancel(request, q.stakingInfoTaskQueue, q.stakingInfoPendPool)
+}
+
+// CancelBALs aborts a BAL fetch request, returning all pending headers to the
+// task queue.
+func (q *queue) CancelBALs(request *fetchRequest) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+	q.cancel(request, q.balTaskQueue, q.balPendPool)
 }
 
 // Cancel aborts a fetch request, returning all pending hashes to the task queue.
@@ -734,6 +819,12 @@ func (q *queue) Revoke(peerId string) {
 		}
 		delete(q.stakingInfoPendPool, peerId)
 	}
+	if request, ok := q.balPendPool[peerId]; ok {
+		for _, header := range request.Headers {
+			q.balTaskQueue.Push(header, -int64(header.Number.Uint64()))
+		}
+		delete(q.balPendPool, peerId)
+	}
 }
 
 // ExpireHeaders checks for in flight requests that exceeded a timeout allowance,
@@ -770,6 +861,15 @@ func (q *queue) ExpireStakingInfos(timeout time.Duration) map[string]int {
 	defer q.lock.Unlock()
 
 	return q.expire(timeout, q.stakingInfoPendPool, q.stakingInfoTaskQueue, stakingInfoTimeoutMeter, nil)
+}
+
+// ExpireBALs checks for in flight BAL requests that exceeded a timeout
+// allowance, canceling them and returning the responsible peers for penalisation.
+func (q *queue) ExpireBALs(timeout time.Duration) map[string]int {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	return q.expire(timeout, q.balPendPool, q.balTaskQueue, balTimeoutMeter, nil)
 }
 
 // expire is the generic check that move expired tasks from a pending pool back
@@ -1048,6 +1148,25 @@ func (q *queue) DeliverStakingInfos(id string, stakingInfoList []*staking.P2PSta
 	return q.deliver(id, q.stakingInfoTaskPool, q.stakingInfoTaskQueue, q.stakingInfoPendPool, nil, stakingInfoReqTimer, len(stakingInfoList), validate, reconstruct)
 }
 
+// DeliverBALs injects a BAL retrieval response into the results queue. The
+// BALs are checked when their blocks are inserted.
+func (q *queue) DeliverBALs(id string, lists [][]byte) (int, error) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	validate := func(index int, header *types.Header) error {
+		if len(lists[index]) == 0 {
+			return errInvalidBAL
+		}
+		return nil
+	}
+	reconstruct := func(index int, result *fetchResult) {
+		result.BAL, result.BALPeer = lists[index], id
+		result.SetBALDone()
+	}
+	return q.deliver(id, q.balTaskPool, q.balTaskQueue, q.balPendPool, nil, balReqTimer, len(lists), validate, reconstruct)
+}
+
 // deliver injects a data retrieval response into the results queue.
 //
 // Note, this method expects the queue lock to be already held for writing. The
@@ -1143,13 +1262,14 @@ func (q *queue) deliver(id string, taskPool map[common.Hash]*types.Header, taskQ
 
 // Prepare configures the result cache to allow accepting and caching inbound
 // fetch results.
-func (q *queue) Prepare(offset uint64, mode SyncMode) {
+func (q *queue) Prepare(offset uint64, mode SyncMode, bals BALs) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 
 	// Prepare the queue for sync results
 	q.resultCache.Prepare(offset)
 	q.mode = mode
+	q.bals = bals
 }
 
 // IsKaiaFork checks if the staking info at the given block number is a Kaia block.

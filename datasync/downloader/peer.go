@@ -56,12 +56,14 @@ type peerConnection struct {
 	blockIdle       int32 // Current block activity state of the peer (idle = 0, active = 1)
 	receiptIdle     int32 // Current receipt activity state of the peer (idle = 0, active = 1)
 	stakingInfoIdle int32 // Current staking info activity state of the peer (idle = 0, active = 1)
+	balIdle         int32 // Current BAL activity state of the peer (idle = 0, active = 1)
 	stateIdle       int32 // Current node data activity state of the peer (idle = 0, active = 1)
 
 	headerThroughput      float64 // Number of headers measured to be retrievable per second
 	blockThroughput       float64 // Number of blocks (bodies) measured to be retrievable per second
 	receiptThroughput     float64 // Number of receipts measured to be retrievable per second
 	stakingInfoThroughput float64 // Number of staking info measured to be retrievable per second
+	balThroughput         float64 // Number of BALs measured to be retrievable per second
 	stateThroughput       float64 // Number of node data pieces measured to be retrievable per second
 
 	rtt time.Duration // Request round trip time to track responsiveness (QoS)
@@ -70,6 +72,7 @@ type peerConnection struct {
 	blockStarted       time.Time // Time instance when the last block (body) fetch was started
 	receiptStarted     time.Time // Time instance when the last receipt fetch was started
 	stakingInfoStarted time.Time // Time instance when the last staking info fetch was started
+	balStarted         time.Time // Time instance when the last BAL fetch was started
 	stateStarted       time.Time // Time instance when the last node data fetch was started
 
 	lacking map[common.Hash]struct{} // Set of hashes not to request (didn't have previously)
@@ -150,11 +153,13 @@ func (p *peerConnection) Reset() {
 	atomic.StoreInt32(&p.receiptIdle, 0)
 	atomic.StoreInt32(&p.stateIdle, 0)
 	atomic.StoreInt32(&p.stakingInfoIdle, 0)
+	atomic.StoreInt32(&p.balIdle, 0)
 
 	p.headerThroughput = 0
 	p.blockThroughput = 0
 	p.receiptThroughput = 0
 	p.stakingInfoThroughput = 0
+	p.balThroughput = 0
 	p.stateThroughput = 0
 
 	p.lacking = make(map[common.Hash]struct{})
@@ -244,6 +249,22 @@ func (p *peerConnection) FetchStakingInfo(request *fetchRequest) error {
 	return nil
 }
 
+// FetchBALs sends a BAL retrieval request to the remote peer with request.
+func (p *peerConnection) FetchBALs(request *fetchRequest, send func(id string, hashes []common.Hash) error) error {
+	if !atomic.CompareAndSwapInt32(&p.balIdle, 0, 1) {
+		return errAlreadyFetching
+	}
+	p.balStarted = time.Now()
+
+	hashes := make([]common.Hash, 0, len(request.Headers))
+	for _, header := range request.Headers {
+		hashes = append(hashes, header.Hash())
+	}
+	go send(p.id, hashes)
+
+	return nil
+}
+
 // FetchNodeData sends a node state data retrieval request to the remote peer.
 func (p *peerConnection) FetchNodeData(hashes []common.Hash) error {
 	// Sanity check the protocol version
@@ -294,6 +315,13 @@ func (p *peerConnection) SetReceiptsIdle(delivered int, deliveryTime time.Time) 
 // with that measured just now.
 func (p *peerConnection) SetStakingInfoIdle(delivered int, deliveryTime time.Time) {
 	p.setIdle(deliveryTime.Sub(p.stakingInfoStarted), delivered, &p.stakingInfoThroughput, &p.stakingInfoIdle)
+}
+
+// SetBALsIdle sets the peer to idle, allowing it to execute new BAL retrieval
+// requests. Its estimated BAL retrieval throughput is updated with that
+// measured just now.
+func (p *peerConnection) SetBALsIdle(delivered int, deliveryTime time.Time) {
+	p.setIdle(deliveryTime.Sub(p.balStarted), delivered, &p.balThroughput, &p.balIdle)
 }
 
 // SetNodeDataIdle sets the peer to idle, allowing it to execute new state trie
@@ -366,6 +394,15 @@ func (p *peerConnection) StakingInfoCapacity(targetRTT time.Duration) int {
 	defer p.lock.RUnlock()
 
 	return int(math.Min(1+math.Max(1, p.stakingInfoThroughput*float64(targetRTT)/float64(time.Second)), float64(MaxStakingInfoFetch)))
+}
+
+// BALCapacity retrieves the peers BAL download allowance based on its
+// previously discovered throughput.
+func (p *peerConnection) BALCapacity(targetRTT time.Duration) int {
+	p.lock.RLock()
+	defer p.lock.RUnlock()
+
+	return int(math.Min(1+math.Max(1, p.balThroughput*float64(targetRTT)/float64(time.Second)), float64(MaxBALFetch)))
 }
 
 // NodeDataCapacity retrieves the peers state download allowance based on its
@@ -457,7 +494,7 @@ func (ps *peerSet) Register(p *peerConnection) error {
 		return errAlreadyRegistered
 	}
 	if len(ps.peers) > 0 {
-		p.headerThroughput, p.blockThroughput, p.receiptThroughput, p.stakingInfoThroughput, p.stateThroughput = 0, 0, 0, 0, 0
+		p.headerThroughput, p.blockThroughput, p.receiptThroughput, p.stakingInfoThroughput, p.balThroughput, p.stateThroughput = 0, 0, 0, 0, 0, 0
 
 		for _, peer := range ps.peers {
 			peer.lock.RLock()
@@ -465,6 +502,7 @@ func (ps *peerSet) Register(p *peerConnection) error {
 			p.blockThroughput += peer.blockThroughput
 			p.receiptThroughput += peer.receiptThroughput
 			p.stakingInfoThroughput += peer.stakingInfoThroughput
+			p.balThroughput += peer.balThroughput
 			p.stateThroughput += peer.stateThroughput
 			peer.lock.RUnlock()
 		}
@@ -473,6 +511,7 @@ func (ps *peerSet) Register(p *peerConnection) error {
 		p.blockThroughput /= peerLengthFloat
 		p.receiptThroughput /= peerLengthFloat
 		p.stakingInfoThroughput /= peerLengthFloat
+		p.balThroughput /= peerLengthFloat
 		p.stateThroughput /= peerLengthFloat
 	}
 	ps.peers[p.id] = p
@@ -537,7 +576,7 @@ func (ps *peerSet) HeaderIdlePeers() ([]*peerConnection, int) {
 		defer p.lock.RUnlock()
 		return p.headerThroughput
 	}
-	return ps.idlePeers(62, 68, idleCheck, throughput)
+	return ps.idlePeers(62, maxVersion, idleCheck, throughput)
 }
 
 // BodyIdlePeers retrieves a flat list of all the currently body-idle peers within
@@ -551,7 +590,7 @@ func (ps *peerSet) BodyIdlePeers() ([]*peerConnection, int) {
 		defer p.lock.RUnlock()
 		return p.blockThroughput
 	}
-	return ps.idlePeers(62, 68, idleCheck, throughput)
+	return ps.idlePeers(62, maxVersion, idleCheck, throughput)
 }
 
 // ReceiptIdlePeers retrieves a flat list of all the currently receipt-idle peers
@@ -565,7 +604,7 @@ func (ps *peerSet) ReceiptIdlePeers() ([]*peerConnection, int) {
 		defer p.lock.RUnlock()
 		return p.receiptThroughput
 	}
-	return ps.idlePeers(63, 68, idleCheck, throughput)
+	return ps.idlePeers(63, maxVersion, idleCheck, throughput)
 }
 
 func (ps *peerSet) StakingInfoIdlePeers() ([]*peerConnection, int) {
@@ -577,7 +616,21 @@ func (ps *peerSet) StakingInfoIdlePeers() ([]*peerConnection, int) {
 		defer p.lock.RUnlock()
 		return p.stakingInfoThroughput
 	}
-	return ps.idlePeers(65, 68, idleCheck, throughput)
+	return ps.idlePeers(65, maxVersion, idleCheck, throughput)
+}
+
+// BALIdlePeers retrieves a flat list of all the currently BAL-idle kaia/69
+// peers within the active peer set, ordered by their reputation.
+func (ps *peerSet) BALIdlePeers() ([]*peerConnection, int) {
+	idleCheck := func(p *peerConnection) bool {
+		return atomic.LoadInt32(&p.balIdle) == 0
+	}
+	throughput := func(p *peerConnection) float64 {
+		p.lock.RLock()
+		defer p.lock.RUnlock()
+		return p.balThroughput
+	}
+	return ps.idlePeers(69, maxVersion, idleCheck, throughput)
 }
 
 // NodeDataIdlePeers retrieves a flat list of all the currently node-data-idle
@@ -591,10 +644,12 @@ func (ps *peerSet) NodeDataIdlePeers() ([]*peerConnection, int) {
 		defer p.lock.RUnlock()
 		return p.stateThroughput
 	}
-	return ps.idlePeers(63, 68, idleCheck, throughput)
+	return ps.idlePeers(63, maxVersion, idleCheck, throughput)
 }
 
-// TODO-Kaia-Downloader when idlePeers is called magic numbers are used for minProtocol and maxProtocol. Use a constant instead.
+// maxVersion is the last protocol version the downloader fetches with.
+const maxVersion = 69
+
 // idlePeers retrieves a flat list of all currently idle peers satisfying the
 // protocol version constraints, using the provided function to check idleness.
 // The resulting set of peers are sorted by their measure throughput.

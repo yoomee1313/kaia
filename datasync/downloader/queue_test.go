@@ -118,7 +118,7 @@ func newBodyDeliveryQueue(t *testing.T, id string) (*queue, *peerConnection, *fe
 	t.Helper()
 
 	q := newQueue(50, 50, uint64(istanbul.WeightedRandom), params.TestChainConfig)
-	q.Prepare(1, FullSync)
+	q.Prepare(1, FullSync, nil)
 	q.Schedule(chain.headers()[:12], 1)
 
 	peer := dummyPeer(id)
@@ -141,7 +141,7 @@ func newReceiptDeliveryQueue(t *testing.T, id string) (*queue, *peerConnection, 
 	t.Helper()
 
 	q := newQueue(50, 50, uint64(istanbul.WeightedRandom), params.TestChainConfig)
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	headers := make([]*types.Header, 12)
 	for i, header := range chain.headers()[:12] {
 		headers[i] = types.CopyHeader(header)
@@ -487,7 +487,7 @@ func TestBasics(t *testing.T) {
 	if !q.Idle() {
 		t.Errorf("new queue should be idle")
 	}
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	if res := q.Results(false); len(res) != 0 {
 		t.Fatal("new queue should have 0 results")
 	}
@@ -624,7 +624,7 @@ func TestScheduleAfterKaia(t *testing.T) {
 	if !q.Idle() {
 		t.Errorf("new queue should be idle")
 	}
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	if res := q.Results(false); len(res) != 0 {
 		t.Fatal("new queue should have 0 results")
 	}
@@ -665,7 +665,7 @@ func TestEmptyBlocks(t *testing.T) {
 
 	q := newQueue(10, 10, uint64(istanbul.WeightedRandom), config)
 
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	// Schedule a batch of headers
 	q.Schedule(emptyChain.headers(), 1)
 	if q.Idle() {
@@ -773,7 +773,7 @@ func XTestDelivery(t *testing.T) {
 	}
 	q := newQueue(10, 10, uint64(istanbul.WeightedRandom), nil)
 	var wg sync.WaitGroup
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	wg.Go(func() {
 		// deliver headers
 		c := 1
@@ -945,7 +945,7 @@ func newStakingInfoQueue(t *testing.T) *queue {
 	config.KaiaCompatibleBlock = nil
 
 	q := newQueue(50, 50, uint64(istanbul.WeightedRandom), config)
-	q.Prepare(1, FastSync)
+	q.Prepare(1, FastSync, nil)
 	q.Schedule(chain.headers(), 1)
 
 	fetchReq, _, _ := q.ReserveStakingInfos(dummyPeer("peer-1"), 2)

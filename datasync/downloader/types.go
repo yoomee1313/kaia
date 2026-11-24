@@ -89,3 +89,13 @@ type stakingInfoPack struct {
 func (p *stakingInfoPack) PeerId() string { return p.peerId }
 func (p *stakingInfoPack) Items() int     { return len(p.stakingInfos) }
 func (p *stakingInfoPack) Stats() string  { return strconv.Itoa(len(p.stakingInfos)) }
+
+// balPack is a batch of block access lists returned by a peer.
+type balPack struct {
+	peerId string
+	lists  [][]byte
+}
+
+func (p *balPack) PeerId() string { return p.peerId }
+func (p *balPack) Items() int     { return len(p.lists) }
+func (p *balPack) Stats() string  { return strconv.Itoa(len(p.lists)) }

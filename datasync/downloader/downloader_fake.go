@@ -49,6 +49,8 @@ func (*FakeDownloader) DeliverReceipts(id string, receipts [][]*types.Receipt) e
 func (*FakeDownloader) DeliverStakingInfos(id string, stakingInfos []*staking.P2PStakingInfo) error {
 	return nil
 }
+func (*FakeDownloader) DeliverBALs(id string, lists [][]byte) error { return nil }
+func (*FakeDownloader) SetBALs(bals BALs)                           {}
 func (*FakeDownloader) DeliverSnapPacket(peer *snap.Peer, packet snap.Packet) error {
 	return nil
 }

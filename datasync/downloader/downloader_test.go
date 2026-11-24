@@ -23,6 +23,7 @@
 package downloader
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -481,6 +482,11 @@ func (dl *downloadTester) InsertHeaderChain(headers []*types.Header, checkFreq i
 		dl.ownChainTd[hash] = new(big.Int).Add(dl.ownChainTd[header.ParentHash], header.BlockScore)
 	}
 	return len(headers), nil
+}
+
+// InsertChainContext injects a new batch of blocks into the simulated chain.
+func (dl *downloadTester) InsertChainContext(ctx context.Context, blocks types.Blocks, receipts []types.Receipts) (int, error) {
+	return dl.InsertChain(blocks)
 }
 
 // InsertChain injects a new batch of blocks into the simulated chain.

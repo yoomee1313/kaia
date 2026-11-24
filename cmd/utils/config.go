@@ -813,6 +813,8 @@ func (kCfg *KaiaConfig) SetKaiaConfig(ctx *cli.Context, stack *node.Node) {
 		cfg.SnapshotCacheSize = 0 // snapshot disabled
 	}
 	cfg.BALSkipReads = ctx.Bool(BALSkipReadsFlag.Name)
+	cfg.SyncApplyBALs = cfg.HistoryMode == database.HistoryModeBAL && !ctx.Bool(SyncExecuteFlag.Name)
+	cfg.BALHashChain = ctx.String(BALHashChainFlag.Name)
 
 	// disable unsafe debug APIs
 	cfg.DisableUnsafeDebug = ctx.Bool(UnsafeDebugDisableFlag.Name)

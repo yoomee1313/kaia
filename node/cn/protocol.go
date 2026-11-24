@@ -28,6 +28,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/kaiachain/kaia/datasync/balsync"
+
 	"github.com/kaiachain/kaia"
 	"github.com/kaiachain/kaia/blockchain/types"
 	"github.com/kaiachain/kaia/common"
@@ -46,6 +48,7 @@ const (
 	kaia66 = 66
 	kaia67 = 67
 	kaia68 = 68
+	kaia69 = balsync.SyncVersion
 )
 
 // Protocol defines the P2P protocol metadata used during capability negotiation.
@@ -61,8 +64,8 @@ type Protocol struct {
 // ConsensusProtocol is the P2P protocol used by BFT consensus nodes.
 var ConsensusProtocol = Protocol{
 	Name:     "istanbul",
-	Versions: []uint{kaia68, kaia67, kaia66, kaia65, kaia64},
-	Lengths:  []uint64{28, 26, 24, 23, 21},
+	Versions: []uint{kaia69, kaia68, kaia67, kaia66, kaia65, kaia64},
+	Lengths:  []uint64{38, 28, 26, 24, 23, 21},
 }
 
 const (
@@ -112,7 +115,11 @@ const (
 	VRankPreprepareMsg = 0x17
 	VRankCandidateMsg  = 0x18
 
-	MsgCodeEnd = 0x19
+	// Protocol messages belonging to kaia/69, see balsync.Sync
+	HistoryRangeMsg = balsync.HistoryRangeMsg
+	BlocksMsg       = balsync.BlocksMsg
+
+	MsgCodeEnd = 0x21
 )
 
 type errCode int
@@ -168,6 +175,8 @@ type ProtocolManagerDownloader interface {
 	DeliverNodeData(id string, data [][]byte) error
 	DeliverReceipts(id string, receipts [][]*types.Receipt) error
 	DeliverStakingInfos(id string, stakingInfos []*staking.P2PStakingInfo) error
+	DeliverBALs(id string, lists [][]byte) error
+	SetBALs(bals downloader.BALs)
 	DeliverSnapPacket(peer *snap.Peer, packet snap.Packet) error
 
 	Terminate()
@@ -202,7 +211,8 @@ type statusData struct {
 	TD              *big.Int
 	CurrentBlock    common.Hash
 	GenesisBlock    common.Hash
-	ChainID         *big.Int // ChainID to sign a transaction.
+	ChainID         *big.Int              // ChainID to sign a transaction.
+	History         *balsync.HistoryRange `rlp:"optional"`
 }
 
 // newBlockHashesData is the network packet for the block announcements.
