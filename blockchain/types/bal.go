@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/kaiachain/kaia/common"
 	"github.com/kaiachain/kaia/crypto"
@@ -334,6 +335,36 @@ func (a *AccountChanges) Reset() (from uint32, cleared, deleted bool) {
 		from, cleared = a.StorageCleared[n-1], true
 	}
 	return from, cleared, false
+}
+
+// Before returns the changes of the account made in indices below k: the
+// state at the start of index k is the parent state with these applied. Reads
+// and the storage root are left out.
+func (a AccountChanges) Before(k uint32) AccountChanges {
+	out := AccountChanges{Address: a.Address}
+	for _, sc := range a.StorageChanges {
+		changes := before(sc.Changes, k, func(c StorageChange) uint32 { return c.BlockAccessIndex })
+		if len(changes) > 0 {
+			out.StorageChanges = append(out.StorageChanges, SlotChanges{Slot: sc.Slot, Changes: changes})
+		}
+	}
+	out.BalanceChanges = before(a.BalanceChanges, k, func(c BalanceChange) uint32 { return c.BlockAccessIndex })
+	out.NonceChanges = before(a.NonceChanges, k, func(c NonceChange) uint32 { return c.BlockAccessIndex })
+	out.CodeChanges = before(a.CodeChanges, k, func(c CodeChange) uint32 { return c.BlockAccessIndex })
+	out.AccountRecords = before(a.AccountRecords, k, func(c AccountRecord) uint32 { return c.BlockAccessIndex })
+	out.Deleted = before(a.Deleted, k, func(i uint32) uint32 { return i })
+	out.StorageCleared = before(a.StorageCleared, k, func(i uint32) uint32 { return i })
+	return out
+}
+
+// before returns the leading entries of list, sorted by index, whose index is
+// below k.
+func before[T any](list []T, k uint32, index func(T) uint32) []T {
+	n := sort.Search(len(list), func(i int) bool { return index(list[i]) >= k })
+	if n == 0 {
+		return nil
+	}
+	return list[:n:n]
 }
 
 // LastWriteIndex returns the highest index of any recorded write to the account

@@ -793,6 +793,21 @@ func Apply(w Writer, list *types.BlockAccessList) error {
 	return nil
 }
 
+// ApplyBALBefore writes the values of the indices below k of a block access
+// list to s, which holds the parent state of the block, and finalises them
+// like the end of a tx: s then holds the state at the start of index k. Index
+// 0 is InitializeState and index i+1 the i-th tx.
+func ApplyBALBefore(s *StateDB, list *types.BlockAccessList, k int) error {
+	for i := range list.Accounts {
+		a := list.Accounts[i].Before(uint32(k))
+		if err := applyAccount(s, &a); err != nil {
+			return fmt.Errorf("account %s: %w", a.Address.Hex(), err)
+		}
+	}
+	s.Finalise(true, true)
+	return nil
+}
+
 // CheckStorageRoots checks the storage roots a list was recorded with against
 // w, once its storage roots are computed.
 func CheckStorageRoots(w Writer, list *types.BlockAccessList) error {

@@ -179,6 +179,21 @@ func (cn *CN) liveStateAt(header *types.Header) (*state.StateDB, tracers.StateRe
 	return statedb, func() { trieDB.Dereference(root) }, nil
 }
 
+// blockAccessList returns the stored block access list of block, or nil if
+// there is none.
+func (cn *CN) blockAccessList(block *types.Block) *types.BlockAccessList {
+	enc := cn.chainDB.ReadBAL(block.Hash(), block.NumberU64())
+	if enc == nil {
+		return nil
+	}
+	list, err := types.DecodeBAL(enc)
+	if err != nil {
+		logger.Warn("Cannot decode the stored block access list", "number", block.NumberU64(), "hash", block.Hash(), "err", err)
+		return nil
+	}
+	return list
+}
+
 // stateAtTransaction returns the execution environment of a certain transaction.
 func (cn *CN) stateAtTransaction(block *types.Block, txIndex int, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (blockchain.Message, vm.BlockContext, vm.TxContext, *state.StateDB, tracers.StateReleaseFunc, error) {
 	// Short circuit if it's genesis block.
@@ -195,6 +210,28 @@ func (cn *CN) stateAtTransaction(block *types.Block, txIndex int, reexec uint64,
 	statedb, release, err := cn.stateAtBlock(parent, reexec, base, readOnly, preferDisk)
 	if err != nil {
 		return nil, vm.BlockContext{}, vm.TxContext{}, nil, nil, err
+	}
+	// The block access list holds the value of every changed field at the end
+	// of every index, so the state at the start of the tx is the parent state
+	// with InitializeState and the earlier txs applied from it, without
+	// executing them.
+	if txIndex > 0 && txIndex < len(block.Transactions()) {
+		if list := cn.blockAccessList(block); list != nil {
+			if err := state.ApplyBALBefore(statedb, list, txIndex+1); err != nil {
+				release()
+				return nil, vm.BlockContext{}, vm.TxContext{}, nil, nil, fmt.Errorf("cannot apply the block access list before tx %d: %w", txIndex, err)
+			}
+			tx := block.Transactions()[txIndex]
+			signer := types.MakeSigner(cn.blockchain.Config(), block.Number())
+			msg, err := tx.AsMessageWithAccountKeyPicker(signer, statedb, block.NumberU64())
+			if err != nil {
+				release()
+				return nil, vm.BlockContext{}, vm.TxContext{}, nil, nil, fmt.Errorf("transaction %#x failed: %v", tx.Hash(), err)
+			}
+			txContext := blockchain.NewEVMTxContext(msg, block.Header(), cn.chainConfig)
+			blockContext := blockchain.NewEVMBlockContext(block.Header(), cn.blockchain, nil)
+			return msg, blockContext, txContext, statedb, release, nil
+		}
 	}
 	// If prague hardfork, insert parent block hash in the state as per EIP-2935.
 	if err := cn.blockchain.Processor().InitializeState(block.Header(), statedb); err != nil {
